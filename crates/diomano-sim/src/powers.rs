@@ -12,9 +12,10 @@
 
 use crate::world::{
     Command, HAND_CAPACITY, HAND_EARTH, HAND_LAVA, HAND_WATER, HEIGHT_MAX, HEIGHT_MIN, MAT_ASH,
-    MAT_SWAMP, MapConfig, N, POWER_COUNT, TERRACE, TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA,
-    TERRAIN_VOLCANO, VERB_ARMAGEDDON, VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER,
-    VERB_MAGNET, VERB_RAISE, VERB_SET_HAND, VERB_SWAMP, VERB_VOLCANO, World, idx, verb_power, walk,
+    MAT_SWAMP, MAX_PICKUPS, MapConfig, N, PICKUP_ALIVE, PLAYERS, POWER_COUNT, Pickup, TERRACE,
+    TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, TERRAIN_VOLCANO, VERB_ARMAGEDDON, VERB_CHAMPION,
+    VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_RAISE, VERB_SET_HAND, VERB_SWAMP,
+    VERB_VOLCANO, World, idx, verb_power, walk,
 };
 
 /// Apply one command.
@@ -31,9 +32,18 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         if w.cfg.power_enabled[power] == 0 {
             return;
         }
-        let cost = i32::from(w.cfg.power_cost[power]);
-        if cost > 0 && !w.spend_mana(player, cost) {
-            return;
+        // A collected pickup pays for exactly one use, before mana is consulted
+        // (§5.3 "free single-use powers"). Spending the charge on a power you
+        // could have afforded anyway is the player's business; picking which to
+        // spend it on is the interesting decision, and doing it automatically
+        // would take that decision away.
+        if w.free_uses[player][power] > 0 {
+            w.free_uses[player][power] -= 1;
+        } else {
+            let cost = i32::from(w.cfg.power_cost[power]);
+            if cost > 0 && !w.spend_mana(player, cost) {
+                return;
+            }
         }
     }
 
@@ -210,6 +220,124 @@ fn volcano(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
             w.water[c] = 0;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// One-shot pickups (HANDOFF §5.3)
+// ---------------------------------------------------------------------------
+
+/// Ticks between spawn attempts. `[START]` 900 — one every 30 seconds, which is
+/// the same cadence as a tide recovery window, so a pickup and a rebuild phase
+/// arrive together.
+pub const PICKUP_INTERVAL: u32 = 900;
+/// How many may lie on the terrain at once. `[START]`.
+pub const PICKUP_MAX_ACTIVE: usize = 4;
+
+/// Spawn and collect one-shot pickups (§4.1 pass 8a).
+pub fn pickups_step(w: &mut World) {
+    collect_pickups(w);
+    if w.tick > 0 && w.tick.is_multiple_of(PICKUP_INTERVAL) {
+        spawn_pickup(w);
+    }
+}
+
+/// A walker standing on a pickup takes it for its owner.
+///
+/// Walkers are visited in id order and pickups in slot order, so which walker
+/// gets a contested pickup is a function of state alone.
+fn collect_pickups(w: &mut World) {
+    for slot in 0..MAX_PICKUPS {
+        let p = w.pickups[slot];
+        if !p.alive() {
+            continue;
+        }
+        let cell = idx(p.face as usize, p.x as usize, p.y as usize);
+        let Some(taker) =
+            w.walkers.iter().find(|k| k.alive() && crate::walkers::cell_of(k) == cell)
+        else {
+            continue;
+        };
+        let owner = (taker.owner as usize) % PLAYERS;
+        let power = (p.power as usize).min(POWER_COUNT - 1);
+        w.free_uses[owner][power] = w.free_uses[owner][power].saturating_add(1);
+        w.pickups[slot] = Pickup::default();
+    }
+}
+
+/// Place a pickup on ground nobody holds.
+///
+/// Neutral ground is the whole point: a pickup inside your own influence is a
+/// gift, and one outside it costs a magnet placement to reach. That is what
+/// makes it a contested object rather than a race won by proximity.
+fn spawn_pickup(w: &mut World) {
+    let active = w.pickups.iter().filter(|p| p.alive()).count();
+    if active >= PICKUP_MAX_ACTIVE {
+        return;
+    }
+    let Some(slot) = w.pickups.iter().position(|p| !p.alive()) else {
+        return;
+    };
+
+    // Two scans rather than a reservoir sample: the second scan is the same
+    // deterministic walk as the first, so the choice depends only on the PRNG
+    // draw and the world, and every candidate is equally likely.
+    let mut candidates = 0u32;
+    for face in 0..6usize {
+        for y in 0..N {
+            for x in 0..N {
+                if is_pickup_site(w, idx(face, x, y)) {
+                    candidates += 1;
+                }
+            }
+        }
+    }
+    if candidates == 0 {
+        return;
+    }
+    let target = w.rng.below(candidates);
+
+    // Which power. Only ones the map actually enables, and never raise/lower —
+    // that verb is free already, so a charge for it would be no reward at all.
+    let mut pool = [0u8; POWER_COUNT];
+    let mut pool_len = 0usize;
+    for power in 1..POWER_COUNT {
+        if w.cfg.power_enabled[power] != 0 {
+            pool[pool_len] = power as u8;
+            pool_len += 1;
+        }
+    }
+    if pool_len == 0 {
+        return;
+    }
+    let power = pool[w.rng.below(pool_len as u32) as usize];
+
+    let mut seen = 0u32;
+    for face in 0..6usize {
+        for y in 0..N {
+            for x in 0..N {
+                if !is_pickup_site(w, idx(face, x, y)) {
+                    continue;
+                }
+                if seen == target {
+                    w.pickups[slot] = Pickup {
+                        face: face as u8,
+                        x: x as u8,
+                        y: y as u8,
+                        power,
+                        flags: PICKUP_ALIVE,
+                        _pad: [0; 3],
+                    };
+                    return;
+                }
+                seen += 1;
+            }
+        }
+    }
+}
+
+/// Dry, walkable, and claimed by nobody.
+fn is_pickup_site(w: &World, c: usize) -> bool {
+    w.influence[c] == 0 && w.passable(c) && w.settle_of[c] == crate::world::NO_SETTLEMENT
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +864,92 @@ enabled = true
         assert!(parse_log_command("c 1 2").is_none());
         assert!(parse_log_command("c 1 2 3 4 5 6 7 8").is_none());
         assert_eq!(parse_log_command("c 0 0 0 0 0 0 0").unwrap().verb, VERB_NOP);
+    }
+
+    #[test]
+    fn a_pickup_pays_for_exactly_one_use_and_then_stops() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        w.init(&cfg);
+        w.mana[0] = 0;
+        w.free_uses[0][crate::world::POWER_VOLCANO] = 1;
+
+        let cmd =
+            Command { tick: 0, x: 20, y: 20, player: 0, verb: VERB_VOLCANO, face: 4, modifier: 0 };
+        apply(&mut w, 0, &cmd);
+        assert!(w.lava[idx(4, 20, 20)] > 0, "the free use did not fire");
+        assert_eq!(w.free_uses[0][crate::world::POWER_VOLCANO], 0, "the charge was not spent");
+        assert_eq!(w.mana[0], 0, "a free use still charged mana");
+
+        // Second attempt, no charge and no mana: nothing happens.
+        w.lava[idx(4, 30, 30)] = 0;
+        apply(
+            &mut w,
+            0,
+            &Command { tick: 1, x: 30, y: 30, player: 0, verb: VERB_VOLCANO, face: 4, modifier: 0 },
+        );
+        assert_eq!(w.lava[idx(4, 30, 30)], 0, "a second use was free too");
+    }
+
+    #[test]
+    fn pickups_appear_only_on_ground_nobody_holds() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        cfg.seed = 31;
+        w.init(&cfg);
+
+        let mut spawned = 0usize;
+        for tick in 0..(PICKUP_INTERVAL * (PICKUP_MAX_ACTIVE as u32 + 2)) {
+            w.tick = tick;
+            pickups_step(&mut w);
+            spawned = w.pickups.iter().filter(|p| p.alive()).count();
+        }
+        assert!(spawned > 0, "no pickup ever appeared");
+        assert!(spawned <= PICKUP_MAX_ACTIVE, "{spawned} pickups exceed the cap");
+
+        for p in w.pickups.iter().filter(|p| p.alive()) {
+            let c = idx(p.face as usize, p.x as usize, p.y as usize);
+            assert_eq!(w.influence[c], 0, "a pickup landed inside somebody's influence");
+            assert!(w.passable(c), "a pickup landed somewhere unreachable");
+            assert_ne!(
+                p.power as usize,
+                crate::world::POWER_RAISE_LOWER,
+                "a pickup granted a free use of a verb that is already free"
+            );
+            assert_eq!(w.cfg.power_enabled[p.power as usize], 1, "a disabled power was granted");
+        }
+    }
+
+    #[test]
+    fn a_walker_standing_on_a_pickup_collects_it() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        w.init(&cfg);
+        for p in &mut w.pickups {
+            *p = Pickup::default();
+        }
+        w.free_uses = [[0; POWER_COUNT]; PLAYERS];
+
+        w.pickups[0] = Pickup {
+            face: 4,
+            x: 20,
+            y: 20,
+            power: crate::world::POWER_EARTHQUAKE as u8,
+            flags: PICKUP_ALIVE,
+            _pad: [0; 3],
+        };
+        // Nobody standing on it yet.
+        pickups_step(&mut w);
+        assert!(w.pickups[0].alive(), "an unattended pickup vanished");
+
+        crate::walkers::spawn(&mut w, 1, 4, 20, 20, 2, crate::world::NO_SETTLEMENT).unwrap();
+        pickups_step(&mut w);
+        assert!(!w.pickups[0].alive(), "the walker did not take the pickup");
+        assert_eq!(w.free_uses[1][crate::world::POWER_EARTHQUAKE], 1);
+        assert_eq!(w.free_uses[0][crate::world::POWER_EARTHQUAKE], 0, "the wrong god was paid");
     }
 
     #[test]

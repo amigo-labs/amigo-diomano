@@ -118,6 +118,8 @@ pub const fn mat_bit(m: u8) -> u32 {
 pub const WALKERS_PER_PLAYER: usize = 512;
 pub const MAX_WALKERS: usize = WALKERS_PER_PLAYER * 2;
 pub const MAX_SETTLEMENTS: usize = 256;
+/// One-shot pickups lying on the terrain at once (§5.3).
+pub const MAX_PICKUPS: usize = 16;
 pub const MAX_WAVES: usize = 16;
 pub const PLAYERS: usize = 2;
 /// Sentinel for "no settlement occupies this cell".
@@ -272,6 +274,35 @@ pub const TIER_POP: [u8; 5] = [0, 2, 5, 10, 18];
 pub const TIER_STRENGTH: [u8; 5] = [0, 1, 2, 4, 7];
 /// Build progress needed to reach each tier.
 pub const TIER_THRESHOLD: [i32; 5] = [0, 60, 200, 480, 900];
+
+pub const PICKUP_ALIVE: u8 = 1 << 0;
+
+/// A free single-use power lying on the terrain (§5.3).
+///
+/// A contested map object: it sits on ground nobody holds, and walkers do not
+/// leave their own influence without a magnet (§4.5) — so collecting one costs
+/// a deliberate magnet placement, which is the only command in the game. That
+/// is what makes it excellent in a duel rather than a pickup that whoever
+/// happens to be nearest gets for free.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pickup {
+    pub face: u8,
+    pub x: u8,
+    pub y: u8,
+    /// Index into [`MapConfig::power_enabled`].
+    pub power: u8,
+    pub flags: u8,
+    pub _pad: [u8; 3],
+}
+
+impl Pickup {
+    #[inline]
+    #[must_use]
+    pub const fn alive(&self) -> bool {
+        self.flags & PICKUP_ALIVE != 0
+    }
+}
 
 /// The papal magnet: the only command in the game (§5.1).
 #[repr(C)]
@@ -542,6 +573,7 @@ pub struct World {
     // --- entities ---
     pub walkers: [Walker; MAX_WALKERS],
     pub settlements: [Settlement; MAX_SETTLEMENTS],
+    pub pickups: [Pickup; MAX_PICKUPS],
 
     // --- scalars ---
     pub cfg: MapConfig,
@@ -551,6 +583,8 @@ pub struct World {
     pub hand: [Hand; PLAYERS],
     /// Q16.16.
     pub mana: [i32; PLAYERS],
+    /// Free single-use charges collected from pickups, per power.
+    pub free_uses: [[u8; POWER_COUNT]; PLAYERS],
     pub walker_count: [u16; PLAYERS],
     pub settlement_count: u16,
     pub score: [[u16; MAX_WAVES]; PLAYERS],
@@ -618,6 +652,8 @@ impl World {
                 pop: 0,
                 flags: 0,
             }; MAX_SETTLEMENTS],
+            pickups: [Pickup { face: 0, x: 0, y: 0, power: 0, flags: 0, _pad: [0; 3] };
+                MAX_PICKUPS],
             cfg: MapConfig::DEFAULT,
             tide: TideState {
                 phase: 0,
@@ -641,6 +677,7 @@ impl World {
             magnet: [Magnet { face: 0, x: 0, y: 0, active: 0, leader: u16::MAX, _pad: 0 }; PLAYERS],
             hand: [Hand { material: HAND_EARTH, _pad: 0, amount: 0 }; PLAYERS],
             mana: [0; PLAYERS],
+            free_uses: [[0; POWER_COUNT]; PLAYERS],
             walker_count: [0; PLAYERS],
             settlement_count: 0,
             score: [[0; MAX_WAVES]; PLAYERS],
@@ -1053,8 +1090,21 @@ impl World {
             h.write_u8(s.owner);
             h.write_u8(s.pop);
         }
+        for p in &self.pickups {
+            h.write_u8(p.flags);
+            if !p.alive() {
+                continue;
+            }
+            h.write_u8(p.face);
+            h.write_u8(p.x);
+            h.write_u8(p.y);
+            h.write_u8(p.power);
+        }
         for p in 0..PLAYERS {
             h.write_i32(self.mana[p]);
+            for &n in &self.free_uses[p] {
+                h.write_u8(n);
+            }
             h.write_u16(self.walker_count[p]);
             h.write_u8(self.hand[p].material);
             h.write_u16(self.hand[p].amount);
@@ -1114,6 +1164,11 @@ impl World {
         materials::vegetation(self);
         // 8. walkers: movement (fixed walker-id order)
         walkers::movement(self);
+        // 8a. one-shot pickups: spawn and collect (§5.3). Immediately after
+        // movement, because it is a query over walker positions and running it
+        // before combat means a walker that dies this tick still collected what
+        // it stood on.
+        powers::pickups_step(self);
         // 9. walkers: combat resolution (§4.7)
         combat::resolve(self);
         // 10. settlements: build / decay

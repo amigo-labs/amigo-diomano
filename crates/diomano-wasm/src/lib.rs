@@ -27,7 +27,9 @@
 #![allow(clippy::missing_safety_doc)]
 
 use diomano_sim::mesh::{self, Mesh};
-use diomano_sim::world::{Command, CommandBuf, MapConfig, PLAYERS, Settlement, Walker, World};
+use diomano_sim::world::{
+    Command, CommandBuf, MapConfig, PLAYERS, Pickup, Settlement, Walker, World,
+};
 use diomano_sim::{powers, tide};
 
 #[cfg(target_arch = "wasm32")]
@@ -175,6 +177,11 @@ pub extern "C" fn dio_settlements_ptr() -> *const Settlement {
     world().settlements.as_ptr()
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_pickups_ptr() -> *const Pickup {
+    world().pickups.as_ptr()
+}
+
 // ---------------------------------------------------------------------------
 // Mesh pointers
 // ---------------------------------------------------------------------------
@@ -215,6 +222,12 @@ pub extern "C" fn dio_mesh_dirty_ptr() -> *const u8 {
     mesh_buf().dirty.as_ptr()
 }
 
+/// One byte per chunk: 1 where the chunk contains any water.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_mesh_water_present_ptr() -> *const u8 {
+    mesh_buf().water_present.as_ptr()
+}
+
 // ---------------------------------------------------------------------------
 // Layout constants
 //
@@ -236,6 +249,8 @@ konst!(dio_grid_stride, diomano_sim::world::S);
 konst!(dio_cell_count, diomano_sim::world::CELLS);
 konst!(dio_max_walkers, diomano_sim::world::MAX_WALKERS);
 konst!(dio_max_settlements, diomano_sim::world::MAX_SETTLEMENTS);
+konst!(dio_max_pickups, diomano_sim::world::MAX_PICKUPS);
+konst!(dio_pickup_stride, core::mem::size_of::<Pickup>());
 konst!(dio_walker_stride, core::mem::size_of::<Walker>());
 konst!(dio_settlement_stride, core::mem::size_of::<Settlement>());
 konst!(dio_chunk_cells, mesh::CHUNK);
@@ -324,6 +339,15 @@ pub extern "C" fn dio_magnet_face(player: u32) -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_magnet_x(player: u32) -> u32 {
     u32::from(world().magnet[(player as usize) % PLAYERS].x)
+}
+
+/// Free single-use charges collected from pickups (§5.3).
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_free_uses(player: u32, power: u32) -> u32 {
+    let w = world();
+    let p = (player as usize) % PLAYERS;
+    let k = (power as usize).min(diomano_sim::world::POWER_COUNT - 1);
+    u32::from(w.free_uses[p][k])
 }
 
 #[unsafe(no_mangle)]
