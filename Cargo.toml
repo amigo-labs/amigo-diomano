@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/diomano-sim", "crates/diomano-wasm", "crates/diomano-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/amigo-labs/amigo-diomano"
+
+[workspace.dependencies]
+# `default-features = false` here so each consumer opts in explicitly; the wasm
+# shell must not get `alloc`, or an allocator would be linked and linear memory
+# could grow, detaching every typed-array view on the TypeScript side (§9.3).
+diomano-sim = { path = "crates/diomano-sim", default-features = false }
+
+# Determinism: overflow-checks are ON in every profile so that debug and release
+# agree bit-for-bit (HANDOFF §10 "Explicit overflow semantics"). A panic is a
+# deterministic outcome; a silent wrap in release only is not.
+[profile.dev]
+overflow-checks = true
+
+# The simulation is the only thing that needs to be fast in dev builds, and the
+# acceptance command `cargo run -p diomano-cli -- perf` uses the dev profile.
+[profile.dev.package.diomano-sim]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+overflow-checks = true
+strip = true
+
+# `cargo test --release` must still work, so panic=abort is applied only to the
+# wasm cdylib via its own RUSTFLAGS in the justfile, never workspace-wide.

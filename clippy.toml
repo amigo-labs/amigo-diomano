@@ -1,0 +1,12 @@
+# Determinism guard rails (HANDOFF §10). Enforced by
+# `cargo clippy --workspace --all-targets -- -D warnings`.
+#
+# clippy.toml is workspace-scoped, so the two wall-clock types are listed here
+# even though diomano-cli's perf harness legitimately needs them; that one call
+# site carries an explicit `#[expect(clippy::disallowed_types)]`.
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "RandomState seeds per process; iteration order is not reproducible (HANDOFF §10). Use BTreeMap or an index array." },
+  { path = "std::collections::HashSet", reason = "RandomState seeds per process; iteration order is not reproducible (HANDOFF §10). Use BTreeSet or a bitset." },
+  { path = "std::time::Instant", reason = "No wall-clock time in the simulation (HANDOFF §10). Permitted only in the perf harness." },
+  { path = "std::time::SystemTime", reason = "No wall-clock time in the simulation (HANDOFF §10)." },
+]

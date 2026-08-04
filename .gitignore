@@ -1,0 +1,7 @@
+/target
+node_modules
+web/dist
+web/public/diomano.wasm
+web/public/*.wasm
+*.log.tmp
+.DS_Store
