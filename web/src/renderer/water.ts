@@ -146,54 +146,80 @@ export function createWater(sim: Sim): Water {
     },
   });
 
-  const sharedIndex = new THREE.BufferAttribute(sim.meshIndices, 1);
-  const attributes: { position: THREE.BufferAttribute; attrib: THREE.BufferAttribute }[] = [];
+  // One geometry for the whole ocean, same reasoning as `planet.ts`: 96 water
+  // chunks would spend two thirds of the §7.3 draw-call budget on a surface
+  // that is one material and one shader.
+  //
+  // The index buffer covers only chunks that actually hold water. Rust
+  // publishes that per chunk, and on a land-heavy map it removes most of the
+  // ocean's triangles rather than relying on the fragment shader to discard
+  // them after rasterising. It is rebuilt only when the wet set changes, which
+  // on a normal map is a handful of times per tide cycle.
+  const geometry = new THREE.BufferGeometry();
+  const position = new THREE.BufferAttribute(sim.waterPositions, 3);
+  const attrib = new THREE.BufferAttribute(sim.waterAttribs, 4, true);
+  position.setUsage(THREE.DynamicDrawUsage);
+  attrib.setUsage(THREE.DynamicDrawUsage);
+  geometry.setAttribute("position", position);
+  // The resting surface normal is the outward radial, which is the normalised
+  // position; the tier-2 ripple perturbs it in the shader. A separate normal
+  // buffer would be another 400 KB for something the shader recomputes anyway.
+  geometry.setAttribute("normal", position);
+  geometry.setAttribute("attrib", attrib);
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), BASE_RADIUS * 3);
 
-  for (let chunk = 0; chunk < sim.chunks; chunk++) {
-    const v0 = chunk * sim.vertsPerChunk;
-    const geometry = new THREE.BufferGeometry();
-    const position = new THREE.BufferAttribute(
-      sim.waterPositions.subarray(v0 * 3, (v0 + sim.vertsPerChunk) * 3),
-      3,
-    );
-    const attrib = new THREE.BufferAttribute(
-      sim.waterAttribs.subarray(v0 * 4, (v0 + sim.vertsPerChunk) * 4),
-      4,
-      true,
-    );
-    // The surface normal is the outward radial for a body of water at rest, and
-    // the tier-2 ripple perturbs it in the shader; a per-vertex normal buffer
-    // would be another 400 KB for something the shader recomputes anyway.
-    const normal = new THREE.BufferAttribute(
-      sim.waterPositions.subarray(v0 * 3, (v0 + sim.vertsPerChunk) * 3),
-      3,
-    );
-    position.setUsage(THREE.DynamicDrawUsage);
-    attrib.setUsage(THREE.DynamicDrawUsage);
+  const indices = new Uint32Array(sim.chunks * sim.indicesPerChunk);
+  const indexAttribute = new THREE.BufferAttribute(indices, 1);
+  indexAttribute.setUsage(THREE.DynamicDrawUsage);
+  geometry.setIndex(indexAttribute);
 
-    geometry.setAttribute("position", position);
-    geometry.setAttribute("normal", normal);
-    geometry.setAttribute("attrib", attrib);
-    geometry.setIndex(sharedIndex);
-    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), BASE_RADIUS * 3);
+  let wetSignature = "";
+  const rebuildIndices = (): void => {
+    let signature = "";
+    for (let chunk = 0; chunk < sim.chunks; chunk++) {
+      signature += sim.meshWaterPresent[chunk] ? "1" : "0";
+    }
+    if (signature === wetSignature) return;
+    wetSignature = signature;
 
-    attributes.push({ position, attrib });
-    const mesh = new THREE.Mesh(geometry, material);
-    // Drawn after the terrain so the transparent surface blends over it.
-    mesh.renderOrder = 1;
-    group.add(mesh);
-  }
+    let out = 0;
+    for (let chunk = 0; chunk < sim.chunks; chunk++) {
+      if (sim.meshWaterPresent[chunk] === 0) continue;
+      const base = chunk * sim.vertsPerChunk;
+      for (let k = 0; k < sim.indicesPerChunk; k++) {
+        indices[out] = base + (sim.meshIndices[k] ?? 0);
+        out += 1;
+      }
+    }
+    geometry.setDrawRange(0, out);
+    indexAttribute.needsUpdate = true;
+  };
+  rebuildIndices();
+
+  const mesh = new THREE.Mesh(geometry, material);
+  // Drawn after the terrain so the transparent surface blends over it, and
+  // before the clouds and the atmosphere.
+  mesh.renderOrder = 1;
+  group.add(mesh);
 
   return {
     mesh: group,
     material,
     sync(seaLevel: number, tick: number): void {
+      rebuildIndices();
+      position.clearUpdateRanges();
+      attrib.clearUpdateRanges();
+      let dirty = 0;
       for (let chunk = 0; chunk < sim.chunks; chunk++) {
         if (sim.meshDirty[chunk] === 0) continue;
-        const a = attributes[chunk];
-        if (!a) continue;
-        a.position.needsUpdate = true;
-        a.attrib.needsUpdate = true;
+        dirty += 1;
+        const start = chunk * sim.vertsPerChunk;
+        position.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
+        attrib.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
+      }
+      if (dirty > 0) {
+        position.needsUpdate = true;
+        attrib.needsUpdate = true;
       }
       // Render time, not simulation time: this drives ripples only, and a
       // ripple phase must never be able to reach simulation state (§10).

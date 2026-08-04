@@ -101,6 +101,14 @@ pub struct Mesh {
     smooth: [i32; CELLS],
     /// Content hash per chunk; a chunk is re-meshed only when this changes.
     chunk_hash: [u64; CHUNKS],
+    /// 1 where the chunk contains any water at all.
+    ///
+    /// §7.3 caps draw calls at 150 and the terrain alone is 96 chunks, so the
+    /// water pass cannot afford to draw 96 more. Most chunks on a normal map are
+    /// entirely dry or entirely submerged inland; publishing this lets the host
+    /// skip the dry ones outright, which is a real cut rather than a
+    /// micro-optimisation.
+    pub water_present: [u8; CHUNKS],
     /// 1 where [`Mesh::update`] rebuilt the chunk on its last call.
     ///
     /// The host needs this, not just the count: `needsUpdate` has to be set on
@@ -123,6 +131,7 @@ impl Mesh {
             indices: [0; INDICES_PER_CHUNK],
             smooth: [0; CELLS],
             chunk_hash: [0; CHUNKS],
+            water_present: [0; CHUNKS],
             dirty: [0; CHUNKS],
             remeshed: 0,
         }
@@ -230,6 +239,7 @@ impl Mesh {
     fn build_chunk(&mut self, w: &World, chunk: usize) {
         let (face, cgx, cgy) = chunk_origin(chunk);
         let vbase = chunk * VERTS_PER_CHUNK;
+        let mut wet = false;
 
         for gj in 0..VERTS_PER_EDGE {
             for gi in 0..VERTS_PER_EDGE {
@@ -258,6 +268,7 @@ impl Mesh {
                 self.water_positions[vi * 3 + 2] = dir[2] * rw;
 
                 let d8 = ((depth / 8.0) as i32).clamp(0, 255) as u8;
+                wet |= depth > 0.5;
                 self.attribs[vi * 4] = mat;
                 self.attribs[vi * 4 + 1] = veg;
                 self.attribs[vi * 4 + 2] = infl;
@@ -273,6 +284,8 @@ impl Mesh {
                 self.water_attribs[vi * 4 + 3] = if depth > 0.5 { 255 } else { 0 };
             }
         }
+
+        self.water_present[chunk] = u8::from(wet);
 
         // Normals first, skirt second. The skirt is a duplicate of the border
         // vertex pushed inward, so dropping it *before* the normal pass would
@@ -778,6 +791,25 @@ mod tests {
             m.update(&w)
         };
         assert!((1..=2).contains(&n), "a border cell dirtied {n} chunks");
+    }
+
+    #[test]
+    fn dry_chunks_are_flagged_so_the_host_can_skip_them() {
+        let (w, m) = meshed();
+        let wet = m.water_present.iter().filter(|&&f| f != 0).count();
+        assert!(wet > 0, "no chunk holds water on an archipelago map");
+        assert!(wet < CHUNKS, "every chunk holds water; the flag saves nothing");
+
+        // The flag must agree with the field it summarises.
+        for chunk in 0..CHUNKS {
+            let (face, gx, gy) = chunk_origin(chunk);
+            let any = (0..CHUNK)
+                .flat_map(|j| (0..CHUNK).map(move |i| (i, j)))
+                .any(|(i, j)| w.water[idx(face, gx + i, gy + j)] > 0);
+            if any {
+                assert_eq!(m.water_present[chunk], 1, "chunk {chunk} holds water but reads dry");
+            }
+        }
     }
 
     #[test]

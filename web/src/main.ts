@@ -91,6 +91,7 @@ interface RawExports {
   dio_erode_ptr(): number;
   dio_walkers_ptr(): number;
   dio_settlements_ptr(): number;
+  dio_pickups_ptr(): number;
 
   dio_mesh_positions_ptr(): number;
   dio_mesh_normals_ptr(): number;
@@ -99,12 +100,15 @@ interface RawExports {
   dio_mesh_water_attribs_ptr(): number;
   dio_mesh_indices_ptr(): number;
   dio_mesh_dirty_ptr(): number;
+  dio_mesh_water_present_ptr(): number;
 
   dio_grid_n(): number;
   dio_grid_stride(): number;
   dio_cell_count(): number;
   dio_max_walkers(): number;
   dio_max_settlements(): number;
+  dio_max_pickups(): number;
+  dio_pickup_stride(): number;
   dio_walker_stride(): number;
   dio_settlement_stride(): number;
   dio_chunk_cells(): number;
@@ -130,6 +134,7 @@ interface RawExports {
   dio_magnet_face(player: number): number;
   dio_magnet_x(player: number): number;
   dio_magnet_y(player: number): number;
+  dio_free_uses(player: number, power: number): number;
   dio_outcome(): number;
   dio_score(player: number, wave: number): number;
   dio_state_hash_lo(): number;
@@ -154,6 +159,8 @@ const WALKER = {
   STRENGTH: 16,
   FLAGS: 17,
 };
+/** Offsets into the `#[repr(C)] Pickup` struct in `world.rs`. */
+const PICKUP = { FACE: 0, X: 1, Y: 2, POWER: 3, FLAGS: 4 };
 /** Offsets into the `#[repr(C)] Settlement` struct in `world.rs`. */
 const SETTLEMENT = {
   PROGRESS: 0,
@@ -176,6 +183,13 @@ export interface WalkerView {
   strength: number;
   hp: number;
   flags: number;
+}
+
+export interface PickupView {
+  face: number;
+  x: number;
+  y: number;
+  power: number;
 }
 
 export interface SettlementView {
@@ -216,6 +230,7 @@ export interface Sim {
   readonly waterAttribs: Uint8Array;
   readonly meshIndices: Uint16Array;
   readonly meshDirty: Uint8Array;
+  readonly meshWaterPresent: Uint8Array;
 
   /** Flat index of a live cell — the §3.2 formula, mirrored. */
   idx(face: number, x: number, y: number): number;
@@ -224,6 +239,7 @@ export interface Sim {
   push(player: number, verb: number, face: number, x: number, y: number, modifier: number): void;
   walkers(): WalkerView[];
   settlements(): SettlementView[];
+  pickups(): PickupView[];
   stateHash(): bigint;
 }
 
@@ -276,6 +292,9 @@ export async function loadSim(
     e.dio_settlements_ptr(),
     maxSettlements * settlementStride,
   );
+  const maxPickups = e.dio_max_pickups();
+  const pickupStride = e.dio_pickup_stride();
+  const pickupBytes = new DataView(buf, e.dio_pickups_ptr(), maxPickups * pickupStride);
 
   const sim: Sim = {
     e,
@@ -305,6 +324,7 @@ export async function loadSim(
     waterAttribs: new Uint8Array(buf, e.dio_mesh_water_attribs_ptr(), totalVerts * 4),
     meshIndices: new Uint16Array(buf, e.dio_mesh_indices_ptr(), indicesPerChunk),
     meshDirty: new Uint8Array(buf, e.dio_mesh_dirty_ptr(), chunks),
+    meshWaterPresent: new Uint8Array(buf, e.dio_mesh_water_present_ptr(), chunks),
 
     idx: (face, x, y) => (face * S + (y + 1)) * S + (x + 1),
     tick: () => e.dio_tick(),
@@ -344,6 +364,21 @@ export async function loadSim(
           tier: settlementBytes.getUint8(o + SETTLEMENT.TIER),
           owner: settlementBytes.getUint8(o + SETTLEMENT.OWNER),
           pop: settlementBytes.getUint8(o + SETTLEMENT.POP),
+        });
+      }
+      return out;
+    },
+
+    pickups(): PickupView[] {
+      const out: PickupView[] = [];
+      for (let i = 0; i < maxPickups; i++) {
+        const o = i * pickupStride;
+        if ((pickupBytes.getUint8(o + PICKUP.FLAGS) & 1) === 0) continue;
+        out.push({
+          face: pickupBytes.getUint8(o + PICKUP.FACE),
+          x: pickupBytes.getUint8(o + PICKUP.X),
+          y: pickupBytes.getUint8(o + PICKUP.Y),
+          power: pickupBytes.getUint8(o + PICKUP.POWER),
         });
       }
       return out;
@@ -432,6 +467,8 @@ async function boot(): Promise<void> {
     const water = createWater(sim);
     const atmosphere = createAtmosphere();
     const vegetation = createVegetation(sim, tier);
+    planet.material.uniforms.uTier!.value = tier;
+    water.material.uniforms.uTier!.value = tier;
     scene.add(planet.group, water.mesh, atmosphere.group, vegetation.group);
 
     const post = createPost(renderer, scene, camera.camera, tier);
@@ -481,6 +518,7 @@ async function boot(): Promise<void> {
     // into a diagnosis.
     (window as unknown as { diomano: unknown }).diomano = {
       sim,
+      renderer,
       scene,
       planet,
       water,

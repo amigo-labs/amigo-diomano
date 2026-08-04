@@ -21,6 +21,7 @@
 
 import * as THREE from "three";
 import type { Sim } from "../main";
+import { CLOUD_NOISE_GLSL } from "./atmosphere";
 
 /** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
 export const BASE_RADIUS = 1.0;
@@ -102,6 +103,10 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uGodA;
   uniform vec3 uGodB;
   uniform float uTime;
+  uniform float uCloudTime;
+  uniform float uTier;
+
+  ${CLOUD_NOISE_GLSL}
 
   // Material ids from world.rs: 0 rock, 1 sand, 2 soil, 3 ash, 4 swamp.
   vec3 materialColour(float id) {
@@ -160,6 +165,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     albedo *= exp(-depth * 0.0016);
 
     float lambert = max(dot(n, uSunDirection), 0.0);
+    // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2).
+    if (uTier > 1.5) {
+      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.45;
+    }
     vec3 viewDir = normalize(uCameraPosition - vWorld);
     // Soft camera-anchored fill so the night side stays readable (§7.2). Small:
     // it is there to keep the dark side legible, not to light the scene.
@@ -190,69 +199,65 @@ export function createPlanet(sim: Sim): Planet {
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
       uTime: { value: 0 },
+      uCloudTime: { value: 0 },
+      uTier: { value: 2 },
     },
   });
 
-  // One shared index buffer: every chunk has identical topology, so uploading
-  // 96 copies of the same 1944 indices would be 96 times the GPU memory for no
-  // reason at all.
-  const sharedIndex = new THREE.BufferAttribute(sim.meshIndices, 1);
+  // ---------------------------------------------------------------------
+  // One geometry for the whole planet, not one per chunk.
+  //
+  // §7.3 caps draw calls at 150 and 96 terrain chunks plus 96 water chunks
+  // blows that on its own. The chunks do not need to be separate objects: Rust
+  // already writes every chunk's vertices into *one contiguous* Float32Array,
+  // so a single `BufferAttribute` spans the lot and one index buffer with a
+  // per-chunk base offset draws them all in a single call.
+  //
+  // Dirty-chunk updates survive intact. `addUpdateRange` uploads only the byte
+  // range a rebuilt chunk occupies, so a changed chunk still costs one small
+  // upload rather than the whole 400 KB buffer.
+  // ---------------------------------------------------------------------
+  const geometry = new THREE.BufferGeometry();
+  const position = new THREE.BufferAttribute(sim.meshPositions, 3);
+  const normal = new THREE.BufferAttribute(sim.meshNormals, 3);
+  const attrib = new THREE.BufferAttribute(sim.meshAttribs, 4, true);
+  position.setUsage(THREE.DynamicDrawUsage);
+  normal.setUsage(THREE.DynamicDrawUsage);
+  attrib.setUsage(THREE.DynamicDrawUsage);
 
-  const attributes: {
-    position: THREE.BufferAttribute;
-    normal: THREE.BufferAttribute;
-    attrib: THREE.BufferAttribute;
-  }[] = [];
-
-  for (let chunk = 0; chunk < sim.chunks; chunk++) {
-    const v0 = chunk * sim.vertsPerChunk;
-    const geometry = new THREE.BufferGeometry();
-
-    // `subarray` shares the underlying ArrayBuffer — this is the zero copy.
-    const position = new THREE.BufferAttribute(
-      sim.meshPositions.subarray(v0 * 3, (v0 + sim.vertsPerChunk) * 3),
-      3,
-    );
-    const normal = new THREE.BufferAttribute(
-      sim.meshNormals.subarray(v0 * 3, (v0 + sim.vertsPerChunk) * 3),
-      3,
-    );
-    const attrib = new THREE.BufferAttribute(
-      sim.meshAttribs.subarray(v0 * 4, (v0 + sim.vertsPerChunk) * 4),
-      4,
-      true,
-    );
-    position.setUsage(THREE.DynamicDrawUsage);
-    normal.setUsage(THREE.DynamicDrawUsage);
-    attrib.setUsage(THREE.DynamicDrawUsage);
-
-    geometry.setAttribute("position", position);
-    geometry.setAttribute("normal", normal);
-    geometry.setAttribute("attrib", attrib);
-    geometry.setIndex(sharedIndex);
-    // The terrain deforms constantly, so a bounding sphere computed from the
-    // vertices would be stale within a second. One that always contains the
-    // planet costs nothing and never culls a chunk that should be drawn.
-    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), BASE_RADIUS * 3);
-
-    attributes.push({ position, normal, attrib });
-    group.add(new THREE.Mesh(geometry, material));
-  }
+  geometry.setAttribute("position", position);
+  geometry.setAttribute("normal", normal);
+  geometry.setAttribute("attrib", attrib);
+  geometry.setIndex(new THREE.BufferAttribute(buildPlanetIndices(sim), 1));
+  // The terrain deforms constantly, so a bounding sphere computed from the
+  // vertices would be stale within a second. One that always contains the
+  // planet costs nothing and never culls geometry that should be drawn.
+  geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), BASE_RADIUS * 3);
+  group.add(new THREE.Mesh(geometry, material));
 
   return {
     group,
     material,
     sync(seaLevel: number): void {
       // Only chunks Rust rebuilt are re-uploaded (§7.1 "only dirty chunks
-      // re-meshed"). Setting `needsUpdate` on all 96 every frame would make the
-      // dirty tracking pointless.
+      // re-meshed"). Uploading all 96 every frame would make the dirty tracking
+      // pointless, so each rebuilt chunk contributes its own update range.
+      position.clearUpdateRanges();
+      normal.clearUpdateRanges();
+      attrib.clearUpdateRanges();
+      let dirty = 0;
       for (let chunk = 0; chunk < sim.chunks; chunk++) {
         if (sim.meshDirty[chunk] === 0) continue;
-        const a = attributes[chunk];
-        if (!a) continue;
-        a.position.needsUpdate = true;
-        a.normal.needsUpdate = true;
-        a.attrib.needsUpdate = true;
+        dirty += 1;
+        const start = chunk * sim.vertsPerChunk;
+        position.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
+        normal.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
+        attrib.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
+      }
+      if (dirty > 0) {
+        position.needsUpdate = true;
+        normal.needsUpdate = true;
+        attrib.needsUpdate = true;
       }
       material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
     },
@@ -260,6 +265,25 @@ export function createPlanet(sim: Sim): Planet {
       return pickCell(dir, sim.N);
     },
   };
+}
+
+/**
+ * The whole planet's index buffer: every chunk's shared topology, rebased.
+ *
+ * `Uint32Array` because 96 chunks x 361 vertices overflows 16 bits, and the
+ * cost of that is 750 KB uploaded exactly once against 95 draw calls saved
+ * every frame.
+ */
+function buildPlanetIndices(sim: Sim): Uint32Array {
+  const out = new Uint32Array(sim.chunks * sim.indicesPerChunk);
+  for (let chunk = 0; chunk < sim.chunks; chunk++) {
+    const base = chunk * sim.vertsPerChunk;
+    const at = chunk * sim.indicesPerChunk;
+    for (let k = 0; k < sim.indicesPerChunk; k++) {
+      out[at + k] = base + (sim.meshIndices[k] ?? 0);
+    }
+  }
+  return out;
 }
 
 /**

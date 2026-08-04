@@ -27,6 +27,8 @@ const SAMPLE_STRIDE = 2;
 
 export interface Vegetation {
   readonly group: THREE.Group;
+  /** The sun vector the settlement lights key off; kept in step by `main.ts`. */
+  readonly sunDirection: THREE.Vector3;
   sync(): void;
 }
 
@@ -48,11 +50,8 @@ export function createVegetation(sim: Sim, tier: QualityTier): Vegetation {
   // distribution at a glance is half of "the planet is the scoreboard".
   const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
   buildingGeometry.translate(0, 0.5, 0);
-  const buildings = new THREE.InstancedMesh(
-    buildingGeometry,
-    new THREE.MeshLambertMaterial({ color: 0xd8cbb0 }),
-    MAX_BUILDINGS,
-  );
+  const buildingMaterial = settlementMaterial();
+  const buildings = new THREE.InstancedMesh(buildingGeometry, buildingMaterial, MAX_BUILDINGS);
   buildings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   buildings.instanceColor = new THREE.InstancedBufferAttribute(
     new Float32Array(MAX_BUILDINGS * 3),
@@ -71,9 +70,21 @@ export function createVegetation(sim: Sim, tier: QualityTier): Vegetation {
   walkers.frustumCulled = false;
   walkers.count = 0;
 
+  // One-shot pickups (§5.3): free single-use powers lying on the terrain.
+  // Contested map objects, so they have to be findable from orbit — hence a
+  // bright unlit octahedron rather than something that shades into the ground.
+  const pickupMesh = new THREE.InstancedMesh(
+    new THREE.OctahedronGeometry(1, 0),
+    new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.9 }),
+    32,
+  );
+  pickupMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  pickupMesh.frustumCulled = false;
+  pickupMesh.count = 0;
+
   // Lighting lives in `atmosphere.ts`, with the sun it represents.
   if (tier >= 2) group.add(trees);
-  group.add(buildings, walkers);
+  group.add(buildings, walkers, pickupMesh);
 
   const dummy = new THREE.Object3D();
   const up = new THREE.Vector3(0, 1, 0);
@@ -103,6 +114,7 @@ export function createVegetation(sim: Sim, tier: QualityTier): Vegetation {
 
   return {
     group,
+    sunDirection: buildingMaterial.userData.sun.value as THREE.Vector3,
     sync(): void {
       // --- trees -------------------------------------------------------------
       if (tier >= 2) {
@@ -160,8 +172,62 @@ export function createVegetation(sim: Sim, tier: QualityTier): Vegetation {
       walkers.count = k;
       walkers.instanceMatrix.needsUpdate = true;
       if (walkers.instanceColor) walkers.instanceColor.needsUpdate = true;
+
+      // --- pickups -----------------------------------------------------------
+      const drops = sim.pickups();
+      let q = 0;
+      for (const d of drops) {
+        if (q >= 32) break;
+        const dir = cellDirection(d.face, d.x, d.y, sim.N);
+        // Floating just clear of the ground so it reads as an object rather
+        // than as terrain decoration.
+        place(pickupMesh, q, dir, radiusAt(d.face, d.x, d.y) + cellScale * 0.9, cellScale * 0.5);
+        q += 1;
+      }
+      pickupMesh.count = q;
+      pickupMesh.instanceMatrix.needsUpdate = true;
     },
   };
+}
+
+/**
+ * Settlements, with night-side lights (§7.3 tier 2).
+ *
+ * "Night side with emissive settlement lights. Doubles as readability —
+ * population distribution at a glance." That second clause is the reason it is
+ * tier 2 rather than tier 3: with no HUD, the night hemisphere is otherwise the
+ * one place where you cannot read who holds what.
+ */
+function settlementMaterial(): THREE.MeshLambertMaterial {
+  const material = new THREE.MeshLambertMaterial({ color: 0xd8cbb0, vertexColors: true });
+  material.userData.sun = { value: new THREE.Vector3(0.6, 0.5, 0.6).normalize() };
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uSunDirection = material.userData.sun;
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `#include <common>
+       varying vec3 vDioWorld;`,
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <worldpos_vertex>",
+      `#include <worldpos_vertex>
+       vDioWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>
+       varying vec3 vDioWorld;
+       uniform vec3 uSunDirection;`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <output_fragment>",
+      `#include <output_fragment>
+       // Lights come on where the sun has gone down, and only there.
+       float dioNight = smoothstep(0.12, -0.25, dot(normalize(vDioWorld), uSunDirection));
+       gl_FragColor.rgb += vColor * vec3(1.0, 0.72, 0.36) * dioNight * 0.9;`,
+    );
+  };
+  return material;
 }
 
 /** Lambert plus a rim term, so a walker never disappears into the ground. */
