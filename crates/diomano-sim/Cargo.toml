@@ -1,0 +1,81 @@
+[package]
+name = "diomano-sim"
+description = "The entire diomano simulation. no_std, integer-only, deterministic."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["alloc"]
+# Provides `World::boxed()`. Required by hosts that need more than one world in
+# one process (the CLI, the test suite). The wasm shell does not enable it, so
+# no allocator is linked there and linear memory can never grow.
+alloc = []
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+# --- HANDOFF §10 determinism rules, machine-checked -------------------------
+float_arithmetic = "deny"      # §10 "No floats in simulation state"
+cast_precision_loss = "deny"   # integer -> float conversions
+lossy_float_literal = "deny"
+disallowed_types = "deny"      # HashMap / HashSet / wall-clock, see clippy.toml
+mem_forget = "deny"
+# Arithmetic that could differ between profiles must be spelled out.
+integer_division_remainder_used = "allow"  # integer division is the point here
+# --- general hygiene --------------------------------------------------------
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# --- lints that argue with the determinism rules ----------------------------
+# Explicit indices are not a style choice here: §10 requires a fixed traversal
+# order, and `for c in 0..CELLS` says that where `for x in slice.iter()` does not.
+needless_range_loop = "allow"
+# Every field is a fixed-size array so the crate can be `no_std` with no
+# allocation; that is the whole memory model, not an oversight.
+large_stack_arrays = "allow"
+# Casts between integer widths are pervasive and deliberate — the fields are
+# `i16`/`u8` by design (§3.7) and every conversion is range-checked or clamped
+# at the point it matters.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+# `_pad` fields keep `#[repr(C)]` layouts explicit for the zero-copy boundary.
+pub_underscore_fields = "allow"
+# Mesh output is compared bit-for-bit on purpose (see `mesh.rs` seam tests);
+# an epsilon there would defeat the test.
+float_cmp = "allow"
+# `alloc_zeroed` returns a pointer aligned for the requested `Layout`, which is
+# `Layout::new::<World>()` — the lint cannot see that and flags the `u8` cast.
+cast_ptr_alignment = "allow"
+comparison_chain = "allow"
+
+# --- ordinary noise ---------------------------------------------------------
+module_name_repetitions = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+many_single_char_names = "allow"
+unreadable_literal = "allow"
+verbose_bit_mask = "allow"
+doc_markdown = "allow"
+unnecessary_wraps = "allow"
+trivially_copy_pass_by_ref = "allow"
+single_match_else = "allow"
+match_same_arms = "allow"
+unused_self = "allow"
+type_complexity = "allow"
+excessive_precision = "allow"
+approx_constant = "allow"
+checked_conversions = "allow"
+manual_assert = "allow"
+items_after_statements = "allow"
+struct_field_names = "allow"
