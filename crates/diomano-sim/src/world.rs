@@ -212,6 +212,20 @@ pub const WALKER_ALIVE: u8 = 1 << 0;
 pub const WALKER_LEADER: u8 = 1 << 1;
 pub const WALKER_CHAMPION: u8 = 1 << 2;
 
+/// Ceiling on the strength of a walker built by merging (§4.7, `balance-research`
+/// TODO-8). `[START]`.
+///
+/// There is no sourced value for this and there cannot be: TODO-4 records that
+/// walker strength was never published as a number in any original manual or
+/// guide, only ever as coloured bars. So this is a playtest value, chosen as
+/// roughly twice [`TIER_STRENGTH`]'s maximum so that stacking is worth doing and
+/// still finite. Phase 8 settles it; nothing here cites it as sourced.
+pub const MERGE_MAX_STRENGTH: u8 = 16;
+
+/// Ceiling on a merged walker's hp, keeping the spawn invariant `hp = strength *
+/// 16` (see `walkers::spawn`) true at the cap as well as below it.
+pub const MERGE_MAX_HP: i16 = MERGE_MAX_STRENGTH as i16 * 16;
+
 /// HANDOFF §4.5: `(face, x: Q16.16, y: Q16.16, strength, hp)`.
 ///
 /// `id` is the slot index and never changes, which is what makes the §4.7
