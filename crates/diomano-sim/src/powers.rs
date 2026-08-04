@@ -69,12 +69,10 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
             crate::walkers::make_champion(w, player);
         }
         VERB_ARMAGEDDON => crate::tide::trigger_armageddon(w),
-        VERB_SET_HAND => {
-            // Mixing is impossible: picking up a second material requires
-            // depositing the first (§4.2).
-            if w.hand[player].amount == 0 {
-                w.hand[player].material = (cmd.x as u8).min(HAND_LAVA);
-            }
+        // Mixing is impossible: picking up a second material requires depositing
+        // the first (§4.2). A full hand ignores the verb rather than swapping.
+        VERB_SET_HAND if w.hand[player].amount == 0 => {
+            w.hand[player].material = (cmd.x as u8).min(HAND_LAVA);
         }
         _ => {}
     }
