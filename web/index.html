@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>diomano</title>
+    <!-- Inline, so the page makes exactly one request it did not ask for: none. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='%232f6f8f'/%3E%3Cpath d='M6 18a10 10 0 0020 0z' fill='%233f8f5f'/%3E%3C/svg%3E"
+    />
+    <style>
+      /*
+        There is no HUD (HANDOFF §8). The god has no body, only a hand — cursor,
+        matter carrier and influence indicator in one. Everything below is here
+        to get a full-bleed canvas and a black page behind the planet; there is
+        deliberately nothing to style, because there is deliberately nothing on
+        screen but the world.
+      */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: #05060a;
+        overflow: hidden;
+        /* The hand is the cursor. */
+        cursor: none;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* Shown only if WebGL2 or WebAssembly is missing. Not UI: an epitaph. */
+      #fallback {
+        position: fixed;
+        inset: 0;
+        display: none;
+        place-items: center;
+        color: #8a93a8;
+        font: 14px/1.6 ui-monospace, monospace;
+        text-align: center;
+        padding: 2rem;
+        cursor: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+    <div id="fallback"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
