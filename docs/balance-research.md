@@ -52,9 +52,9 @@ or a summary of one, not verified against the primary.
 | 2 | "Castles increase your population the fastest… also the most effective fighters. To create a castle, flatten the land widely around any dwelling." | Populous II manual | direct | Confirms the wide-versus-tall axis of §4.2 *and* that tier drives combat strength, not just population. §4.6's one-number-three-consequences design matches the original's intent. |
 | 3 | "Mana comes from the pious worship of your followers — the more worshippers you have, the greater your Mana." | Populous II manual | direct | This is precisely what §4.6 diverges from. The divergence is now against a **sourced** original rather than an assumed one, which strengthens failure mode 2's argument: the original really did tie power to headcount, and really does snowball. |
 | 4 | Effects unlock left to right as mana rises; raise/lower needs least, Armageddon most | both manuals | direct | diomano's cost-only gating (open item 4, "leaning toward cost-only") is a simplification of a real unlock ladder, not an invention. |
-| 5 | "The first walker to arrive at the papal magnet is your leader." Leader at the magnet is invincible, surrounded by blue holy fire. | Populous II manual | direct | §5.1's leader rule is verbatim from the original. **Not implemented:** invincibility while standing on the magnet. See TODO-7. |
+| 5 | "The first walker to arrive at the papal magnet is your leader." Leader at the magnet is invincible, surrounded by blue holy fire. | Populous II manual | direct | §5.1's leader rule is verbatim from the original. Invincibility while standing on the magnet is **implemented**; see TODO-7. |
 | 6 | Turning a leader into a hero means "you'll need to establish a new leader by selecting the Go To Papal Magnet command" | Populous II manual | direct | §4.7's champion rule — the magnet transfers and you have no leader until a walker touches it again — is the original's rule exactly. |
-| 7 | "Any time two of your walkers bump into each other, they combine to make one stronger walker" | Populous manual | direct | diomano does **not** do this: walkers are independent and combat is per-pair attrition (§4.7). A real divergence, and arguably a loss — walker merging is what made the papal magnet a *stacking* tool. See TODO-8. |
+| 7 | "Any time two of your walkers bump into each other, they combine to make one stronger walker" | Populous manual | direct | diomano did not do this — walkers were independent and combat was per-pair attrition only (§4.7). Now **implemented**, which is what makes the papal magnet a *stacking* tool rather than just a destination. See TODO-8. |
 | 8 | Plague victims give no mana | Populous II manual | direct | Plague is not a diomano verb. Noted only because it shows mana was per-*healthy*-follower. |
 | 9 | Effects can be strengthened by spending earned experience points at the Deity Creation screen | Populous II manual | direct | A progression system diomano rejects. In a symmetric duel it would be arbitrary placed furniture, same argument as §2's rejection of totems. |
 | 10 | Populous II has **30** Divine Intervention Effects across categories | Populous II manual | direct | diomano has 8 powers. §5.4's point stands: Bullfrog got variety from per-map availability, not from a large verb count. |
@@ -77,19 +77,53 @@ Every one of these is `TODO`. The blocking input is named for each.
 | TODO-5 | Match length and typical population at parity | Would come from recorded competitive matches. popre.net's archive is Populous: The Beginning, so it does not apply. |
 | TODO-6 | Angle of repose / erosion rates | Not applicable — these come from From Dust, which ships no numbers either. Pure playtest. |
 
-## Implementation gaps this surfaced
+## Implementation gaps this surfaced — both now closed
 
-Not numbers — mechanics diomano is missing that the originals had, found while
-looking for numbers. Each is a decision, not an oversight, and each needs a call.
+Not numbers — mechanics diomano was missing that the originals had, found while
+looking for numbers. Each was a decision rather than an oversight, and both have
+now been decided; the arguments are kept as recorded, because the reasoning is what
+makes the decision reviewable.
 
 | id | Gap | Argument for | Argument against |
 |---|---|---|---|
-| TODO-7 | **Leader is invincible while standing on the papal magnet.** | It is the original's rule, and it makes the magnet a defensible rally point rather than a death trap — placing it forward is currently strictly risky. | Adds a positional invulnerability rule to combat, which is the highest-risk determinism site. Cheap to implement, and cheap to get subtly wrong. |
-| TODO-8 | **Walkers merge into one stronger walker on contact.** | This is what made the magnet a *stacking* tool in the original: gather, combine, then march. Without it, "place the magnet inside your castle walls and influence your walkers to gather there, combining for strength" — the manual's own advice — has no analogue in diomano. | It changes walker count dynamics and interacts directly with the §4.7 resolution order. It would need its own stress test before being trusted. |
+| TODO-7 | **Leader is invincible while standing on the papal magnet.** *(implemented)* | It is the original's rule, and it makes the magnet a defensible rally point rather than a death trap — placing it forward is currently strictly risky. | Adds a positional invulnerability rule to combat, which is the highest-risk determinism site. Cheap to implement, and cheap to get subtly wrong. |
+| TODO-8 | **Walkers merge into one stronger walker on contact.** *(implemented)* | This is what made the magnet a *stacking* tool in the original: gather, combine, then march. Without it, "place the magnet inside your castle walls and influence your walkers to gather there, combining for strength" — the manual's own advice — has no analogue in diomano. | It changes walker count dynamics and interacts directly with the §4.7 resolution order. It would need its own stress test before being trusted. |
 
-Both are recorded here rather than implemented, because both change combat and
-combat is the site §13 names as most likely to pass casual testing while being
-wrong.
+**Both are now implemented** (`crates/diomano-sim/src/combat.rs`), on an explicit
+decision rather than by drifting into it. Each brought its own defect, and neither
+would have shown up in a short fixture — which is exactly the failure mode §13
+predicted for combat, arriving on schedule:
+
+| id | Implemented as | What it cost to get right |
+|---|---|---|
+| TODO-7 | `leader_on_own_magnet`; suppresses incoming damage only, so the leader still deals its strength. Both walkers' predicates are read before either `hp` is written. | Nothing structural. Evaluating the predicate after a write would have made a pair's outcome depend on which walker the loop reached first — the same trap the strengths were already avoiding. |
+| TODO-8 | A `merge` pass between bucketing and fighting. The leader always absorbs and is never absorbed; champions take no part; strength and hp saturate at `MERGE_MAX_STRENGTH`. | Three defects, below. |
+
+**TODO-8's three defects, in the order they were found:**
+
+1. **A spawn/merge loop.** Releasing the absorbed walker's population slot let
+   `spawn_population` refill it the next tick; the new walker landed on the same
+   cell and merged again. Measured: **16,928 merges against two surviving
+   walkers** over 20,000 ticks. Fixed by having a merge *carry* population rather
+   than spend it (`Walker::pop_carried`), which is also the more honest model — the
+   people are still in the field, inside the walker that ate them.
+2. **Army collapse.** Every walker follows the same flow field to the same magnet,
+   so they all meet and fold into one. A player's entire army became a single
+   capped walker and population growth stopped meaning anything. Mitigated by
+   gating absorption on the cap rather than only clamping the result: a walker at
+   `MERGE_MAX_STRENGTH` cannot absorb more, so a bigger population fields more
+   walkers — which is what makes gathering worth doing, the original rule's whole
+   point.
+3. **Unbounded champions.** Not a merge bug, but found by the same corpus:
+   `make_champion` triples strength, and nothing stopped it re-promoting a walker
+   that was already a champion. Repeated casts compounded **2 → 6 → 18 → 54 → 162
+   → 255**, past `MERGE_MAX_STRENGTH` and every other bound in the game. A second
+   cast now promotes a second walker, or does nothing.
+
+`MERGE_MAX_STRENGTH = 16` is `[START]` and a **playtest** value, not a sourced
+one — TODO-4 above records that walker strength was never published as a number
+anywhere, only as coloured bars. It is set at roughly twice `TIER_STRENGTH`'s
+maximum so stacking is worth doing and still finite. Phase 8 settles it.
 
 ---
 

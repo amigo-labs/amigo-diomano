@@ -122,13 +122,29 @@ browser are different embeddings and the browser is the one that ships. It exits
 non-zero on any failure to *run* the check, not just on divergence: "could not
 verify" is not "verified".
 
-**Status: passing.** 80 state hashes over 2,400 ticks, identical between the
-native binary and headless Chromium.
+**Status: passing.** 80 state hashes over 2,400 ticks on `fixtures/session.log`,
+plus 667 hashes over 20,000 ticks on each of the ten `fixtures/match-NN.log`
+corpus matches, all identical between the native binary and headless Chromium.
 
-## Not yet done
+## The corpus, and the one criterion still open
 
-`docs/HANDOFF.md` §6.3 sets the CI acceptance criterion at 10 recorded matches
-of ≥ 20,000 ticks each, covering every verb at least 20 times and at least 200
-combat resolutions. This run commits **one** fixture of 2,400 ticks. The
-machinery to raise that is `just record` plus a longer script; the gap is
-deliberate and belongs to the netcode phase.
+`docs/HANDOFF.md` §6.3 asks for 10 recorded matches of ≥ 20,000 ticks each,
+covering every verb at least 20 times and at least 200 combat resolutions,
+replaying bit-identically native vs. headless browser. Three of those four hold;
+the combat count does not, for a structural reason, and the whole account —
+including why flood and swamp force the corpus to be split into two profiles —
+is in `netcode.md` rather than duplicated here.
+
+`diomano-cli corpus --strict` enforces the criterion in full; the default reports
+the shortfall as a KNOWN GAP on every run, so it cannot quietly become normal.
+
+## Diagnostic counters are not state
+
+`World::census` counts combat resolutions, merges and applied verbs per verb, so
+§6.3's coverage can be asserted rather than eyeballed. It is **excluded from the
+state hash**, and `world::tests::the_census_is_not_hashed` pins that: a
+diagnostic inside the hash would make every committed fixture a hostage of its own
+instrumentation, and adding a counter would read as a desync.
+
+Nothing in the simulation may *read* the census. Write-only from the simulation's
+point of view is what keeps it from becoming state by accident.

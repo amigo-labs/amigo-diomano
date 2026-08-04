@@ -71,9 +71,49 @@ preview: build-web
 verify-cross: wasm
     cd web && node tools/verify-cross.mjs
 
+# Two simulations through the lockstep layer over a lossy, latent link.
+#
+# The Phase 7 DoD's network conditions — 120 ms RTT, 2% loss — without a network.
+# Also checks that the desync detector *fires* when fed a divergence, because a
+# check that has never been seen to trip is a comment.
+verify-lockstep: wasm
+    cd web && bun tools/verify-lockstep.ts
+
 # Replay the committed fixture natively and compare against its hashes.
 verify:
     cargo run --release -p diomano-cli -- replay fixtures/session.log --verify
+
+# Replay one corpus match, natively and then in headless Chromium.
+#
+# Used by the CI matrix, which runs the ten in parallel so the wall clock is one
+# match rather than the sum. Both halves matter: §6.3 asks for the corpus to
+# replay *bit-identically native vs. headless browser*, so a native-only check
+# would be verifying the easy half of the criterion.
+verify-match n: wasm
+    cargo run --release -p diomano-cli -- replay fixtures/match-{{n}}.log --verify
+    cd web && node tools/verify-cross.mjs ../fixtures/match-{{n}}.log
+
+# Replay the whole §6.3 corpus and check its coverage: ten matches of 20,000
+# ticks, every verb 20+ times, 200+ combat resolutions.
+#
+# The combat criterion is reported as a KNOWN GAP rather than enforced — see the
+# note the command prints, and `CATACLYSM_FROM` in the CLI. `--strict` enforces it.
+verify-corpus:
+    cargo run --release -p diomano-cli -- corpus --check-only
+
+# What did a log actually exercise?
+census file:
+    cargo run --release -p diomano-cli -- census {{file}}
+
+# Walk a scripted match and print the economy, for working out *why* a corpus
+# match covered less than it should have.
+trace ticks="4000" every="400" seed="0x5EED0000":
+    cargo run --release -p diomano-cli -- trace --ticks {{ticks}} --every {{every}} --seed {{seed}}
+
+# Re-record the whole §6.3 corpus. Same warning as `record`, ten times over.
+record-corpus:
+    cargo run --release -p diomano-cli -- corpus
+    @echo "corpus regenerated — say in the commit why the hashes moved"
 
 # Re-record the fixture. Deliberately not part of any other recipe: regenerating
 # it is always a decision about changed behaviour, never a fix for a red test.

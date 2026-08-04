@@ -63,6 +63,7 @@ pub fn spawn(
         owner: player as u8,
         strength,
         flags: WALKER_ALIVE,
+        pop_carried: 0,
     };
     w.walker_count[player] = w.walker_count[player].saturating_add(1);
     Some(slot as u16)
@@ -79,7 +80,17 @@ pub fn remove(w: &mut World, id: usize) {
     if wk.home != NO_SETTLEMENT {
         let home = wk.home as usize;
         if home < w.settlements.len() && w.settlements[home].alive() {
-            w.settlements[home].pop = w.settlements[home].pop.saturating_sub(1);
+            // Itself, plus everyone it had absorbed. A merged walker holds several
+            // settlement slots charged; killing it has to release all of them or a
+            // long match strangles its own settlements into never spawning again.
+            //
+            // Carried population is credited to *this* walker's home, which may
+            // not be where every absorbed walker came from. That is a deliberate
+            // simplification: the alternative is a per-walker list of origins, and
+            // a merged walker is one unit — asking which of its people came from
+            // where is a question the model does not have.
+            let released = wk.pop_carried.saturating_add(1);
+            w.settlements[home].pop = w.settlements[home].pop.saturating_sub(released);
         }
     }
     if wk.flags & WALKER_LEADER != 0 {
@@ -200,21 +211,27 @@ fn cross_seam(face: usize, nx: Fx, ny: Fx, dir: usize) -> (usize, Fx, Fx) {
 /// The magnet transfers to the champion, so the player has no leader until a
 /// walker touches the magnet again.
 pub fn make_champion(w: &mut World, player: usize) -> bool {
+    // Never re-promote a walker that is already a champion. The promotion below
+    // *triples* strength, so casting the verb twice on the same walker compounded
+    // it: a scripted 20,000-tick match drove one walker to 2 → 6 → 18 → 54 → 162 →
+    // 255, straight past `MERGE_MAX_STRENGTH` and every other bound in the game.
+    // A second cast promotes a second walker, or does nothing.
     let leader = w.magnet[player].leader;
-    let id = if leader != u16::MAX && (leader as usize) < w.walkers.len() {
+    let promotable =
+        |k: &Walker| k.alive() && k.owner as usize == player && k.flags & WALKER_CHAMPION == 0;
+    let id = if leader != u16::MAX
+        && (leader as usize) < w.walkers.len()
+        && promotable(&w.walkers[leader as usize])
+    {
         leader as usize
     } else {
-        // No leader: the lowest-id living walker steps up, so the choice is a
-        // function of state rather than of whoever happened to be scanned first.
-        let Some(id) = w.walkers.iter().position(|k| k.alive() && k.owner as usize == player)
-        else {
+        // No usable leader: the lowest-id living walker steps up, so the choice is
+        // a function of state rather than of whoever happened to be scanned first.
+        let Some(id) = w.walkers.iter().position(promotable) else {
             return false;
         };
         id
     };
-    if !w.walkers[id].alive() {
-        return false;
-    }
     let wk = w.walkers[id];
     w.walkers[id].flags = (wk.flags | WALKER_CHAMPION) & !WALKER_LEADER;
     w.walkers[id].strength = wk.strength.saturating_mul(3).max(6);

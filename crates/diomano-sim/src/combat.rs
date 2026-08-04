@@ -144,6 +144,20 @@ fn merge(w: &mut World) {
                 let b_leads = w.walkers[b].flags & WALKER_LEADER != 0;
                 let a_leads = w.walkers[a].flags & WALKER_LEADER != 0;
                 let (keep, gone) = if b_leads && !a_leads { (b, a) } else { (a, b) };
+
+                // A walker already at the cap cannot absorb any more.
+                //
+                // This is what keeps an army an army. Every walker follows the same
+                // flow field to the same magnet, so without this they all end up in
+                // one cell and fold into a *single* walker — measured: one walker
+                // per player for a whole 20,000-tick match, with population growth
+                // contributing nothing once that walker hit the cap. Stopping at
+                // the cap instead means a bigger population fields more capped
+                // walkers, which is what makes gathering worth doing (the original
+                // rule's whole point) rather than a way to throw people away.
+                if w.walkers[keep].strength >= MERGE_MAX_STRENGTH {
+                    continue;
+                }
                 absorb(w, keep, gone);
             }
         }
@@ -155,10 +169,24 @@ fn absorb(w: &mut World, keep: usize, gone: usize) {
     let strength =
         w.walkers[keep].strength.saturating_add(w.walkers[gone].strength).min(MERGE_MAX_STRENGTH);
     let hp = w.walkers[keep].hp.saturating_add(w.walkers[gone].hp).min(MERGE_MAX_HP);
+    let carried =
+        w.walkers[keep].pop_carried.saturating_add(w.walkers[gone].pop_carried).saturating_add(1);
     w.walkers[keep].strength = strength;
     w.walkers[keep].hp = hp;
-    // Through `remove`, not by clearing the slot, so the absorbed walker's home
-    // settlement gets its population slot back and `walker_count` stays true.
+    w.walkers[keep].pop_carried = carried;
+    w.census.merges = w.census.merges.saturating_add(1);
+
+    // A merge concentrates population; it does not spend it. So the absorbed
+    // walker's settlement slot must *not* be released here — `keep` is now
+    // carrying it, and will release it when it dies.
+    //
+    // Detaching `home` before `remove` is what suppresses the credit. Getting
+    // this wrong is not subtle in effect but is invisible in a short fixture:
+    // `spawn_population` refills any settlement below its tier's population every
+    // tick, so a freed slot is refilled next tick, the fresh walker lands on the
+    // same cell and merges again. A 20,000-tick match showed 16,928 merges
+    // against two surviving walkers before this was fixed.
+    w.walkers[gone].home = NO_SETTLEMENT;
     crate::walkers::remove(w, gone);
 }
 
@@ -210,6 +238,7 @@ fn fight(w: &mut World) {
                 if !b_holy {
                     w.walkers[b].hp -= sa;
                 }
+                w.census.combat_resolutions = w.census.combat_resolutions.saturating_add(1);
             }
         }
     }
@@ -322,6 +351,7 @@ mod tests {
             owner,
             strength,
             flags: WALKER_ALIVE,
+            pop_carried: 0,
         };
         w.walker_count[owner as usize] += 1;
     }
@@ -591,25 +621,54 @@ mod tests {
         resolve(&mut w);
 
         assert_eq!(w.walker_count[0], 1, "the merge lost track of the walker count");
+        // The slot is *not* released: the absorbed walker's people are still in the
+        // field, inside the walker that ate them. Releasing it lets
+        // `spawn_population` refill the settlement next tick, the fresh walker lands
+        // on this same cell and merges again — a spawn/merge pump that ran at two
+        // merges a tick before this was fixed.
         assert_eq!(
-            w.settlements[0].pop, 1,
-            "the absorbed walker's population slot was not returned to its home"
+            w.settlements[0].pop, 2,
+            "the merge released a population slot, which lets the settlement respawn into it"
+        );
+        assert_eq!(w.walkers[0].pop_carried, 1, "the survivor is not carrying the absorbed slot");
+
+        // And killing the survivor must give back *both*, or a long match strangles
+        // its own settlements into never spawning again.
+        w.walkers[0].hp = 0;
+        resolve(&mut w);
+        assert_eq!(w.walker_count[0], 0);
+        assert_eq!(
+            w.settlements[0].pop, 0,
+            "the merged walker's death did not release the population it carried"
         );
     }
 
     #[test]
     fn a_merge_is_capped_and_never_wraps() {
         let mut w = arena(28);
-        // Ten walkers of strength 7 in one cell: 70 uncapped, far past the cap,
-        // and hp 10 x 112 = 1120, past `i16` only if the cap is ignored.
+        // Ten walkers of strength 7 in one cell. Uncapped that is strength 70 and
+        // hp 1,120; the cap has to bite on both.
         for k in 0..10usize {
             place(&mut w, k, 0, 5, 40, 40, 7, 112);
         }
         resolve(&mut w);
 
-        assert_eq!(w.walkers[0].strength, MERGE_MAX_STRENGTH);
-        assert_eq!(w.walkers[0].hp, MERGE_MAX_HP);
-        assert_eq!(w.walker_count[0], 1);
+        // A walker at the cap stops absorbing, so this does *not* collapse to one
+        // walker — which is the point. 7 + 7 = 14 is under the cap and merges; the
+        // next would exceed it, so each survivor tops out at 16 and the rest stay
+        // separate. An army stays an army, and population keeps meaning something.
+        let alive: std::vec::Vec<usize> =
+            (0..MAX_WALKERS).filter(|&s| w.walkers[s].alive()).collect();
+        assert!(
+            alive.len() > 1,
+            "every walker folded into one — population growth stops mattering at that point"
+        );
+        for &s in &alive {
+            assert!(w.walkers[s].strength <= MERGE_MAX_STRENGTH, "strength passed the cap");
+            assert!(w.walkers[s].hp <= MERGE_MAX_HP, "hp passed the cap");
+            assert!(w.walkers[s].hp > 0, "a merge zeroed a survivor's hp");
+        }
+        assert_eq!(w.walker_count[0] as usize, alive.len(), "walker_count drifted from reality");
     }
 
     /// TODO-8's own stress case. Merging changes walker-count dynamics, so the
