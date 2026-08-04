@@ -1,0 +1,30 @@
+[package]
+name = "diomano-wasm"
+description = "Thin extern \"C\" shell around diomano-sim. Exports and pointer getters only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No `alloc` feature: no allocator is linked, so linear memory can never grow —
+# which is what keeps the TypeScript-side typed array views from detaching
+# (HANDOFF §9.3).
+diomano-sim = { workspace = true }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+large_stack_arrays = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+needless_range_loop = "allow"
+
+[dev-dependencies]
+# Tests compare the shell against the crate directly, which needs `World::boxed`.
+# Dev-dependencies do not affect `cargo build`, so the shipped `.wasm` still
+# links no allocator.
+diomano-sim = { workspace = true, features = ["alloc"] }
