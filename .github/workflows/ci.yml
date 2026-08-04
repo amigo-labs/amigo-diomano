@@ -10,6 +10,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job here only reads the repository: checkout, build, test, replay. None
+# writes a comment, a status, a release or a package, so the token needs nothing
+# beyond `contents: read` and is given nothing beyond it.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Overflow checks are on in every profile via the workspace Cargo.toml; this
