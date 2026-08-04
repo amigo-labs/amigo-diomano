@@ -61,6 +61,20 @@ Each step ended with its tests passing before the next began.
 - [x] `diomano-cli hash` — tick from a seed, print a hash per tick
 - [x] `diomano-cli record` / `replay --verify`
 
+### 4b. Balance research (Phase 2 research task) ✅
+
+- [x] `docs/balance-research.md`, from the sources §2 names
+- [x] **Finding: the numbers are not published.** Both manuals and the guides
+      describe the systems qualitatively; popre.net's numeric material is about
+      Populous: The Beginning, which §1 rejects as a reference. So every numeric
+      `[START]` has to be settled by playtest rather than by citation — Phase 8
+      is the *only* source for them, not a confirmation step.
+- [x] Thirteen **mechanical** findings recorded, several of which validate
+      design decisions (5×5 was the original's minimum settlement; mana really
+      was population-derived, which is what §4.6 diverges from)
+- [x] Six numeric gaps and two implementation gaps marked `TODO` with the
+      blocking input named for each
+
 ### 5. Perf harness, and choose `N` ✅
 
 - [x] `diomano-cli perf` — per-pass ms breakdown against the 12 ms budget
@@ -115,7 +129,7 @@ Each step ended with its tests passing before the next began.
 - [x] Thrown vs. poured, increased/extreme
 - [x] Gestures sampled on a fixed 60 Hz timer, never per frame
 - [x] No HUD anywhere; matter, mana and reach are all diegetic
-- [ ] One-shot pickups — **not implemented**
+- [x] One-shot pickups on neutral ground, granting one free use of a power
 
 ### 11. `tide.rs` and `ai.rs` ✅
 
@@ -129,7 +143,12 @@ Each step ended with its tests passing before the next began.
 
 - [x] Tier 1 complete
 - [x] Tier 2: instanced vegetation, water ripple, sun glitter
-- [ ] Tier 2: night lights, cloud shell, shadow map — **not implemented**
+- [x] Tier 2: night-side settlement lights, cloud shell with matching ground
+      shadows (one shared noise function, not two)
+- [ ] Tier 2: single sun shadow map — **not implemented**, and the right thing
+      to leave: cloud shadows cover the large-scale case, and terrain
+      self-shadowing is exactly what will or will not fit on the §7.6 floor
+- [x] Draw calls: **7 at tier 2**, measured, against a `[START]` ceiling of 150
 - [x] Procedural audio: surf bed tracking real water movement, verb one-shots
 
 ---
@@ -140,7 +159,7 @@ All run, all green:
 
 ```
 just check                              # clean, zero warnings
-cargo test --workspace                  # 138 tests
+cargo test --workspace                  # 142 tests
 cargo run -p diomano-cli -- perf        # per-pass ms breakdown
 cargo run -p diomano-cli -- replay fixtures/session.log --verify
 just build-web && just dev
@@ -180,13 +199,23 @@ Recorded rather than resolved silently. See the run summary for the full list.
    `docs/specs/simulation.md`.
 5. **The 8-byte command packing had to be invented**; §6.2's seven fields total
    12 bytes. `docs/specs/verbs.md`.
-6. **Draw calls at tier 2 are ~197 against a `[START]` ceiling of 150.**
-   `docs/specs/rendering.md`.
-7. **§7.6's 30 fps on integrated graphics is unverified.** No throttleable GPU
+6. **§7.6's 30 fps on integrated graphics is unverified.** No throttleable GPU
    here. Marked unverified rather than reported from strong hardware.
+7. **The originals' balance numbers do not exist in public sources.**
+   `docs/balance-research.md`. §2 assumes they can be researched; for mechanics
+   that is true and productive, for quantities it is not.
 
 ## Next
 
 Phase 7 (netcode) is the next phase and its prerequisite is met: native and
 browser agree bit-for-bit. Before starting it, raise the fixture corpus toward
 the §6.3 criterion — the harness is complete, only the corpus is small.
+
+Two decisions are waiting in `docs/balance-research.md`, both found while
+researching and both touching combat: whether the leader should be invincible
+while standing on the papal magnet (the original's rule, and it makes a forward
+magnet defensible rather than suicidal), and whether walkers should merge into
+one stronger walker on contact (the original's rule, and without it the manual's
+own advice — gather at the magnet, combine for strength — has no analogue here).
+Both are recorded rather than implemented, because both change the site §13
+names as most likely to pass casual testing while being wrong.

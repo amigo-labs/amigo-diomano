@@ -36,7 +36,21 @@ Multiply the verb set without adding verbs:
   small radius directly under the hand.
 - **Increased / extreme** — same verb scaled, at proportionally higher cost.
 - **One-shot pickups** — free single-use powers lying on the terrain.
-  **Not implemented in this run.**
+
+  They spawn on ground **nobody holds** (`influence == 0`), every 900 ticks, up
+  to four at a time, and grant one free use of a power the map actually enables.
+  Raise/lower is excluded: it is already free, so a charge for it would be no
+  reward at all.
+
+  Neutral ground is the whole mechanic. Walkers do not leave their own influence
+  without a magnet (§4.5), so collecting one costs a deliberate magnet
+  placement — the only command in the game. That is what makes a pickup a
+  *contested* object rather than a race won by whoever happens to be nearest.
+
+  A charge is spent before mana is consulted, and spending it on a power you
+  could have afforded anyway is the player's business: choosing which to spend
+  it on is the interesting decision, and picking automatically would take that
+  decision away.
 
 ## Map manifest
 

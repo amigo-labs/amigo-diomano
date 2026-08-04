@@ -32,6 +32,7 @@ Fixed and load-bearing for determinism. `World::tick` runs exactly this:
 6.  granular movement            (checkerboard: even, then odd)
 7.  vegetation growth            (single pass)
 8.  walkers: movement            (fixed walker-id order)
+8a. one-shot pickups             [not in HANDOFF §4.1 — see below]
 9.  walkers: combat resolution   (see combat.md)
 10. settlements: build / decay
 11. every 15 ticks: flow field + influence projection
@@ -50,6 +51,10 @@ Two passes are additions to §4.1's list and are marked as such in the code:
   then applied through `apply_commands` — the same path as human input. It has
   no privileged mutation route into the world, which `ai::the_opponent_never_touches_the_world_directly`
   asserts by hashing before and after.
+- **8a, one-shot pickups.** A query over walker positions, so it belongs
+  immediately after movement. Placing it *before* combat is the deliberate
+  choice: a walker that dies this tick still collected what it was standing on,
+  which means trading a walker for a contested pickup is a real play.
 
 ## Measured cost
 

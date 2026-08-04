@@ -120,23 +120,48 @@ atmosphere shell at 1.09 radii.
 - Rim light on walkers. Functional: tiny figures must separate from any terrain.
 - ACES tone mapping (via `OutputPass`) and subtle bloom.
 
-**Tier 2 — medium.** Partially implemented.
+**Tier 2 — medium.** Implemented, except the shadow map.
 
 - Instanced vegetation, density from the `vegetation` field. ✅
-- Screen-space-ish water ripple: two procedural normal fields scrolling at
-  different speeds and directions. ✅
+- Water ripple: two procedural normal fields scrolling at different speeds and
+  directions. ✅
 - Sun glitter: high-exponent specular on the ocean. ✅
-- Night side with emissive settlement lights. ❌ not implemented
-- Cloud shell with ground shadows. ❌ not implemented
-- Single sun shadow map. ❌ not implemented
+- Night side with emissive settlement lights. ✅ — and it is not decoration:
+  with no HUD, the night hemisphere is otherwise the one place where you cannot
+  read who holds what.
+- Cloud shell with ground shadows. ✅ — the terrain shader samples the *same*
+  noise function the cloud shell draws with, exported once as
+  `CLOUD_NOISE_GLSL`. Two copies would drift, and the symptom would be shadows
+  that do not line up with the clouds casting them: subtle enough to read as a
+  lighting bug rather than a copy-paste one.
+- Single sun shadow map. ❌ not implemented. The cloud shadows cover the large-
+  scale case and terrain self-shadowing is the part that needs a shadow map;
+  on the §7.6 reference floor that is the item most likely not to fit, so it is
+  the right one to leave until it can be measured there.
 
 **Tier 3 — high.** Out of scope for this run, as instructed.
 
-Draw calls at tier 2: 96 terrain chunks + 96 water chunks + 3 instanced meshes +
-atmosphere + starfield ≈ **197**, against a `[START]` ceiling of 150. Over. The
-obvious fix is merging the water chunks into fewer draws or culling dry chunks
-entirely; recorded here rather than fixed, because it should be measured on the
-reference floor first.
+### Draw calls
+
+**7 at tier 2, measured** (terrain, water, cloud shell, atmosphere shell,
+starfield, settlements, walkers; vegetation makes 8 once anything has grown),
+against a `[START]` ceiling of 150. Plus three post passes.
+
+It was ~197 before, which is what the ceiling exists to catch. The fix is not
+culling — on an archipelago map every 16×16 chunk touches ocean, so per-chunk
+visibility saved exactly nothing. Chunks simply do not need to be separate
+objects: Rust already writes every chunk's vertices into **one contiguous**
+array, so a single `BufferAttribute` spans all 96 and one index buffer with a
+per-chunk base offset draws them in a single call.
+
+Dirty-chunk updates survive intact. Each rebuilt chunk contributes an
+`addUpdateRange`, so a changed chunk uploads its own few kilobytes rather than
+the whole 400 KB buffer.
+
+The water geometry goes further and uses `Mesh::water_present` to build its
+index buffer over **wet chunks only**, rebuilt when the wet set changes. On a
+land-heavy map that removes most of the ocean's triangles before rasterising,
+rather than relying on the fragment shader to discard them afterwards.
 
 ## Terrain that remembers
 
@@ -155,8 +180,8 @@ scoreboard.
 Everything is procedural: shaders, geometry, audio, starfield. No purchased
 textures, no third-party models, no licensing exposure.
 
-Measured payload: **196 KB wasm (34 KB gzipped)**, 485 KB Three.js (121 KB
-gzipped), 55 KB app (18 KB gzipped). Total ≈ **174 KB compressed**, against a
+Measured payload: **197 KB wasm (34 KB gzipped)**, 487 KB Three.js (122 KB
+gzipped), 60 KB app (19 KB gzipped). Total ≈ **175 KB compressed**, against a
 ≤ 3 MB budget.
 
 ## Target hardware

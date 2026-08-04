@@ -61,7 +61,9 @@ frames on a wire, no Durable Objects. The simulation already advances by
 concern — and `just verify-cross` is the evidence that it will be worth starting.
 
 `PLAN.md` lists everything else that is missing, and the seven places where the
-specification needed a decision.
+specification needed a decision. `docs/balance-research.md` records what the
+originals can and cannot tell us — the short version being that the numbers were
+never published, so every `[START]` has to be playtested rather than sourced.
 
 ## Licence
 
