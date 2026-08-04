@@ -1,0 +1,110 @@
+name: CI
+
+# The gate. `just check` is what a phase has to pass before it is called done
+# (HANDOFF Phase 0 DoD), and the determinism jobs are what make the rest of the
+# project worth having.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Overflow checks are on in every profile via the workspace Cargo.toml; this
+  # just makes a failure legible when it happens.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup component add clippy rustfmt
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install web toolchain
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: cargo test
+        run: just test
+
+      - name: cargo clippy
+        run: just lint
+
+      - name: biome
+        run: just fmt-check
+
+      - name: tsc
+        run: just typecheck
+
+  determinism:
+    name: determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install web toolchain
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Install Chromium for the browser replay
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
+
+      # Native replay against the committed hash fixture. A behaviour change
+      # fails here even when it is perfectly self-consistent; regenerating the
+      # fixture is always a decision, never a fix.
+      - name: replay --verify (native)
+        run: just verify
+
+      # The one that matters: the same wasm the browser ships, replaying the same
+      # log, must produce the same hashes as the native binary. If these two ever
+      # disagree, lockstep is dead on arrival.
+      - name: verify-cross (native vs headless Chromium)
+        run: just verify-cross
+
+  perf:
+    name: perf (informational)
+    runs-on: ubuntu-latest
+    # A CI runner is not the §7.6 reference floor — an office machine with
+    # integrated graphics — so this job records a number and never fails on it.
+    # Failing a build on a timing measured somewhere the budget does not apply
+    # would train everyone to ignore it.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - name: per-pass breakdown
+        run: just perf
