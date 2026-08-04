@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>diomano — headless replay</title>
+  </head>
+  <body>
+    <!--
+      The browser half of `just verify-cross` (HANDOFF §6.3).
+
+      Deliberately bare: no Three.js, no game loop, no renderer. The only thing
+      under test is whether the *same wasm module* the browser runs produces the
+      same per-tick hashes as the native binary. Anything else on this page
+      could only obscure that.
+
+      The page loads nothing on its own; `tools/verify-cross.mjs` drives it
+      through Playwright and calls `window.diomanoReplay(logText)`.
+    -->
+    <pre id="out">idle</pre>
+    <script type="module">
+      /**
+       * Instantiate the module and replay a session log inside it.
+       * Returns `{ hashes: [[tick, "0x..."], ...] }` or `{ error }`.
+       */
+      window.diomanoReplay = async (logText) => {
+        const { instance } = await WebAssembly.instantiateStreaming(fetch("/diomano.wasm"), {});
+        const e = instance.exports;
+
+        // Write the log straight into the module's own buffer. No JSON, no
+        // string marshalling: the same zero-copy discipline the game uses.
+        const bytes = new TextEncoder().encode(logText);
+        if (bytes.length > e.dio_log_capacity()) {
+          return { error: `log is ${bytes.length} bytes, buffer holds ${e.dio_log_capacity()}` };
+        }
+        new Uint8Array(e.memory.buffer, e.dio_log_ptr(), bytes.length).set(bytes);
+
+        const status = e.dio_replay(bytes.length);
+        if (status !== 0) return { error: `replay failed at log line ${status}` };
+
+        const count = e.dio_replay_hash_count();
+        const raw = new Uint32Array(e.memory.buffer, e.dio_replay_hashes_ptr(), count * 3);
+        const hashes = [];
+        for (let i = 0; i < count; i++) {
+          const tick = raw[i * 3];
+          const lo = BigInt(raw[i * 3 + 1] >>> 0);
+          const hi = BigInt(raw[i * 3 + 2] >>> 0);
+          const value = (hi << 32n) | lo;
+          hashes.push([tick, `0x${value.toString(16).padStart(16, "0")}`]);
+        }
+        document.getElementById("out").textContent = `${count} hashes`;
+        return { hashes };
+      };
+      document.getElementById("out").textContent = "ready";
+    </script>
+  </body>
+</html>
