@@ -201,6 +201,12 @@ corpus failed is the one thing this project must not do.
 check`, so a malformed deploy config fails on the pull request rather than as a
 failed deploy on main.
 
+**Exactly one pipeline may publish the `amigo-diomano` Worker.** The CI `deploy`
+job is it. Cloudflare's Workers Builds git integration targets the same Worker, so
+leaving both enabled is two pipelines racing to publish to one name, where whichever
+finishes second silently wins. Disconnect the git integration — or keep it and
+delete the CI job — but not both.
+
 ## Free Tier budget
 
 | Resource | Free limit |

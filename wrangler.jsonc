@@ -25,6 +25,13 @@
   // Must match the Workers project the repository is already connected to. A
   // different name here silently creates a second project and leaves the
   // original deploy red.
+  //
+  // **Exactly one thing may deploy this name.** The `deploy` job in
+  // `.github/workflows/ci.yml` is that thing. Cloudflare's own Workers Builds git
+  // integration points at this same Worker, so leaving both enabled means two
+  // pipelines racing to publish to one target — and the loser silently wins
+  // whenever it happens to finish second. Disconnect the git integration; or if you
+  // would rather keep it, delete the CI `deploy` job instead. Not both.
   "name": "amigo-diomano",
 
   "compatibility_date": "2026-08-04",
