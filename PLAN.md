@@ -288,20 +288,27 @@ Recorded rather than resolved silently. See the run summary for the full list.
 - [x] **No Durable Object**, so §6.6's "the Lobby DO must not stay alive during a
       match" holds by construction rather than by vigilance. That is the reason this
       landed separately from signalling
-- [x] `just deploy` / `just deploy-check`, and a `deploy` job in CI gated on
-      `main` **and** on the whole gate including the corpus — publishing a build
-      whose determinism corpus failed is the one thing this project must not do
-- [x] The build cannot run on Cloudflare's side: the wasm is gitignored and needs
-      cargo plus the wasm32 target, and the Workers image ships Node and Bun but not
-      Rust. CI has that toolchain already, so Cloudflare receives a finished
-      directory
-- [x] `deploy-check` runs inside `just check`, which also gets the production
-      `vite build` exercised on every pull request rather than only at deploy time
+- [x] **Cloudflare builds and deploys**, via the git integration that already
+      exists — so **no API token in GitHub**. That connection authenticates
+      Cloudflare→GitHub and needs nothing from us; deploying from Actions would have
+      needed credentials in the opposite direction
+- [x] `scripts/cloudflare-build.sh` — the price of the above. The Workers image has
+      no Rust, so it installs the toolchain per build with no cargo cache, then
+      builds wasm → wasm-opt → vite. Slower builds, no credentials, chosen knowingly
+- [x] The script refuses to finish without `index.html` and `diomano.wasm` in
+      `web/dist`: an assets-only Worker with no assets is a *successful* deploy of a
+      blank site, which is worse than a failed build
+- [x] `just cf-build` runs that exact script locally; `just deploy-check` validates
+      the config with no credentials inside `just check`, which also gets the
+      production `vite build` exercised on every pull request
 - [x] Resolves the `Workers Builds` red check that had never once succeeded — it
       was failing because nothing in the repo was deployable
-- [ ] Requires two repository secrets, `CLOUDFLARE_API_TOKEN` and
-      `CLOUDFLARE_ACCOUNT_ID`, and the old Workers Builds git integration
-      disconnected. Neither is a code change
+- [ ] **One honest gap:** the rustup-install branch cannot be exercised anywhere
+      Rust already exists, i.e. every machine this project is otherwise built on.
+      First Cloudflare build is the test; if the image blocks rustup, the fallback is
+      a CI deploy with a token
+- [ ] Setup, not a code change: point the Workers Builds **build command** at
+      `bash ./scripts/cloudflare-build.sh`
 
 ## Next
 

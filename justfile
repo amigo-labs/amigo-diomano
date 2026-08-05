@@ -79,16 +79,22 @@ preview: build-web
 deploy-check: build-web
     WRANGLER_SEND_METRICS=false ./web/node_modules/.bin/wrangler deploy --dry-run
 
-# Build the client and publish it to Cloudflare.
+# Exactly what Cloudflare's Workers Builds container runs, runnable here.
 #
-# The build has to happen here rather than in Cloudflare's own git integration:
-# `web/public/diomano.wasm` is gitignored and compiled from `crates/diomano-wasm`,
-# so producing `web/dist` needs cargo and the wasm32 target, and the Workers build
-# image ships Node and Bun but not Rust. CI already installs that toolchain with a
-# cargo cache, so the build stays where the toolchain is and Cloudflare receives a
-# finished directory.
+# The point of having this as a recipe is that the deploy build is testable without
+# waiting for a deploy: it installs the Rust toolchain only when cargo is missing,
+# so locally it skips straight to building. The rustup path itself can therefore
+# only be exercised on Cloudflare — which is the one honest gap in this setup.
+cf-build:
+    bash ./scripts/cloudflare-build.sh
+
+# Publish by hand, from a machine that already has the toolchain.
 #
-# Requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the environment.
+# **Not the normal path.** Cloudflare's git integration builds and deploys on every
+# push to the connected branch; this exists for the case where you need to push a
+# build out without going through git. Requires CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID, which CI deliberately does not have — see `wrangler.jsonc`
+# for why there is only ever one automated publisher.
 deploy: build-web
     WRANGLER_SEND_METRICS=false ./web/node_modules/.bin/wrangler deploy
 

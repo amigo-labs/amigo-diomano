@@ -189,23 +189,43 @@ them.
 by construction rather than by vigilance: there is nothing that could stay alive
 during a match. That is the whole reason this landed separately from signalling.
 
-**The build cannot happen on Cloudflare's side.** `web/public/diomano.wasm` is
-gitignored and compiled from `crates/diomano-wasm`, so producing `web/dist` needs
-cargo and the wasm32 target, and the Workers build image ships Node and Bun but not
-Rust. CI already installs that toolchain with a cargo cache, so `just deploy` builds
-there and Cloudflare receives a finished directory. The deploy is gated on the
-entire gate — including the corpus — because publishing a build whose determinism
-corpus failed is the one thing this project must not do.
+**Cloudflare builds and deploys it**, through the git integration that already
+exists. CI does not deploy at all, and that is the deliberate choice:
+
+- The git integration authenticates **Cloudflare→GitHub** — it reads the repo and
+  needs nothing from us. Deploying from GitHub Actions would have needed
+  credentials in the **opposite** direction, a Cloudflare API token living in
+  GitHub, because a runner is outside the Cloudflare account. (There is no OIDC
+  federation to the Workers API, or that would have been the tokenless route.)
+- The price is Rust. `web/public/diomano.wasm` is gitignored and compiled from
+  `crates/diomano-wasm`, so producing `web/dist` needs cargo and the wasm32
+  target, and the Workers image ships Node and Bun but not Rust. So
+  `scripts/cloudflare-build.sh` installs the toolchain per build, with no cargo
+  cache. Slower builds, no credentials — that is the trade, made on purpose.
+
+Workers Builds settings this expects:
+
+| setting | value |
+|---|---|
+| build command | `bash ./scripts/cloudflare-build.sh` |
+| deploy command | `npx wrangler deploy` (the default) |
+
+**Exactly one pipeline may publish the `amigo-diomano` Worker**, and it is that
+integration. Two publishers on one name is a race whose loser silently wins
+whenever it finishes second, so if the deploy is ever moved into CI, the git
+integration has to be disconnected in the same change.
+
+**One honest gap:** the rustup-install branch of that script cannot be exercised
+anywhere Rust is already present, which is every machine this project is otherwise
+built on. `just cf-build` runs the same script locally and will skip straight past
+the install. If Cloudflare's image blocks the rustup download, the build fails there
+and the fallback is to move the deploy to CI with a token.
 
 `just deploy-check` validates the config with no credentials and runs inside `just
 check`, so a malformed deploy config fails on the pull request rather than as a
-failed deploy on main.
-
-**Exactly one pipeline may publish the `amigo-diomano` Worker.** The CI `deploy`
-job is it. Cloudflare's Workers Builds git integration targets the same Worker, so
-leaving both enabled is two pipelines racing to publish to one name, where whichever
-finishes second silently wins. Disconnect the git integration — or keep it and
-delete the CI job — but not both.
+failed deploy after merge. The script also refuses to finish if `web/dist` lacks
+`index.html` or `diomano.wasm`: an assets-only Worker with no assets is a
+*successful* deploy of a blank site, which is worse than a failed build.
 
 ## Free Tier budget
 
