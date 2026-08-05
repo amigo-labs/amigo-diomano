@@ -62,6 +62,37 @@ preview: build-web
     cd web && bun run preview
 
 # ---------------------------------------------------------------------------
+# Deploy
+# ---------------------------------------------------------------------------
+
+# Validate `wrangler.jsonc` without uploading anything.
+#
+# Needs no credentials, which is the point: it runs inside `just check`, so a
+# malformed deploy config fails on the pull request rather than on main, where the
+# only way to find out is a failed deploy.
+#
+# Depends on `build-web` because it has to: wrangler resolves `assets.directory`
+# eagerly and exits 1 if `web/dist` is absent, so a dry run against an unbuilt tree
+# tests nothing and fails for the wrong reason. The useful side effect is that the
+# production build — `tsc --noEmit && vite build` — now runs on every pull request
+# instead of only at deploy time.
+deploy-check: build-web
+    WRANGLER_SEND_METRICS=false ./web/node_modules/.bin/wrangler deploy --dry-run
+
+# Build the client and publish it to Cloudflare.
+#
+# The build has to happen here rather than in Cloudflare's own git integration:
+# `web/public/diomano.wasm` is gitignored and compiled from `crates/diomano-wasm`,
+# so producing `web/dist` needs cargo and the wasm32 target, and the Workers build
+# image ships Node and Bun but not Rust. CI already installs that toolchain with a
+# cargo cache, so the build stays where the toolchain is and Cloudflare receives a
+# finished directory.
+#
+# Requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the environment.
+deploy: build-web
+    WRANGLER_SEND_METRICS=false ./web/node_modules/.bin/wrangler deploy
+
+# ---------------------------------------------------------------------------
 # Determinism
 # ---------------------------------------------------------------------------
 

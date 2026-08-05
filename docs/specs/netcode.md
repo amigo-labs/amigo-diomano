@@ -4,10 +4,11 @@ Split from `docs/HANDOFF.md` §6 (Phase 0).
 
 > **Partly implemented.** The lockstep loop, the command-frame codec and a
 > latency/loss transport exist and are tested (`web/src/netcode/`, `just
-> verify-lockstep`). WebRTC, TURN, signalling, Durable Objects, keyframes and
-> reconnect do **not** exist, because none of them can be verified without a
-> deployed Cloudflare environment — and a half-built netcode layer is worse than
-> none.
+> verify-lockstep`), and the client is deployed to Cloudflare as static assets
+> (`wrangler.jsonc`). WebRTC, TURN, signalling, Durable Objects, keyframes and
+> reconnect do **not** exist — a half-built netcode layer is worse than none, and
+> the DOs in particular should not appear until §6.6's "the Lobby DO must not stay
+> alive during a match" is designed in rather than checked afterwards.
 >
 > Precisely what is done, and what is not, is marked per section below.
 
@@ -147,7 +148,7 @@ of the verbs rather than of the harness:
    gating path and the effect paths are both covered, by different artifacts, on
    purpose.
 
-## Transport — not implemented
+## Transport — WebRTC not implemented; static hosting is
 
 `Lockstep` drives a `Transport` interface (`send`, `onReceive`) and does not know
 what one is. `web/src/netcode/loopback.ts` implements it in-process with
@@ -165,9 +166,40 @@ seeds and demands identical hashes.
   never exposed. **Recorded trade-off:** STUN would be free and unlimited, but
   TURN bandwidth is being spent deliberately to buy IP privacy. Do not silently
   relax it to "save bandwidth"; the maths below shows the cost is negligible.
-- Cloudflare Realtime for TURN.
-- Durable Objects: Lobby (signalling), Directory, Budget Gatekeeper.
-- Static assets on Cloudflare Pages: unlimited bandwidth.
+  **Not implemented.**
+- Cloudflare Realtime for TURN. **Not implemented.**
+- Durable Objects: Lobby (signalling), Directory, Budget Gatekeeper. **Not
+  implemented — and see the §6.6 rule below before any of them are.**
+- Static assets. **Implemented** — `wrangler.jsonc`, deployed by the `deploy` job
+  in `.github/workflows/ci.yml`.
+
+### Static hosting
+
+An **assets-only** Worker: an `assets` block and no `main`, so files are served
+without a Worker invocation per request. Unknown paths get a real 404 rather than
+`index.html`, because there is one route and no client-side router to hand them to.
+
+**Divergence from §6.6, recorded rather than silent:** the spec says static assets
+on Cloudflare *Pages*. This uses **Workers Static Assets**, the current successor
+for this case — equally unmetered for static requests, and it keeps one platform
+for when signalling arrives instead of Pages for the assets plus a Worker beside
+them.
+
+**It introduces no Durable Object**, so the architectural rule below is satisfied
+by construction rather than by vigilance: there is nothing that could stay alive
+during a match. That is the whole reason this landed separately from signalling.
+
+**The build cannot happen on Cloudflare's side.** `web/public/diomano.wasm` is
+gitignored and compiled from `crates/diomano-wasm`, so producing `web/dist` needs
+cargo and the wasm32 target, and the Workers build image ships Node and Bun but not
+Rust. CI already installs that toolchain with a cargo cache, so `just deploy` builds
+there and Cloudflare receives a finished directory. The deploy is gated on the
+entire gate — including the corpus — because publishing a build whose determinism
+corpus failed is the one thing this project must not do.
+
+`just deploy-check` validates the config with no credentials and runs inside `just
+check`, so a malformed deploy config fails on the pull request rather than as a
+failed deploy on main.
 
 ## Free Tier budget
 

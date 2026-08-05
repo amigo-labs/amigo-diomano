@@ -280,13 +280,38 @@ Recorded rather than resolved silently. See the run summary for the full list.
       "DO duration for a full match under 5 GB-s" measurement — **not started**,
       and none of them verifiable without a deployed Cloudflare environment
 
+### 16. Static hosting on Cloudflare ✅
+
+- [x] `wrangler.jsonc` — an **assets-only** Worker: `assets` block, no `main`, so
+      files are served without a Worker invocation per request. Unknown paths get a
+      real 404, because there is one route and no client-side router
+- [x] **No Durable Object**, so §6.6's "the Lobby DO must not stay alive during a
+      match" holds by construction rather than by vigilance. That is the reason this
+      landed separately from signalling
+- [x] `just deploy` / `just deploy-check`, and a `deploy` job in CI gated on
+      `main` **and** on the whole gate including the corpus — publishing a build
+      whose determinism corpus failed is the one thing this project must not do
+- [x] The build cannot run on Cloudflare's side: the wasm is gitignored and needs
+      cargo plus the wasm32 target, and the Workers image ships Node and Bun but not
+      Rust. CI has that toolchain already, so Cloudflare receives a finished
+      directory
+- [x] `deploy-check` runs inside `just check`, which also gets the production
+      `vite build` exercised on every pull request rather than only at deploy time
+- [x] Resolves the `Workers Builds` red check that had never once succeeded — it
+      was failing because nothing in the repo was deployable
+- [ ] Requires two repository secrets, `CLOUDFLARE_API_TOKEN` and
+      `CLOUDFLARE_ACCOUNT_ID`, and the old Workers Builds git integration
+      disconnected. Neither is a code change
+
 ## Next
 
-Phase 7's remaining half is transport and hosting, and it is gated on
+Phase 7's remaining half is transport and signalling, and it is gated on
 infrastructure rather than on code: `Lockstep` drives a `Transport` interface and
-WebRTC is a drop-in for it. Design for the §6.6 budget rule first — the Lobby DO
-must not stay alive during a match — because that is failure mode 5, and it will
-never show up in testing with two people and one match.
+WebRTC is a drop-in for it. Static hosting is now in place (§16) and deliberately
+brought no Durable Object with it, so the §6.6 budget rule is still unviolated and
+still un-designed — design it first, because the Lobby DO must not stay alive during
+a match, that is failure mode 5, and it will never show up in testing with two
+people and one match.
 
 The combat-coverage gap in §14 is the other open item, and it needs a decision
 rather than more effort: either a scripted land bridge across a seam, or a fixture
