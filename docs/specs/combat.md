@@ -103,3 +103,78 @@ special-cased pathfinder, and it automatically tracks the opponent's magnet.
 
 With combat in the game the champion is not an outlier against pillar 3 — it is
 simply the escalation lever. Open decision resolved: keep it.
+
+## The leader is invincible on its own papal magnet
+
+Populous II's rule verbatim (`balance-research` finding 5, TODO-7): the leader
+standing on the magnet is untouchable, surrounded by blue holy fire.
+
+It earns its place rather than being nostalgia. Without it the magnet — the one
+positional decision the player gets over their walkers — only ever argues for
+caution, because placing it forward is strictly risky. With it a forward magnet is
+a defensible rally point, and the decision has two sides.
+
+Invincibility suppresses only *incoming* damage. The leader still deals its
+strength, which is what makes the holy fire a threat rather than a bunker.
+
+The predicate is read for **both** walkers of a pair before either `hp` is
+written, for the same reason the strengths already were: evaluating it after a
+write would let the pair's outcome depend on which walker the loop reached first,
+and "the stronger survives with a remainder" would quietly become "whoever is
+listed first wins".
+
+`a_leader_off_its_magnet_is_mortal` and
+`invincibility_does_not_cross_to_the_other_players_magnet` exist so the rule
+cannot degenerate into "leaders are invincible", which would make a forward magnet
+free instead of a decision.
+
+## Friendly walkers merge on contact
+
+Populous's rule (`balance-research` finding 7, TODO-8): two of your walkers that
+bump into each other combine into one stronger walker. It is what made the papal
+magnet a *stacking* tool — gather, combine, march — and without it the manual's own
+advice had no analogue here.
+
+`merge` is its own pass, between bucketing and fighting, not inline in `fight`:
+merging kills walkers, and `fight` walks `bucket` indices that would go stale
+underneath it. It uses the §4.7 order for the same reason combat does — cells in
+flat index order, id-ascending within a cell, which the bucket already guarantees
+by construction.
+
+**The leader always absorbs and is never absorbed.** Not a style choice:
+`walkers::remove` drops the papal magnet when the walker it removes is the leader
+(§5.1, "if the leader dies the magnet drops there"), which is right for a death and
+wrong for a merge. Keeping the leader on the absorbing side holds
+`magnet[p].leader` valid without teaching `remove` about merging.
+
+**Champions take no part**, absorbing or absorbed. A champion is a unit a verb was
+spent on; merging it away would make a power's effect depend on where walkers
+happened to be standing.
+
+**A walker already at `MERGE_MAX_STRENGTH` cannot absorb more.** This is what keeps
+an army an army. Every walker follows the same flow field to the same magnet, so
+without the gate they all converge into a single walker — measured at one walker
+per player for a whole 20,000-tick match, with population growth contributing
+nothing once that walker hit the cap. Stopping at the cap means a larger population
+fields more capped walkers, which is the original rule's actual point.
+
+**A merge carries population, it does not spend it.** The absorbed walker's
+settlement slot stays charged (`Walker::pop_carried`), because its people are still
+in the field. Releasing it instead lets `spawn_population` refill the slot the next
+tick, the fresh walker lands on the same cell and merges again: 16,928 merges
+against two surviving walkers, measured, before this was fixed. Carried population
+is released in full when the merged walker dies, or a long match strangles its own
+settlements into never spawning again.
+
+Determinism is re-established for friendly contact rather than inherited from the
+enemy-contact test: `stress_200_friendly_contacts_is_deterministic` runs 50 cells
+of four co-located walkers 100 times, because merging changes walker-count dynamics
+and that is exactly what §4.7's guarantee is about.
+
+### A champion may not be promoted twice
+
+Found by the corpus, not by review. `make_champion` triples strength, and nothing
+stopped it re-promoting a walker that was already a champion: repeated casts
+compounded **2 → 6 → 18 → 54 → 162 → 255**, past `MERGE_MAX_STRENGTH` and every
+other bound in the game. A second cast now promotes a second walker, or does
+nothing.

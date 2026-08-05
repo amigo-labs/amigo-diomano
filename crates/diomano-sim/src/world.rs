@@ -212,6 +212,49 @@ pub const WALKER_ALIVE: u8 = 1 << 0;
 pub const WALKER_LEADER: u8 = 1 << 1;
 pub const WALKER_CHAMPION: u8 = 1 << 2;
 
+/// Ceiling on the strength of a walker built by merging (§4.7, `balance-research`
+/// TODO-8). `[START]`.
+///
+/// There is no sourced value for this and there cannot be: TODO-4 records that
+/// walker strength was never published as a number in any original manual or
+/// guide, only ever as coloured bars. So this is a playtest value, chosen as
+/// roughly twice [`TIER_STRENGTH`]'s maximum so that stacking is worth doing and
+/// still finite. Phase 8 settles it; nothing here cites it as sourced.
+pub const MERGE_MAX_STRENGTH: u8 = 16;
+
+/// Ceiling on a merged walker's hp, keeping the spawn invariant `hp = strength *
+/// 16` (see `walkers::spawn`) true at the cap as well as below it.
+pub const MERGE_MAX_HP: i16 = MERGE_MAX_STRENGTH as i16 * 16;
+
+/// Diagnostic counters. **Deliberately not hashed.**
+///
+/// These exist for one reason: §6.3 asks a fixture corpus to cover "every verb
+/// at least 20 times and at least 200 combat resolutions", and without counting
+/// them that criterion can only be asserted by eye. `world::tests::
+/// the_census_is_not_hashed` pins the exclusion, because a diagnostic that
+/// entered the state hash would turn every fixture into a hostage of its own
+/// instrumentation.
+///
+/// Nothing in the simulation may *read* these. They are write-only from the
+/// simulation's point of view, which is what keeps them from becoming state.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Census {
+    /// Walker-vs-walker pairs that exchanged damage.
+    pub combat_resolutions: u32,
+    /// Friendly pairs folded together by TODO-8 merging.
+    pub merges: u32,
+    /// Commands that survived availability and cost gating, per verb. A verb that
+    /// appears in a log but never here was rejected every time — which a corpus
+    /// must report rather than count as coverage.
+    pub verb_applied: [u32; VERB_COUNT as usize],
+}
+
+impl Census {
+    pub const ZEROED: Self =
+        Self { combat_resolutions: 0, merges: 0, verb_applied: [0; VERB_COUNT as usize] };
+}
+
 /// HANDOFF §4.5: `(face, x: Q16.16, y: Q16.16, strength, hp)`.
 ///
 /// `id` is the slot index and never changes, which is what makes the §4.7
@@ -231,6 +274,19 @@ pub struct Walker {
     pub owner: u8,
     pub strength: u8,
     pub flags: u8,
+    /// Extra population this walker carries because it absorbed others (TODO-8).
+    ///
+    /// A merge concentrates population, it does not spend it: the absorbed
+    /// walker's settlement slot stays charged, because its people are still in the
+    /// field — inside the walker that ate it. Releasing the slot instead makes
+    /// `spawn_population` refill it the very next tick, and a settlement standing
+    /// on a merge point then pumps one walker per tick forever while the army
+    /// never grows past a single capped walker.
+    ///
+    /// Deliberately last in the struct: everything before it keeps the offsets the
+    /// browser's `WALKER` table in `web/src/main.ts` hardcodes, and `Walker` was
+    /// already padded to 20 bytes, so the stride does not move either.
+    pub pop_carried: u8,
 }
 
 impl Walker {
@@ -595,6 +651,8 @@ pub struct World {
     pub sea_level: i16,
     pub rng: Rng,
     pub last_hash: u64,
+    /// Diagnostic only, never hashed. See [`Census`].
+    pub census: Census,
     /// 0 = running, 1 = player 0 won, 2 = player 1 won, 3 = draw.
     pub outcome: u8,
     pub _pad: [u8; 7],
@@ -640,6 +698,7 @@ impl World {
                 owner: 0,
                 strength: 0,
                 flags: 0,
+                pop_carried: 0,
             }; MAX_WALKERS],
             settlements: [Settlement {
                 progress: 0,
@@ -686,6 +745,7 @@ impl World {
             sea_level: 0,
             rng: Rng { state: 0 },
             last_hash: 0,
+            census: Census::ZEROED,
             outcome: 0,
             _pad: [0; 7],
         }
@@ -1075,6 +1135,7 @@ impl World {
             h.write_u8(w.owner);
             h.write_u8(w.strength);
             h.write_u8(w.flags);
+            h.write_u8(w.pop_carried);
         }
         for s in &self.settlements {
             h.write_u8(s.flags);
@@ -1553,6 +1614,21 @@ mod tests {
 
         w.lava[c] = 7;
         assert_ne!(w.state_hash(), base);
+    }
+
+    /// The census is instrumentation, not state. If it entered the hash, adding a
+    /// counter would invalidate every committed fixture and a desync report would
+    /// start depending on how many times something was measured.
+    #[test]
+    fn the_census_is_not_hashed() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let base = w.state_hash();
+
+        w.census.combat_resolutions = 4_242;
+        w.census.merges = 99;
+        w.census.verb_applied[VERB_RAISE as usize] = 1_000;
+        assert_eq!(w.state_hash(), base, "a diagnostic counter reached the state hash");
     }
 
     #[test]

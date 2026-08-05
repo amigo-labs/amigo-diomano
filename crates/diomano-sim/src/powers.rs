@@ -47,6 +47,15 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         }
     }
 
+    // Counted here, past the gating, so the census reports what a log *did* and
+    // not what it asked for. A verb rejected on cost or availability every single
+    // time exercises nothing, and §6.3's coverage criterion would be satisfied by
+    // a corpus that never ran the code (diagnostic only; see `world::Census`).
+    if (cmd.verb as usize) < w.census.verb_applied.len() {
+        let n = &mut w.census.verb_applied[cmd.verb as usize];
+        *n = n.saturating_add(1);
+    }
+
     let radius = World::brush_radius(cmd.modifier);
     match cmd.verb {
         VERB_RAISE => sculpt(w, player, face, cx, cy, radius, true),
@@ -69,12 +78,10 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
             crate::walkers::make_champion(w, player);
         }
         VERB_ARMAGEDDON => crate::tide::trigger_armageddon(w),
-        VERB_SET_HAND => {
-            // Mixing is impossible: picking up a second material requires
-            // depositing the first (§4.2).
-            if w.hand[player].amount == 0 {
-                w.hand[player].material = (cmd.x as u8).min(HAND_LAVA);
-            }
+        // Mixing is impossible: picking up a second material requires depositing
+        // the first (§4.2). A full hand ignores the verb rather than swapping.
+        VERB_SET_HAND if w.hand[player].amount == 0 => {
+            w.hand[player].material = (cmd.x as u8).min(HAND_LAVA);
         }
         _ => {}
     }
@@ -578,6 +585,35 @@ pub fn parse_log_header(src: &str) -> Result<LogHeader, ParseError> {
             "terrain" => cfg.terrain = v.clamp(0, 2) as u8,
             "waves" => cfg.waves = v.clamp(1, crate::world::MAX_WAVES as i64) as u8,
             "ai" => cfg.ai_enabled = u8::from(v != 0),
+            // Bitmask over the power ids: bit `i` enables power `i`.
+            //
+            // Here because §6.3 asks a corpus to cover every verb at least 20
+            // times and the shipped manifest cannot deliver that: §5.4 ships with
+            // swamp disabled, so on the default config `VERB_SWAMP` is inert and
+            // that criterion is unreachable by construction rather than by
+            // accident. A corpus match can enable everything; keeping other
+            // matches on the shipped mask is what keeps the *gating* path covered
+            // too.
+            "powers" => {
+                for p in 0..POWER_COUNT {
+                    cfg.power_enabled[p] = u8::from((v >> p) & 1 != 0);
+                }
+            }
+            // Zero every power's mana cost.
+            //
+            // Also here for §6.3, and for the same reason: a determinism corpus
+            // has to reach every verb's *effect*, and on the shipped costs the
+            // expensive half of the verb set is unreachable — armageddon is 4,000
+            // mana against an accrual of a fraction of one per tick, so a 20,000
+            // tick match affords none of it. Cost is a `[START]` balance number
+            // with no published source (`balance-research` TODO-1); determinism is
+            // not. The gating path itself stays covered by the fixtures recorded
+            // on the shipped manifest.
+            "free_powers" => {
+                if v != 0 {
+                    cfg.power_cost = [0; POWER_COUNT];
+                }
+            }
             "ticks" => ticks = v.clamp(0, 10_000_000) as u32,
             _ => return Err(err(line_no, "unknown header key")),
         }

@@ -2,13 +2,15 @@
 
 Split from `docs/HANDOFF.md` §6 (Phase 0).
 
-> **Nothing in this file is implemented.** Phase 7 is explicitly out of scope for
-> this run: no WebRTC, no lockstep loop, no command frames on a wire, no Durable
-> Objects, no Cloudflare anything. A half-built netcode layer is worse than none.
+> **Partly implemented.** The lockstep loop, the command-frame codec and a
+> latency/loss transport exist and are tested (`web/src/netcode/`, `just
+> verify-lockstep`), and the client is deployed to Cloudflare as static assets
+> (`wrangler.jsonc`). WebRTC, TURN, signalling, Durable Objects, keyframes and
+> reconnect do **not** exist — a half-built netcode layer is worse than none, and
+> the DOs in particular should not appear until §6.6's "the Lobby DO must not stay
+> alive during a match" is designed in rather than checked afterwards.
 >
-> What *is* done is the shape that makes adding it a transport concern and
-> nothing more, plus the determinism guarantee it rests on. Both are recorded
-> below so the next phase starts from evidence rather than from hope.
+> Precisely what is done, and what is not, is marked per section below.
 
 ---
 
@@ -32,7 +34,11 @@ Split from `docs/HANDOFF.md` §6 (Phase 0).
 Deterministic lockstep. Only inputs cross the wire; all state is derived.
 Bandwidth is independent of world size, destructibility and walker count.
 
-## Command frames
+**Implemented:** `web/src/netcode/lockstep.ts`. A tick is simulated only once
+every peer's input for it is known — never predicted, never rolled back, never
+resynced.
+
+## Command frames — implemented
 
 Packed to 8 bytes. Every tick both clients exchange a frame, empty frames
 included, so a silent peer is distinguishable from a stalled one.
@@ -46,28 +52,180 @@ Gesture recognition runs entirely client-side; only the result enters the
 command stream. It already samples on a fixed timer rather than per frame, which
 is the half of §6.2 that this run did implement.
 
-## Desync detection
+`web/src/netcode/frame.ts` is the codec. It is not a second wire format: it is
+`Command::encode`'s bit layout, the one documented above, written out in
+TypeScript. Two encoders for one format is a desync waiting to happen, which is
+why the roundtrip is asserted rather than assumed.
+
+### Every packet carries the whole unsimulated window
+
+Not in §6 and it has to be, because lockstep and packet loss interact badly:
+the loop cannot pass a tick whose input it lacks, so **one dropped frame is a
+deadlock, not a hiccup.** Measured: a match over a 2% loss link stopped dead at
+tick 20 with nothing to retransmit it.
+
+The conventional answer is a reliable ordered DataChannel and letting SCTP
+retransmit. This repeats the window in the packet instead, trading bytes for
+latency — a retransmit costs a whole round trip, 120 ms of the 200 ms input-delay
+budget, whereas the entire window is `INPUT_DELAY_TICKS + 1` frames, 56 bytes,
+inside the ~100 bytes of framing every packet already pays for. The budget maths
+below is what makes that trade obviously right.
+
+The window is anchored to "what the peer cannot have simulated yet" rather than
+being a fixed tail of history. The first attempt used a fixed tail, and it was too
+short to hold the opening burst — tick 0 was evicted before it was ever sent, and
+the match deadlocked on its own first tick. Anchoring makes that unrepresentable.
+
+Correlated loss, a burst taking all seven copies, is **not** covered. The answer
+there is the stall path: `Lockstep.step` reports and waits, and never invents
+input.
+
+## Desync detection — implemented
 
 Hash every 30 ticks; on mismatch halt immediately, dump both states plus the
-input log, and do not attempt to resync.
+input log, and do not attempt to resync. `Lockstep.compare` is terminal by
+design: a resync would paper over the bug that caused the divergence, and the bug
+is the only thing that matters.
 
-CI acceptance criterion `[START]`: 10 recorded matches of ≥ 20,000 ticks each,
-covering every verb at least 20 times and at least 200 combat resolutions,
-replaying bit-identically native vs. headless browser.
+A hash claim for a tick the receiver has not reached yet is **kept**, not
+dropped. At 120 ms RTT a peer is routinely a few ticks ahead, so discarding early
+claims would silently switch off desync detection exactly under load — which is
+where a desync is most likely.
 
-**This run ships 1 fixture of 2,400 ticks.** The harness (`just record`,
-`just verify`, `just verify-cross`) is complete; only the corpus is small.
-Raising it is a matter of a longer script and more `just record` invocations.
+`just verify-lockstep` runs two wasm instances through the layer at the Phase 7
+DoD's conditions (120 ms RTT, 2% loss, 30 ms jitter) and checks three things:
+1,200 ticks without divergence; identical hashes across two different link
+schedules, so arrival order provably cannot reach the simulation; and that an
+injected divergence **is caught** — a detector never seen to fire is a comment.
 
-## Transport
+### The §6.3 acceptance criterion
+
+`[START]`: 10 recorded matches of ≥ 20,000 ticks each, covering every verb at
+least 20 times and at least 200 combat resolutions, replaying bit-identically
+native vs. headless browser.
+
+**Status: three of four met.** `fixtures/match-00..09` are ten matches of 20,000
+ticks; `just verify-match N` replays each natively *and* in headless Chromium, as
+a 10-way CI matrix so the wall clock is one match rather than ten. Every verb
+clears 20 uses across the corpus (`just verify-corpus`).
+
+**Not met: 200 combat resolutions. The corpus records zero.** The cause is
+structural, not a script that needs more tuning:
+
+- `seed_starting_positions` places the two players on **opposite faces**, at
+  compile-time constants, "as far apart as this topology allows".
+- diomano has no naval movement, and `step_walker` only follows its own flow
+  field onto passable ground.
+- On mostly-ocean terrain there is no land route between the two homes, so the
+  flow-field BFS never reaches the far side. Traced: both walkers pinned on their
+  spawn cell for an entire 20,000-tick match.
+
+So a log — which by design cannot read the world — would have to terraform a land
+bridge across a seam before either army could meet. The alternative is a fixture
+format that can place walkers directly, which changes the log contract.
+`diomano-cli corpus --strict` enforces the criterion; the default reports it as a
+KNOWN GAP on every run, so it cannot quietly become the new normal.
+
+Combat determinism is meanwhile covered natively rather than left unguarded:
+`combat::stress_200_simultaneous_contacts_is_deterministic` (200 simultaneous
+contacts, 100 runs) and `stress_200_friendly_contacts_is_deterministic`.
+
+### Two things the criterion cannot ask of one match
+
+Found while building the corpus, and worth recording because both are properties
+of the verbs rather than of the harness:
+
+1. **`VERB_FLOOD` is monotonic.** It raises `sea_base` and nothing ever lowers it.
+   Twenty floods — the minimum the criterion asks for — leave the planet under
+   water, which drowns every route and guarantees zero combat. So the corpus is
+   split: five `war` matches that stay habitable, five `cataclysm` matches that
+   issue flood and armageddon. Counts are met across the corpus, per-match numbers
+   all printed.
+2. **The shipped §5.4 manifest disables swamp.** On that mask `VERB_SWAMP` is
+   inert and "every verb at least 20 times" is unreachable no matter how long a
+   match runs. The corpus therefore enables all eight powers and zeroes their
+   costs, and `fixtures/session.log` stays on the shipped manifest — so the
+   gating path and the effect paths are both covered, by different artifacts, on
+   purpose.
+
+## Transport — WebRTC not implemented; static hosting is
+
+`Lockstep` drives a `Transport` interface (`send`, `onReceive`) and does not know
+what one is. `web/src/netcode/loopback.ts` implements it in-process with
+injectable latency, jitter and loss, driven by a **seeded** PRNG — a flaky netcode
+test that cannot be replayed is worse than none, because it teaches you to re-run
+it. A WebRTC implementation is a drop-in for that interface and nothing else has
+to change.
+
+The transport PRNG cannot affect determinism, and that is asserted rather than
+argued: the transport decides only *when* a frame arrives, lockstep applies frames
+by tick number, and `verify-lockstep` runs the same match over two different link
+seeds and demands identical hashes.
 
 - WebRTC DataChannel, `iceTransportPolicy: "relay"` — TURN only, so peer IPs are
   never exposed. **Recorded trade-off:** STUN would be free and unlimited, but
   TURN bandwidth is being spent deliberately to buy IP privacy. Do not silently
   relax it to "save bandwidth"; the maths below shows the cost is negligible.
-- Cloudflare Realtime for TURN.
-- Durable Objects: Lobby (signalling), Directory, Budget Gatekeeper.
-- Static assets on Cloudflare Pages: unlimited bandwidth.
+  **Not implemented.**
+- Cloudflare Realtime for TURN. **Not implemented.**
+- Durable Objects: Lobby (signalling), Directory, Budget Gatekeeper. **Not
+  implemented — and see the §6.6 rule below before any of them are.**
+- Static assets. **Implemented** — `wrangler.jsonc`, deployed by the `deploy` job
+  in `.github/workflows/ci.yml`.
+
+### Static hosting
+
+An **assets-only** Worker: an `assets` block and no `main`, so files are served
+without a Worker invocation per request. Unknown paths get a real 404 rather than
+`index.html`, because there is one route and no client-side router to hand them to.
+
+**Divergence from §6.6, recorded rather than silent:** the spec says static assets
+on Cloudflare *Pages*. This uses **Workers Static Assets**, the current successor
+for this case — equally unmetered for static requests, and it keeps one platform
+for when signalling arrives instead of Pages for the assets plus a Worker beside
+them.
+
+**It introduces no Durable Object**, so the architectural rule below is satisfied
+by construction rather than by vigilance: there is nothing that could stay alive
+during a match. That is the whole reason this landed separately from signalling.
+
+**Cloudflare builds and deploys it**, through the git integration that already
+exists. CI does not deploy at all, and that is the deliberate choice:
+
+- The git integration authenticates **Cloudflare→GitHub** — it reads the repo and
+  needs nothing from us. Deploying from GitHub Actions would have needed
+  credentials in the **opposite** direction, a Cloudflare API token living in
+  GitHub, because a runner is outside the Cloudflare account. (There is no OIDC
+  federation to the Workers API, or that would have been the tokenless route.)
+- The price is Rust. `web/public/diomano.wasm` is gitignored and compiled from
+  `crates/diomano-wasm`, so producing `web/dist` needs cargo and the wasm32
+  target, and the Workers image ships Node and Bun but not Rust. So
+  `scripts/cloudflare-build.sh` installs the toolchain per build, with no cargo
+  cache. Slower builds, no credentials — that is the trade, made on purpose.
+
+Workers Builds settings this expects:
+
+| setting | value |
+|---|---|
+| build command | `bash ./scripts/cloudflare-build.sh` |
+| deploy command | `npx wrangler deploy` (the default) |
+
+**Exactly one pipeline may publish the `amigo-diomano` Worker**, and it is that
+integration. Two publishers on one name is a race whose loser silently wins
+whenever it finishes second, so if the deploy is ever moved into CI, the git
+integration has to be disconnected in the same change.
+
+**One honest gap:** the rustup-install branch of that script cannot be exercised
+anywhere Rust is already present, which is every machine this project is otherwise
+built on. `just cf-build` runs the same script locally and will skip straight past
+the install. If Cloudflare's image blocks the rustup download, the build fails there
+and the fallback is to move the deploy to CI with a token.
+
+`just deploy-check` validates the config with no credentials and runs inside `just
+check`, so a malformed deploy config fails on the pull request rather than as a
+failed deploy after merge. The script also refuses to finish if `web/dist` lacks
+`index.html` or `diomano.wasm`: an assets-only Worker with no assets is a
+*successful* deploy of a blank site, which is worse than a failed build.
 
 ## Free Tier budget
 

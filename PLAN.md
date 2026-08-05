@@ -159,11 +159,14 @@ All run, all green:
 
 ```
 just check                              # clean, zero warnings
-cargo test --workspace                  # 142 tests
+cargo test --workspace                  # 155 tests
 cargo run -p diomano-cli -- perf        # per-pass ms breakdown
 cargo run -p diomano-cli -- replay fixtures/session.log --verify
 just build-web && just dev
 just verify-cross                       # native vs headless Chromium
+just verify-corpus                      # §6.3 coverage over the 10-match corpus
+just verify-match 00                    # one long match, native then Chromium
+just verify-lockstep                    # 120 ms RTT, 2% loss, no desync
 ```
 
 Required tests, by name — all present and passing:
@@ -176,6 +179,15 @@ Required tests, by name — all present and passing:
 - `combat::stress_200_simultaneous_contacts_is_deterministic`
 - `materials::lava_plus_water_yields_rock`
 - `settlements::plateau_5x5_produces_house`
+
+Added since, all passing:
+
+- `combat::stress_200_friendly_contacts_is_deterministic` — TODO-8's own stress
+  case, because merging changes walker-count dynamics and the §4.7 guarantee has
+  to be re-established for friendly contact rather than inherited
+- `combat::leader_on_magnet_takes_no_damage_but_still_deals_it`
+- `combat::a_leader_absorbs_rather_than_being_absorbed`
+- `world::tests::the_census_is_not_hashed`
 
 ---
 
@@ -205,17 +217,109 @@ Recorded rather than resolved silently. See the run summary for the full list.
    `docs/balance-research.md`. §2 assumes they can be researched; for mechanics
    that is true and productive, for quantities it is not.
 
+---
+
+## Since: the corpus, the combat rules, and Phase 7's first slice
+
+### 13. The two combat rules the research left open ✅
+
+- [x] TODO-7 — the leader is invincible on its own papal magnet. Incoming damage
+      only; the leader still deals its strength, so the holy fire is a threat and
+      not a bunker
+- [x] TODO-8 — friendly walkers merge on contact, with the leader always the
+      absorber and champions excluded entirely
+- [x] Three defects found and fixed along the way, none of which a short fixture
+      would have shown: a spawn/merge loop (**16,928 merges against two surviving
+      walkers**), army collapse to a single capped walker, and `make_champion`
+      compounding strength to **255** on repeated casts. `docs/specs/combat.md`
+      and `docs/balance-research.md` carry the detail
+
+### 14. The §6.3 fixture corpus — three criteria of four
+
+- [x] Ten matches of 20,000 ticks, `fixtures/match-00..09`, 1.2 MB total
+- [x] Every verb applied 20+ times across the corpus, asserted rather than
+      eyeballed — a script change that stops issuing a verb fails the build
+- [x] Each match replays bit-identically native vs. headless Chromium, run as a
+      10-way CI matrix so the wall clock is one match rather than the sum of ten
+- [x] `World::census` instrumentation, excluded from the state hash and pinned so
+      by `the_census_is_not_hashed`
+- [ ] ❌ **200 combat resolutions: the corpus records zero.** Structural rather
+      than a tuning problem — the two starting positions are compile-time
+      constants on opposite faces, diomano has no naval movement, and on
+      mostly-ocean terrain the flow-field BFS never reaches the far side. Traced,
+      with both walkers pinned on their spawn cell for a whole match. Printed as a
+      KNOWN GAP on every run; `--strict` enforces it. Combat determinism is
+      covered by the two 100-run stress tests instead of being left unguarded
+- [x] Two properties of the *verbs*, found here and recorded: `VERB_FLOOD` is
+      monotonic, so the 20 uses the criterion demands drown the planet and
+      guarantee zero combat; and the shipped §5.4 manifest disables swamp, so
+      "every verb 20 times" is unreachable on it however long a match runs. Hence
+      two corpus profiles, `war` and `cataclysm`
+- [x] A `u16` overflow in the input script, latent at 2,400 ticks and a panic at
+      20,000 — caught by the overflow checks §10 requires in every profile
+
+### 15. Phase 7, first slice ✅
+
+- [x] `web/src/netcode/frame.ts` — the 8-byte command codec. Not a second wire
+      format: `Command::encode`'s bit layout, written out in TypeScript
+- [x] `web/src/netcode/lockstep.ts` — 6-tick input delay, 2-tick batching, hash
+      exchange every 30 ticks, halt-on-mismatch with an input-log dump, never a
+      resync
+- [x] `web/src/netcode/loopback.ts` — seeded latency, jitter and loss, so a
+      netcode failure is replayable instead of flaky
+- [x] `just verify-lockstep` — 1,200 ticks at the DoD's 120 ms RTT and 2% loss
+      without divergence; identical hashes across two different link schedules, so
+      arrival order provably cannot reach the simulation; and an injected
+      divergence **caught**, because a detector never seen to fire is a comment
+- [x] A design decision forced by measurement: every packet carries the whole
+      unsimulated input window. One dropped frame is a deadlock and not a hiccup —
+      measured, dead at tick 20 — and repeating the window costs bytes rather than
+      a 120 ms retransmit round trip, which §6.6's budget maths says is the right
+      way round
+- [ ] WebRTC, TURN, signalling, Durable Objects, keyframes, reconnect, and the
+      "DO duration for a full match under 5 GB-s" measurement — **not started**,
+      and none of them verifiable without a deployed Cloudflare environment
+
+### 16. Static hosting on Cloudflare ✅
+
+- [x] `wrangler.jsonc` — an **assets-only** Worker: `assets` block, no `main`, so
+      files are served without a Worker invocation per request. Unknown paths get a
+      real 404, because there is one route and no client-side router
+- [x] **No Durable Object**, so §6.6's "the Lobby DO must not stay alive during a
+      match" holds by construction rather than by vigilance. That is the reason this
+      landed separately from signalling
+- [x] **Cloudflare builds and deploys**, via the git integration that already
+      exists — so **no API token in GitHub**. That connection authenticates
+      Cloudflare→GitHub and needs nothing from us; deploying from Actions would have
+      needed credentials in the opposite direction
+- [x] `scripts/cloudflare-build.sh` — the price of the above. The Workers image has
+      no Rust, so it installs the toolchain per build with no cargo cache, then
+      builds wasm → wasm-opt → vite. Slower builds, no credentials, chosen knowingly
+- [x] The script refuses to finish without `index.html` and `diomano.wasm` in
+      `web/dist`: an assets-only Worker with no assets is a *successful* deploy of a
+      blank site, which is worse than a failed build
+- [x] `just cf-build` runs that exact script locally; `just deploy-check` validates
+      the config with no credentials inside `just check`, which also gets the
+      production `vite build` exercised on every pull request
+- [x] Resolves the `Workers Builds` red check that had never once succeeded — it
+      was failing because nothing in the repo was deployable
+- [ ] **One honest gap:** the rustup-install branch cannot be exercised anywhere
+      Rust already exists, i.e. every machine this project is otherwise built on.
+      First Cloudflare build is the test; if the image blocks rustup, the fallback is
+      a CI deploy with a token
+- [ ] Setup, not a code change: point the Workers Builds **build command** at
+      `bash ./scripts/cloudflare-build.sh`
+
 ## Next
 
-Phase 7 (netcode) is the next phase and its prerequisite is met: native and
-browser agree bit-for-bit. Before starting it, raise the fixture corpus toward
-the §6.3 criterion — the harness is complete, only the corpus is small.
+Phase 7's remaining half is transport and signalling, and it is gated on
+infrastructure rather than on code: `Lockstep` drives a `Transport` interface and
+WebRTC is a drop-in for it. Static hosting is now in place (§16) and deliberately
+brought no Durable Object with it, so the §6.6 budget rule is still unviolated and
+still un-designed — design it first, because the Lobby DO must not stay alive during
+a match, that is failure mode 5, and it will never show up in testing with two
+people and one match.
 
-Two decisions are waiting in `docs/balance-research.md`, both found while
-researching and both touching combat: whether the leader should be invincible
-while standing on the papal magnet (the original's rule, and it makes a forward
-magnet defensible rather than suicidal), and whether walkers should merge into
-one stronger walker on contact (the original's rule, and without it the manual's
-own advice — gather at the magnet, combine for strength — has no analogue here).
-Both are recorded rather than implemented, because both change the site §13
-names as most likely to pass casual testing while being wrong.
+The combat-coverage gap in §14 is the other open item, and it needs a decision
+rather than more effort: either a scripted land bridge across a seam, or a fixture
+format that can place walkers directly, which changes the log contract.

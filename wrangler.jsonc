@@ -1,0 +1,64 @@
+// Cloudflare deployment for the web client.
+//
+// An **assets-only** Worker: there is an `assets` block and deliberately no
+// `main`, so the files are served as static assets without a Worker invocation
+// per request. Static asset requests are unmetered, which is why §6.6 lists
+// hosting as the one line in its budget table that is not a constraint.
+//
+// # No Durable Object, on purpose
+//
+// §6.6's architectural rule is that the Lobby DO must not stay alive during a
+// match — failure mode 5, and one that will never show up in testing with two
+// people and one match. Nothing here can violate it, because there is no DO at
+// all yet. Signalling, TURN and the Lobby/Directory/Budget-Gatekeeper DOs belong
+// to the phase that designs that rule in rather than checking for it afterwards.
+//
+// # Divergence from §6.6
+//
+// The spec says "static assets on Cloudflare **Pages**". This uses **Workers
+// Static Assets** instead: it is the current successor for this case, equally
+// unmetered for static requests, and it keeps one platform for when signalling
+// arrives — rather than Pages for the assets plus a Worker beside it.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  // Must match the Workers project the repository is already connected to. A
+  // different name here silently creates a second project and leaves the
+  // original deploy red.
+  //
+  // **Exactly one thing may deploy this name**, and it is Cloudflare's own Workers
+  // Builds git integration — the connection that already exists. CI deliberately
+  // does *not* deploy: two pipelines publishing one Worker is a race whose loser
+  // silently wins whenever it happens to finish second.
+  //
+  // That choice is also why no Cloudflare API token exists in GitHub. The git
+  // integration authenticates Cloudflare→GitHub and needs nothing from us;
+  // deploying from Actions would have needed credentials in the opposite
+  // direction. The price is that Cloudflare's image has no Rust, so
+  // `scripts/cloudflare-build.sh` installs it per build.
+  //
+  // Workers Builds settings this expects:
+  //   build command:  bash ./scripts/cloudflare-build.sh
+  //   deploy command: npx wrangler deploy   (the default)
+  "name": "amigo-diomano",
+
+  "compatibility_date": "2026-08-04",
+
+  // Deliberately absent: `account_id`. It arrives as CLOUDFLARE_ACCOUNT_ID in the
+  // environment, so an account identifier does not sit in a public repository.
+
+  "assets": {
+    // What `just build-web` produces: index.html, the hashed JS chunks, and
+    // diomano.wasm copied out of web/public.
+    "directory": "./web/dist",
+
+    // A real 404 for unknown paths, rather than "single-page-application".
+    // There is exactly one route and no client-side router, so answering
+    // /anything with index.html would claim a structure the app does not have.
+    "not_found_handling": "none"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

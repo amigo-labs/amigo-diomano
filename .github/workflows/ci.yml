@@ -10,6 +10,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Every job here only reads the repository: checkout, build, test, replay. None
+# writes a comment, a status, a release or a package, so the token needs nothing
+# beyond `contents: read` and is given nothing beyond it.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Overflow checks are on in every profile via the workspace Cargo.toml; this
@@ -53,6 +59,11 @@ jobs:
       - name: tsc
         run: just typecheck
 
+      # Needs no credentials, so a malformed deploy config fails here on the pull
+      # request rather than on main, where the only symptom is a failed deploy.
+      - name: wrangler config (dry run)
+        run: just deploy-check
+
   determinism:
     name: determinism
     runs-on: ubuntu-latest
@@ -91,6 +102,64 @@ jobs:
       # disagree, lockstep is dead on arrival.
       - name: verify-cross (native vs headless Chromium)
         run: just verify-cross
+
+      # Phase 7's first slice: the lockstep layer, at the DoD's 120 ms RTT and 2%
+      # loss, over an in-process link. No browser needed — two wasm instances in
+      # one Node process, which is honest because the module has zero imports.
+      - name: verify-lockstep (120 ms RTT, 2% loss)
+        run: just verify-lockstep
+
+  # The §6.3 corpus: ten matches of 20,000 ticks. Roughly 30 s per match to
+  # replay, so it is a matrix rather than a loop — ten parallel jobs keep the wall
+  # clock at one match instead of the sum of ten, and a failure names the match it
+  # came from without reading a log.
+  #
+  # Separate from `determinism` on purpose: that job replays the short
+  # `fixtures/session.log` on every push and stays fast, and this one carries the
+  # long corpus. Splitting them is what keeps the fast check fast without dropping
+  # the thorough one.
+  corpus:
+    name: corpus match-${{ matrix.match }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Quoted and zero-padded to match the recorded filenames exactly.
+        match: ["00", "01", "02", "03", "04", "05", "06", "07", "08", "09"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: extractions/setup-just@v2
+      - name: Install web toolchain
+        working-directory: web
+        run: bun install --frozen-lockfile
+      - name: Install Chromium for the browser replay
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
+      - name: replay match-${{ matrix.match }}, native then headless Chromium
+        run: just verify-match ${{ matrix.match }}
+
+  # Coverage over the whole corpus, which by definition no single matrix job can
+  # check. Replays all ten, so it is the slow one; it does not re-verify hashes
+  # beyond what the matrix already did, it counts what the corpus exercised.
+  corpus-coverage:
+    name: corpus coverage (§6.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - uses: extractions/setup-just@v2
+      - name: every verb 20+, and report the combat gap
+        run: just verify-corpus
 
   perf:
     name: perf (informational)
