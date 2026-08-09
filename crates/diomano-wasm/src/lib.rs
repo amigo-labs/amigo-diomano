@@ -182,6 +182,20 @@ pub extern "C" fn dio_pickups_ptr() -> *const Pickup {
     world().pickups.as_ptr()
 }
 
+/// Ring of applied verbs, for the renderer's effects. Instrumentation, not state:
+/// excluded from the state hash, so nothing read here can desync a match.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_verb_events_ptr() -> *const diomano_sim::world::VerbEvent {
+    world().census.verb_events.as_ptr()
+}
+
+/// Total verb events ever recorded. The renderer keeps its own high-water mark and
+/// reads forward, so it may lag without losing sync.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_verb_events_written() -> u32 {
+    world().census.verb_events_written
+}
+
 // ---------------------------------------------------------------------------
 // Mesh pointers
 // ---------------------------------------------------------------------------
@@ -199,6 +213,12 @@ pub extern "C" fn dio_mesh_normals_ptr() -> *const f32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_mesh_attribs_ptr() -> *const u8 {
     mesh_buf().attribs.as_ptr()
+}
+
+/// Per vertex: lava depth, fertility, sediment, spare.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_mesh_attribs2_ptr() -> *const u8 {
+    mesh_buf().attribs2.as_ptr()
 }
 
 #[unsafe(no_mangle)]
@@ -251,6 +271,8 @@ konst!(dio_max_walkers, diomano_sim::world::MAX_WALKERS);
 konst!(dio_max_settlements, diomano_sim::world::MAX_SETTLEMENTS);
 konst!(dio_max_pickups, diomano_sim::world::MAX_PICKUPS);
 konst!(dio_pickup_stride, core::mem::size_of::<Pickup>());
+konst!(dio_verb_event_capacity, diomano_sim::world::VERB_EVENTS);
+konst!(dio_verb_event_stride, core::mem::size_of::<diomano_sim::world::VerbEvent>());
 konst!(dio_walker_stride, core::mem::size_of::<Walker>());
 konst!(dio_settlement_stride, core::mem::size_of::<Settlement>());
 konst!(dio_chunk_cells, mesh::CHUNK);

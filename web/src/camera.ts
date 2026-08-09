@@ -63,6 +63,16 @@ export interface OrbitCamera {
   readonly camera: THREE.PerspectiveCamera;
   resize(aspect: number): void;
   update(dtMs: number): void;
+  /**
+   * Displace the eye by a small random offset, for earthquake and armageddon.
+   *
+   * Applied to the eye and not to the target, so the horizon stays level and the
+   * planet does not appear to swing: a rolling camera reads as a broken control,
+   * a jittering one reads as the ground moving. Amplitude is in radii and the
+   * caller decays it — the effects system owns how long a shake lasts, the camera
+   * only knows how to be shaken.
+   */
+  shake(amplitude: number): void;
   /** True while the pointer is dragging the planet rather than the terrain. */
   readonly panning: boolean;
 }
@@ -172,9 +182,14 @@ export function createCamera(
   const target = new THREE.Vector3();
   const east = new THREE.Vector3();
   const northish = new THREE.Vector3();
+  let shakeAmplitude = 0;
+  let shakePhase = 0;
 
   return {
     camera,
+    shake(amplitude: number): void {
+      shakeAmplitude = amplitude;
+    },
     resize(aspect: number): void {
       camera.aspect = aspect;
       camera.updateProjectionMatrix();
@@ -192,6 +207,16 @@ export function createCamera(
         Math.cos(yaw) * cp * distance,
       );
       camera.position.copy(eye);
+
+      // Shake, before the basis is built so `lookAt` still aims at the target and
+      // the horizon stays level. Two incommensurable frequencies, so it reads as
+      // ground movement rather than as a sine wave.
+      if (shakeAmplitude > 0) {
+        shakePhase += dtMs * 0.001;
+        camera.position.x += Math.sin(shakePhase * 41.0) * shakeAmplitude;
+        camera.position.y += Math.sin(shakePhase * 57.3 + 1.7) * shakeAmplitude;
+        camera.position.z += Math.sin(shakePhase * 33.7 + 3.1) * shakeAmplitude;
+      }
 
       // A frame on the sphere at the sub-camera point. `east` is horizontal and
       // always perpendicular to `eye`; `northish` completes the tangent frame

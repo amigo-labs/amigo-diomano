@@ -186,6 +186,20 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   };
 
   /**
+   * Keep a continuous face coordinate on its own face.
+   *
+   * Face coordinates run `0..N`. Hashed jitter and settlement spread both push
+   * past that near an edge — a tree sampled at `x = 0` can land at `-0.5` — and
+   * `cellDirectionInto` projects rather than switching faces, so it happily
+   * extrapolates a direction *past* the cube face and the instance ends up off
+   * the surface it belongs to, doubled up with the neighbouring face's. Clamping
+   * is the right answer rather than seam-crossing: the offset is decorative, and
+   * a tree pinned to the edge of its face is in the right place to within a
+   * fraction of a cell.
+   */
+  const onFace = (f: number): number => (f < 0 ? 0 : f > sim.N ? sim.N : f);
+
+  /**
    * Surface radius at a continuous face coordinate, bilinearly.
    *
    * A walker moving across a slope should climb it, not step up at each cell
@@ -221,8 +235,8 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
           const stems = 1 + Math.floor((veg / 256) * 3);
           for (let s = 0; s < stems && n < MAX_TREES; s++) {
             // Offset inside the sampled block, so the lattice disappears.
-            const jx = x + 0.5 + (hash01(face, x, y, s * 3 + 1) - 0.5) * SAMPLE_STRIDE;
-            const jy = y + 0.5 + (hash01(face, x, y, s * 3 + 2) - 0.5) * SAMPLE_STRIDE;
+            const jx = onFace(x + 0.5 + (hash01(face, x, y, s * 3 + 1) - 0.5) * SAMPLE_STRIDE);
+            const jy = onFace(y + 0.5 + (hash01(face, x, y, s * 3 + 2) - 0.5) * SAMPLE_STRIDE);
             cellDirectionInto(dir, face, jx, jy, sim.N);
             const vary = hash01(face, x, y, s * 3 + 3);
             // A third of a cell, give or take: present in the silhouette,
@@ -276,8 +290,8 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
           // rise adds buildings to a village instead of inflating one house.
           const angle = hash01(s.face, s.x, s.y, k) * Math.PI * 2;
           const spread = k === 0 ? 0 : 0.55 + hash01(s.face, s.x, s.y, k + 8) * 0.5;
-          const fx = s.x + 0.5 + Math.cos(angle) * spread;
-          const fy = s.y + 0.5 + Math.sin(angle) * spread;
+          const fx = onFace(s.x + 0.5 + Math.cos(angle) * spread);
+          const fy = onFace(s.y + 0.5 + Math.sin(angle) * spread);
           cellDirectionInto(dir, s.face, fx, fy, sim.N);
           const scale = cellScale * (k === 0 ? 0.42 : 0.26 + hash01(s.face, s.x, s.y, k) * 0.12);
           place(buildings, b, surfaceAt(s.face, fx, fy), scale, angle);
@@ -298,13 +312,17 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
         // renderer draws a figure around it (§4.5). Flooring it here — which is
         // what this did — threw that away and teleported every walker from one
         // cell centre to the next. No feedback, ever: this reads, never writes.
-        cellDirectionInto(dir, p.face, p.x, p.y, sim.N);
+        // Clamped for the same reason as the trees: a walker part-way through a
+        // seam crossing can carry a sub-cell offset just outside its face.
+        const wx = onFace(p.x);
+        const wy = onFace(p.y);
+        cellDirectionInto(dir, p.face, wx, wy, sim.N);
         // Rank, not strength, drives size. Scaling by `strength` turned a
         // veteran into a giant, and §4.7 lets strength reach 255.
         const champion = (p.flags & WALKER_CHAMPION) !== 0;
         const leader = (p.flags & WALKER_LEADER) !== 0;
         const scale = cellScale * (champion ? 0.95 : leader ? 0.78 : 0.5);
-        place(walkers, k, surfaceAt(p.face, p.x, p.y), scale, 0);
+        place(walkers, k, surfaceAt(p.face, wx, wy), scale, 0);
         // Owner hue, then rank on top of it: a champion has to be findable in a
         // crowd of its own colour, and it had no distinguishing mark at all.
         if (p.owner === 0) colour.setRGB(1.0, 0.85, 0.5);

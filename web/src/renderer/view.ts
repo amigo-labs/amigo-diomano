@@ -39,11 +39,25 @@ export interface View {
   readonly sunDirection: { value: THREE.Vector3 };
   /** Cloud scroll phase, shared by the shell and the ground shadows. */
   readonly cloudTime: { value: number };
-  /** Render seconds, for ripples. Never reaches simulation state (§10). */
+  /**
+   * Real elapsed seconds, for water ripples.
+   *
+   * Wall clock rather than `tick / 30`, which is what this used to be: the
+   * simulation runs at a fixed 30 Hz, so a tick-derived phase advanced the
+   * ripple normals in 33 ms steps and the sea visibly stuttered on anything
+   * faster than a 30 Hz display. The distinction is safe precisely because this
+   * value drives ripples only and never reaches simulation state (§10) — which
+   * is what `water.ts` claimed ("render time, not simulation time") while
+   * actually being handed simulation time.
+   *
+   * `cloudTime` stays on simulation time deliberately: clouds should move at a
+   * rate a player can relate to the tide clock, and the terrain samples the same
+   * clock for ground shadows.
+   */
   readonly time: { value: number };
   /** Distance from the planet centre, for distance-keyed shading. */
   readonly cameraDistance: { value: number };
-  sync(camera: THREE.Camera, tick: number): void;
+  sync(camera: THREE.Camera, tick: number, dtMs: number): void;
 }
 
 /** One full turn of the sun every four minutes of play (§7.2). */
@@ -62,7 +76,7 @@ export function createView(): View {
     cloudTime,
     time,
     cameraDistance,
-    sync(camera: THREE.Camera, tick: number): void {
+    sync(camera: THREE.Camera, tick: number, dtMs: number): void {
       // `matrixWorld` rather than `position`, so this stays correct if the
       // camera is ever parented to something.
       cameraPosition.value.setFromMatrixPosition(camera.matrixWorld);
@@ -72,7 +86,9 @@ export function createView(): View {
       // Simulation time, so clouds move at a rate a player can relate to the
       // tide clock. The flow is one-way: nothing here reaches simulation state.
       cloudTime.value = tick / 30;
-      time.value = tick / 30;
+      // Accumulated rather than read from a clock, so a paused or backgrounded
+      // tab resumes the ripple phase where it left off instead of jumping.
+      time.value += dtMs / 1000;
     },
   };
 }

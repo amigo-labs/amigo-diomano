@@ -113,8 +113,17 @@ because a chunk's border vertices average cells belonging to its neighbour.
 those attributes. `mesh::only_dirty_chunks_are_remeshed` asserts both the count
 and which chunk.
 
-Measured: **16.1 chunks re-meshed per tick** during the scripted perf session,
-at 0.60 ms — charged to the render budget, not the 12 ms simulation budget.
+Measured: **15.3 chunks re-meshed per tick** during the scripted perf session, at
+**1.00 ms** — charged to the render budget, not the 12 ms simulation budget, so it
+is 4.8% of the 21 ms the render half has.
+
+That is up from 0.60 ms, and the increase bought two things: the corner grid the
+normal pass needs (a second evaluation of the dual-grid average per vertex, which
+is what makes chunk-border normals agree) and the `attribs2` channel (lava,
+fertility, sediment). Both are features rather than waste. Two candidate savings
+were measured and rejected: reading the scalar height back from the corner grid
+instead of recomputing it, and moving the per-chunk scratch off the stack into a
+field. Neither moved the number — the cost is the two vertex passes themselves.
 
 ## The boundary
 
@@ -338,6 +347,72 @@ The water geometry goes further and uses `Mesh::water_present` to build its
 index buffer over **wet chunks only**, rebuilt when the wet set changes. On a
 land-heavy map that removes most of the ocean's triangles before rasterising,
 rather than relying on the fragment shader to discard them afterwards.
+
+## Lava, and the other two fields §7.4 asked for
+
+`attribs` was full — material, vegetation, influence, water depth — so §7.4's
+"write them as vertex attributes" was only three-fifths done. `attribs2` carries
+**lava, fertility and sediment**.
+
+Lava is the one that mattered. `sim.lava` was mapped into JavaScript and read by
+no renderer file, so §5.3's volcano produced no hot lava anywhere: the only sign
+one had gone off was ash-coloured ground *after* the flow had already cooled. It
+is now drawn emissively — written over the shaded result rather than multiplied by
+the sun, because lava is the light source — on a depth-keyed ramp from dark crust
+to a yellow-white core, with the core deliberately above the bloom threshold so a
+flow glows into the air around it.
+
+Two details that are easy to get wrong:
+
+- **Lava is the maximum of the four cells at a corner, not the mean.** The other
+  fields are ground properties and take the cell's own value; lava is a fluid
+  front, and averaging it fades the edge out over a cell and a half when the thing
+  a player needs to read is where the front *is*.
+- **Everything in the vertex buffers has to be in `chunk_content_hash`.** Lava was
+  the field that made this load-bearing: it moves every tick over ground that does
+  not, so a chunk whose height and material were unchanged would never have been
+  re-meshed and the attribute would have gone stale immediately.
+  `mesh::lava_reaches_the_vertex_buffer_and_dirties_its_chunk` asserts the flow in
+  both directions, including that a cooled flow stops glowing.
+
+## Verb effects
+
+Flood, volcano, swamp, earthquake and armageddon had no visual of any kind — the
+only feedback was a procedural audio one-shot and, on the next re-mesh, terrain
+that had quietly changed. With no HUD (§8) a power that landed off screen was
+indistinguishable from one that never fired.
+
+Effects are driven from a **verb-event ring** in `world.rs`, written at the same
+point and past the same gating as the census's per-verb counts. Two properties
+follow, and both are the reason it is done there rather than at the click:
+
+- a power refused on cost or availability throws no sparks, so the picture cannot
+  claim something the simulation declined to do;
+- the **opponent's** casts are visible, which a click-driven system could not
+  manage — a client sees its own commands and never theirs.
+
+The ring is instrumentation, excluded from the state hash and covered by
+`world::the_census_is_not_hashed`, so a cosmetic cannot desync a match. The
+renderer keeps a high-water mark and reads forward, so it is free to lag; falling
+more than a ring behind drops the oldest, which for a cosmetic is the right
+failure.
+
+All particles for all effects are instances of one octahedron in a single
+`InstancedMesh` with per-instance colour, integrated on the CPU. Two things had to
+be right for them to read as anything:
+
+- **A burst starts spread across the brush radius.** Spawning every particle on
+  one point and letting velocity separate them meant forty additive sprites
+  overlapped for the first few frames, saturating to a flat white blob — and it
+  was wrong anyway, since earthquake and flood act over an area.
+- **Per-particle colour is a fraction of the intended brightness.** Under additive
+  blending what the player sees is roughly the colour times the overlap count, so
+  palettes written at display strength all summed to white and every effect looked
+  identical.
+
+Earthquake and armageddon also shake the camera, applied to the eye rather than to
+the target so the horizon stays level: a rolling camera reads as a broken control,
+a jittering one reads as the ground moving.
 
 ## Terrain that remembers
 

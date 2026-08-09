@@ -71,10 +71,12 @@ export interface Planet {
 
 const VERTEX_SHADER = /* glsl */ `
   attribute vec4 attrib;   // material / 255, vegetation, influence + 128, depth
+  attribute vec4 attrib2;  // lava, fertility, sediment, spare
 
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying vec4 vAttrib;
+  varying vec4 vAttrib2;
   varying float vAltitude;
 
   uniform float uSeaRadius;
@@ -89,6 +91,7 @@ const VERTEX_SHADER = /* glsl */ `
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
     vAttrib = attrib;
+    vAttrib2 = attrib2;
     // Metres above the current waterline, roughly. The wet-sand band and the
     // snowline both key off this, so both migrate as sea level moves.
     vAltitude = length(position) - uSeaRadius;
@@ -102,6 +105,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying vec4 vAttrib;
+  varying vec4 vAttrib2;
   varying float vAltitude;
 
   uniform vec3 uSunDirection;
@@ -137,6 +141,16 @@ const FRAGMENT_SHADER = /* glsl */ `
     float slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
 
     vec3 albedo = materialColour(vAttrib.r);
+
+    // Fertility enriches and darkens soil; sediment pales it toward silt. Both
+    // are simulation state that reached the renderer for the first time here —
+    // §7.4 asks for all five fields and only three were being written, so ground
+    // that the simulation treats as rich or as silted up looked identical to bare
+    // material. Subtle on purpose: these are properties of the ground, and the
+    // reading the player needs from them is "this valley is different", not a
+    // colour key.
+    albedo = mix(albedo, albedo * vec3(0.80, 0.94, 0.68), vAttrib2.g * 0.55);
+    albedo = mix(albedo, vec3(0.72, 0.66, 0.52), vAttrib2.b * 0.40);
 
     // Vegetation is simulation state, not a shader flourish — this is the same
     // field that damps water transfer in §4.3.
@@ -194,6 +208,24 @@ const FRAGMENT_SHADER = /* glsl */ `
     float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 4.0);
     lit += rim * vec3(0.10, 0.15, 0.26);
 
+    // Lava, and it is emissive rather than lit: it *is* the light source, so it
+    // is written over the shaded result instead of being multiplied by the sun.
+    // That is also why it survives the night side and the cloud shadows, which is
+    // the whole point of a volcano at night.
+    //
+    // Until now the renderer could not see lava at all — the field was mapped
+    // into JavaScript and read by nothing — so §5.3's volcano produced no hot
+    // lava anywhere, only ash-coloured ground once it had already cooled. The
+    // ramp runs dark crust to yellow-white core by depth, and the peak lands
+    // above the bloom threshold on purpose, so a flow glows into the air around
+    // it.
+    float lava = vAttrib2.r;
+    if (lava > 0.002) {
+      float heat = smoothstep(0.03, 0.60, lava);
+      vec3 molten = mix(vec3(0.30, 0.035, 0.012), vec3(1.75, 0.80, 0.20), heat);
+      lit = mix(lit, molten, smoothstep(0.008, 0.09, lava));
+    }
+
     gl_FragColor = vec4(lit, 1.0);
   }
 `;
@@ -234,13 +266,16 @@ export function createPlanet(sim: Sim, view: View): Planet {
   const position = new THREE.BufferAttribute(sim.meshPositions, 3);
   const normal = new THREE.BufferAttribute(sim.meshNormals, 3);
   const attrib = new THREE.BufferAttribute(sim.meshAttribs, 4, true);
+  const attrib2 = new THREE.BufferAttribute(sim.meshAttribs2, 4, true);
   position.setUsage(THREE.DynamicDrawUsage);
   normal.setUsage(THREE.DynamicDrawUsage);
   attrib.setUsage(THREE.DynamicDrawUsage);
+  attrib2.setUsage(THREE.DynamicDrawUsage);
 
   geometry.setAttribute("position", position);
   geometry.setAttribute("normal", normal);
   geometry.setAttribute("attrib", attrib);
+  geometry.setAttribute("attrib2", attrib2);
   geometry.setIndex(new THREE.BufferAttribute(buildPlanetIndices(sim), 1));
   // The terrain deforms constantly, so a bounding sphere computed from the
   // vertices would be stale within a second. One that always contains the
@@ -258,6 +293,7 @@ export function createPlanet(sim: Sim, view: View): Planet {
       position.clearUpdateRanges();
       normal.clearUpdateRanges();
       attrib.clearUpdateRanges();
+      attrib2.clearUpdateRanges();
       let dirty = 0;
       for (let chunk = 0; chunk < sim.chunks; chunk++) {
         if (sim.meshDirty[chunk] === 0) continue;
@@ -266,11 +302,13 @@ export function createPlanet(sim: Sim, view: View): Planet {
         position.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
         normal.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
         attrib.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
+        attrib2.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
       }
       if (dirty > 0) {
         position.needsUpdate = true;
         normal.needsUpdate = true;
         attrib.needsUpdate = true;
+        attrib2.needsUpdate = true;
       }
       material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
     },

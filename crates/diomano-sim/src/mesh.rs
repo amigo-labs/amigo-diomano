@@ -109,6 +109,15 @@ pub struct Mesh {
     pub normals: [f32; TOTAL_VERTS * 3],
     /// Per vertex: material, vegetation, influence + 128, water depth / 8.
     pub attribs: [u8; TOTAL_VERTS * 4],
+    /// Per vertex: lava depth, fertility, sediment, spare.
+    ///
+    /// A second channel because the first is full and §7.4 asks for five fields —
+    /// "the simulation already carries `fertility`, `vegetation`, `sediment`,
+    /// `material` and `influence`; write them as vertex attributes" — of which
+    /// only three were arriving. Lava matters most of the three: it is a fluid
+    /// layer the simulation moves every tick and the renderer had no way to see
+    /// it at all, so a volcano showed ash *afterwards* and never hot lava.
+    pub attribs2: [u8; TOTAL_VERTS * 4],
     pub water_positions: [f32; TOTAL_VERTS * 3],
     /// Per vertex: depth / 8, influence + 128, foam (erosion), dry flag.
     pub water_attribs: [u8; TOTAL_VERTS * 4],
@@ -116,6 +125,18 @@ pub struct Mesh {
     /// Smoothed cell heights, x256, including a ghost ring so corner vertices at
     /// a face boundary read the same values from both sides.
     smooth: [i32; CELLS],
+    /// One chunk's true corner positions, including the ring *outside* the chunk
+    /// that the normal pass differences against. See [`Mesh::build_normals`].
+    ///
+    /// A field rather than a local to keep 5.7 KB off the stack, for the same
+    /// reason [`Mesh::boxed`] exists. It was *also* tried as a perf change on the
+    /// theory that zero-initialising a local per chunk was costing something, and
+    /// it measured identical — recorded here so nobody re-derives that hypothesis:
+    /// the meshing cost is the two vertex passes, not the scratch.
+    scratch_corners: [f32; VERTS_PER_CHUNK * 3],
+    /// The scalar heights behind `scratch_corners`, so the second pass can read
+    /// the one it needs instead of averaging the dual grid a second time.
+    scratch_heights: [f32; VERTS_PER_CHUNK],
     /// Content hash per chunk; a chunk is re-meshed only when this changes.
     chunk_hash: [u64; CHUNKS],
     /// 1 where the chunk contains any water at all.
@@ -143,10 +164,13 @@ impl Mesh {
             positions: [0.0; TOTAL_VERTS * 3],
             normals: [0.0; TOTAL_VERTS * 3],
             attribs: [0; TOTAL_VERTS * 4],
+            attribs2: [0; TOTAL_VERTS * 4],
             water_positions: [0.0; TOTAL_VERTS * 3],
             water_attribs: [0; TOTAL_VERTS * 4],
             indices: [0; INDICES_PER_CHUNK],
             smooth: [0; CELLS],
+            scratch_corners: [0.0; VERTS_PER_CHUNK * 3],
+            scratch_heights: [0.0; VERTS_PER_CHUNK],
             chunk_hash: [0; CHUNKS],
             water_present: [0; CHUNKS],
             dirty: [0; CHUNKS],
@@ -267,7 +291,6 @@ impl Mesh {
         // This costs no extra `corner_height` work: `positions` is filled from
         // this grid, and the skirt ring is a copy of the border rather than a
         // fresh evaluation.
-        let mut corners = [0f32; VERTS_PER_CHUNK * 3];
         for gj in 0..VERTS_PER_EDGE {
             for gi in 0..VERTS_PER_EDGE {
                 // Clamped to the corners the one-deep ghost ring can support:
@@ -281,10 +304,12 @@ impl Mesh {
                 let terrain = self.corner_height(face, gx, gy);
                 let dir = corner_direction(face, gx, gy);
                 let r = BASE_RADIUS + terrain * HEIGHT_TO_RADIUS;
-                let k = (gj * VERTS_PER_EDGE + gi) * 3;
-                corners[k] = dir[0] * r;
-                corners[k + 1] = dir[1] * r;
-                corners[k + 2] = dir[2] * r;
+                let slot = gj * VERTS_PER_EDGE + gi;
+                self.scratch_heights[slot] = terrain;
+                let k = slot * 3;
+                self.scratch_corners[k] = dir[0] * r;
+                self.scratch_corners[k + 1] = dir[1] * r;
+                self.scratch_corners[k + 2] = dir[2] * r;
             }
         }
 
@@ -297,22 +322,24 @@ impl Mesh {
                 let gx = cgx as i32 + i;
                 let gy = cgy as i32 + j;
 
-                let terrain = self.corner_height(face, gx, gy);
+                // Read back from the corner grid rather than recomputed, so the two
+                // can never disagree *and* the dual-grid average runs once per
+                // vertex: the skirt ring reads the border slot it duplicates,
+                // exactly as the `i`/`j` clamp above says it should.
+                let slot = gj.clamp(1, VERTS_PER_EDGE - 2) * VERTS_PER_EDGE
+                    + gi.clamp(1, VERTS_PER_EDGE - 2);
+                let terrain = self.scratch_heights[slot];
                 let (surface, depth) = self.corner_water(w, face, gx, gy, terrain);
                 let (mat, veg, infl) = corner_attribs(w, face, gx, gy);
+                let (lava, fert, sed) = corner_attribs2(w, face, gx, gy);
 
                 let dir = corner_direction(face, gx, gy);
 
                 let vi = vbase + gj * VERTS_PER_EDGE + gi;
-                // Copied from the corner grid rather than recomputed, so the two
-                // can never disagree: the skirt ring reads the border slot it
-                // duplicates, exactly as the `i`/`j` clamp above says it should.
-                let src = ((gj.clamp(1, VERTS_PER_EDGE - 2)) * VERTS_PER_EDGE
-                    + gi.clamp(1, VERTS_PER_EDGE - 2))
-                    * 3;
-                self.positions[vi * 3] = corners[src];
-                self.positions[vi * 3 + 1] = corners[src + 1];
-                self.positions[vi * 3 + 2] = corners[src + 2];
+                let src = slot * 3;
+                self.positions[vi * 3] = self.scratch_corners[src];
+                self.positions[vi * 3 + 1] = self.scratch_corners[src + 1];
+                self.positions[vi * 3 + 2] = self.scratch_corners[src + 2];
 
                 let rw = BASE_RADIUS + surface * HEIGHT_TO_RADIUS;
                 self.water_positions[vi * 3] = dir[0] * rw;
@@ -325,6 +352,11 @@ impl Mesh {
                 self.attribs[vi * 4 + 1] = veg;
                 self.attribs[vi * 4 + 2] = infl;
                 self.attribs[vi * 4 + 3] = d8;
+
+                self.attribs2[vi * 4] = lava;
+                self.attribs2[vi * 4 + 1] = fert;
+                self.attribs2[vi * 4 + 2] = sed;
+                self.attribs2[vi * 4 + 3] = 0;
 
                 let erode = w.erode[clamp_cell(face, gx, gy)];
                 self.water_attribs[vi * 4] = d8;
@@ -344,7 +376,7 @@ impl Mesh {
         // tilt every first-interior-ring normal by the drop distance — and that
         // shows up as a bright seam along every chunk border, which is exactly
         // the artefact the skirt exists to prevent.
-        self.build_normals(chunk, &corners);
+        self.build_normals(chunk);
         self.sink_skirt(chunk);
     }
 
@@ -396,23 +428,23 @@ impl Mesh {
     /// planet every 16 cells — the artefact the skirt comment claims to have
     /// eliminated, arriving by a different route.
     ///
-    /// `corners` carries the real neighbour one cell outside the chunk, so both
-    /// sides difference the same four positions in the same order and land on the
-    /// same normal, bit for bit. `normals_agree_across_chunk_borders` pins it.
-    fn build_normals(&mut self, chunk: usize, corners: &[f32; VERTS_PER_CHUNK * 3]) {
+    /// `scratch_corners` carries the real neighbour one cell outside the chunk, so
+    /// both sides difference the same four positions in the same order and land on
+    /// the same normal, bit for bit. `normals_agree_across_chunk_borders` pins it.
+    fn build_normals(&mut self, chunk: usize) {
         let vbase = chunk * VERTS_PER_CHUNK;
         let at = |gi: usize, gj: usize| vbase + gj * VERTS_PER_EDGE + gi;
-        let corner = |gi: usize, gj: usize| {
+        let corner = |s: &Self, gi: usize, gj: usize| {
             let k = (gj * VERTS_PER_EDGE + gi) * 3;
-            [corners[k], corners[k + 1], corners[k + 2]]
+            [s.scratch_corners[k], s.scratch_corners[k + 1], s.scratch_corners[k + 2]]
         };
         for gj in 1..VERTS_PER_EDGE - 1 {
             for gi in 1..VERTS_PER_EDGE - 1 {
                 let vi = at(gi, gj);
-                let e = corner(gi + 1, gj);
-                let wv = corner(gi - 1, gj);
-                let nv = corner(gi, gj + 1);
-                let s = corner(gi, gj - 1);
+                let e = corner(self, gi + 1, gj);
+                let wv = corner(self, gi - 1, gj);
+                let nv = corner(self, gi, gj + 1);
+                let s = corner(self, gi, gj - 1);
                 let du = [e[0] - wv[0], e[1] - wv[1], e[2] - wv[2]];
                 let dv = [nv[0] - s[0], nv[1] - s[1], nv[2] - s[2]];
                 let mut n = [
@@ -425,14 +457,14 @@ impl Mesh {
                     let inv = rsqrt(len2);
                     n = [n[0] * inv, n[1] * inv, n[2] * inv];
                 } else {
-                    n = normalize(corner(gi, gj));
+                    n = normalize(corner(self, gi, gj));
                 }
                 // Faces wind so that the outward normal points away from the
                 // planet centre; flip if the cross product came out inward. Read
                 // from `corners`, not `positions`: identical here, but it keeps
                 // every input to a normal on the same grid, so the two chunks
                 // sharing a border cannot diverge through this branch either.
-                let p = corner(gi, gj);
+                let p = corner(self, gi, gj);
                 if n[0] * p[0] + n[1] * p[1] + n[2] * p[2] < 0.0 {
                     n = [-n[0], -n[1], -n[2]];
                 }
@@ -511,6 +543,25 @@ fn corner_attribs(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
     let c = clamp_cell(face, gx, gy);
     let infl = (i32::from(w.influence[c]) + 128).clamp(0, 255) as u8;
     (w.material[c], w.vegetation[c], infl)
+}
+
+/// Lava, fertility and sediment at a corner.
+///
+/// Lava is the reason this exists. Unlike the others it is a *fluid* the
+/// simulation moves every tick, so it is taken as the maximum of the four cells
+/// around the corner rather than the mean: an averaged edge fades a lava front
+/// out over a cell and a half, and the thing a player needs to read is where the
+/// front *is*. Fertility and sediment are ground properties and take the value of
+/// the same cell the material does, so all of the terrain shader's per-cell
+/// fields agree about which cell they came from.
+fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
+    let c = clamp_cell(face, gx, gy);
+    let mut lava = 0u8;
+    for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+        let n = clamp_cell(face, gx + dx, gy + dy);
+        lava = lava.max(w.lava[n]);
+    }
+    (lava, w.fertility[c], w.sediment[c])
 }
 
 /// The three live cells meeting at a cube corner, if `(gx, gy)` is one.
@@ -654,6 +705,14 @@ fn chunk_content_hash(w: &World, chunk: usize) -> u64 {
             h.write_u8(w.material[c]);
             h.write_u8(w.vegetation[c]);
             h.write_i8(w.influence[c]);
+            // Everything the vertex buffers carry has to be in here, or the chunk
+            // is not re-meshed when it changes and the attribute silently goes
+            // stale. Lava is the one that matters: it is a fluid that moves every
+            // tick, so a lava front over unchanged ground would otherwise never
+            // reach the GPU and a volcano would look like nothing happened.
+            h.write_u8(w.lava[c]);
+            h.write_u8(w.fertility[c]);
+            h.write_u8(w.sediment[c]);
         }
     }
     // Never let a zero hash mean "unchanged" for a never-built chunk.
@@ -972,6 +1031,38 @@ mod tests {
         }
         // 6 faces x 4 rows of chunks x 3 interior borders x 17 shared vertices.
         assert_eq!(compared, 6 * CHUNKS_PER_EDGE * (CHUNKS_PER_EDGE - 1) * (VERTS_PER_EDGE - 2));
+    }
+
+    #[test]
+    fn lava_reaches_the_vertex_buffer_and_dirties_its_chunk() {
+        // The plumbing test the other four attributes never had. A field that is
+        // written into `Mesh` but missing from `chunk_content_hash` looks correct
+        // on the first frame and then never updates again — which is exactly how
+        // lava would have behaved, since it is a fluid that moves every tick over
+        // ground that does not.
+        let (mut w, mut m) = meshed();
+        let c = crate::world::idx(0, 20, 20);
+        assert_eq!(w.lava[c], 0);
+
+        // A chunk that is not dirtied is not re-meshed, so assert the dirty flag
+        // rather than only the buffer contents.
+        m.update(&w);
+        w.lava[c] = 200;
+        let remeshed = m.update(&w);
+        assert!(remeshed > 0, "raising lava did not dirty any chunk");
+
+        let mut hottest = 0u8;
+        for vi in 0..TOTAL_VERTS {
+            hottest = hottest.max(m.attribs2[vi * 4]);
+        }
+        assert_eq!(hottest, 200, "lava did not reach attribs2");
+
+        // And it goes away again, or a cooled flow would glow forever.
+        w.lava[c] = 0;
+        assert!(m.update(&w) > 0, "clearing lava did not dirty any chunk");
+        for vi in 0..TOTAL_VERTS {
+            assert_eq!(m.attribs2[vi * 4], 0, "lava outlived the field it came from");
+        }
     }
 
     #[test]

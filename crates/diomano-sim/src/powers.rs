@@ -57,6 +57,25 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
     }
 
     let radius = World::brush_radius(cmd.modifier);
+
+    // And *where*, for the renderer. Same place and same gating as the count
+    // above, for the same reason: an effect that fires for a refused power tells
+    // the player they cast something they did not. Instrumentation, excluded from
+    // the state hash — `the_census_is_not_hashed` covers this too.
+    {
+        let slot = (w.census.verb_events_written as usize) % crate::world::VERB_EVENTS;
+        w.census.verb_events[slot] = crate::world::VerbEvent {
+            face: face as u8,
+            x: cx as u8,
+            y: cy as u8,
+            verb: cmd.verb,
+            player: player as u8,
+            modifier: cmd.modifier,
+            radius: radius.clamp(0, 255) as u8,
+            _pad: 0,
+        };
+        w.census.verb_events_written = w.census.verb_events_written.wrapping_add(1);
+    }
     match cmd.verb {
         VERB_RAISE => sculpt(w, player, face, cx, cy, radius, true),
         VERB_LOWER => sculpt(w, player, face, cx, cy, radius, false),

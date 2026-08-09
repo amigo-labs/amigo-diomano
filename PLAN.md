@@ -408,11 +408,56 @@ limb from orbit.
 repairs to shipped features, and lava needs a new vertex-attribute channel
 through the mesher, which is a wasm ABI change with its own tests:
 
-- [ ] Lava has no visual. `sim.lava` is mapped and read by no renderer file, so a
-      volcano shows ash afterwards and never hot lava
-- [ ] No verb effects at all — flood, volcano, swamp, earthquake, armageddon have
-      no particles, decals or shake; feedback is audio plus the next re-mesh
-- [ ] `fertility` and `sediment` are mapped and unused; §7.4 asks for all five
+- [x] Lava has no visual. `sim.lava` is mapped and read by no renderer file, so a
+      volcano shows ash afterwards and never hot lava — **done in §18**
+- [x] No verb effects at all — flood, volcano, swamp, earthquake, armageddon have
+      no particles, decals or shake; feedback is audio plus the next re-mesh —
+      **done in §18**
+- [x] `fertility` and `sediment` are mapped and unused; §7.4 asks for all five —
+      **done in §18**
+
+### 18. Lava, the missing attributes, and the verb effects ✅
+
+The three items above, done as their own change because they are new content
+rather than repairs, and because lava needed a wasm ABI change.
+
+- [x] **`attribs2`: lava, fertility, sediment.** `attribs` was full, so §7.4's
+      "write them as vertex attributes" was three-fifths done. Lava is drawn
+      emissively — over the shaded result, not multiplied by the sun, because it
+      *is* the light source — on a depth ramp whose core sits above the bloom
+      threshold, so a flow glows into the air around it
+- [x] Lava is the **maximum** of the four cells at a corner, not the mean: it is a
+      fluid front, and averaging fades the edge over a cell and a half when what
+      the player has to read is where the front is
+- [x] **Everything in the vertex buffers is now in `chunk_content_hash`.** Lava is
+      what made this load-bearing — it moves every tick over ground that does not,
+      so its chunk would never have been re-meshed and the attribute would have
+      gone stale on the first frame.
+      `lava_reaches_the_vertex_buffer_and_dirties_its_chunk` asserts both
+      directions, including that a cooled flow stops glowing
+- [x] **A verb-event ring**, written where the census already counts verbs and past
+      the same gating. So a power refused on cost throws no sparks, and the
+      *opponent's* casts become visible — which a click-driven effect system cannot
+      do, since a client sees its own commands and never theirs. Instrumentation,
+      excluded from the hash, covered by `the_census_is_not_hashed`
+- [x] One instanced draw call for every particle of every effect, plus camera shake
+      applied to the eye and not the target, so the horizon stays level
+- [x] Two things that had to be right: a burst starts spread across the brush
+      radius, or forty coincident additive sprites saturate to a white blob; and
+      per-particle colour is a fraction of the intended brightness, or every effect
+      looks identical
+- [x] Verified in the browser rather than assumed: the AI's own volcano was caught
+      firing (verb 6 in the ring, particles alive), and a cast earthquake spent
+      exactly its 120 mana and emitted its 38 particles
+- [ ] Raise, lower, magnet and set-hand deliberately have no effect: their feedback
+      is the terrain and the hand, and sparks on every terrace step would be
+      constant noise
+
+Measured: meshing is **1.00 ms/tick at 15.3 chunks**, up from 0.60. The increase is
+the corner grid the §17 normal fix needs plus the new attribute channel. Two
+candidate savings were measured and **rejected** — reading the scalar height back
+from the corner grid, and moving the per-chunk scratch off the stack — because
+neither moved the number. The cost is the two vertex passes.
 
 ## Next
 
