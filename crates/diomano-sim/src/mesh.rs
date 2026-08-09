@@ -22,8 +22,10 @@
 //! 2. **Material-weighted Laplacian**, one pass — rock stays crisp and
 //!    cliff-like, sand reads as dunes. The material map drives silhouette, not
 //!    just colour.
-//! 3. **Chunk skirts** — an extra ring of vertices dropped radially inward,
-//!    hiding the hairline between chunks re-meshed at different times.
+//! 3. **Chunk skirts** — an extra ring of vertices, intended to be dropped
+//!    radially inward to hide the hairline between chunks re-meshed at different
+//!    times. The drop is now zero: see [`SKIRT_DROP`] for why no depth both works
+//!    and stays invisible, and what closes the window instead.
 //! 4. **Seam vertices come from ghost-border data**, so face boundaries are
 //!    continuous with no special case. A corner vertex on a face edge averages
 //!    two live cells and two ghosts — and the face on the other side averages
@@ -66,17 +68,32 @@ pub const BASE_RADIUS: f32 = 1.0;
 /// clearly a sphere, and comfortably inside the atmosphere shell.
 pub const HEIGHT_TO_RADIUS: f32 = 0.000_08;
 
-/// How far skirt vertices drop below the surface.
+/// How far skirt vertices drop below the surface. **Zero, deliberately.**
 ///
-/// A small fraction of a cell, not a fraction of the radius. Adjacent chunks
-/// compute their shared border vertices from the same cells and get bit-identical
-/// positions, so a crack can only appear while one side is stale — and
-/// [`Mesh::update`] dirties both sides of a changed border in the same call, so
-/// even that window is closed today. The skirt is kept because that guarantee
-/// disappears the moment meshing is spread across frames, but it is kept
-/// *shallow*: a skirt deep enough to be seen edge-on is a worse artefact than the
-/// crack it prevents.
-const SKIRT_DROP: f32 = 0.000_8;
+/// The rule this constant used to be set by is the right rule: "a skirt deep
+/// enough to be seen edge-on is a worse artefact than the crack it prevents".
+/// At `0.000_8` it was being seen. Both chunks either side of a border drop their
+/// shared ring, so the two dropped rings coincide and the pair forms a V-groove
+/// along every chunk boundary — 3% of a cell deep, and quite visible as a
+/// hairline grid every 16 cells across the whole planet. Setting this to zero
+/// removes it completely; confirmed by screenshot at the closest camera distance,
+/// where the grid was clearest.
+///
+/// The deeper point is that the value could not have been chosen well. To hide a
+/// crack from a stale neighbour the skirt has to be at least as deep as the height
+/// error it is hiding, and the smallest possible error is one terrace —
+/// `16 * HEIGHT_TO_RADIUS = 0.001_28`, already deeper than the setting that was
+/// visible. There is no depth that both works and disappears, so the mechanism
+/// cannot be the answer here.
+///
+/// What actually closes the window is [`Mesh::update`] dirtying both sides of a
+/// changed border in the same call, which it does, and which
+/// `only_dirty_chunks_are_remeshed` pins. The ring itself is left in place — it
+/// costs vertices, and the outer quads simply degenerate to zero area — so that
+/// if meshing is ever spread across frames the geometry is still there to use.
+/// Anything reviving it needs a depth of at least one terrace and should expect
+/// to see it.
+const SKIRT_DROP: f32 = 0.0;
 
 /// Material-weighted Laplacian strengths, x256 (§7.1 `[START]`).
 /// rock 0.15, soil 0.40, sand 0.60, ash 0.55.
@@ -241,6 +258,36 @@ impl Mesh {
         let vbase = chunk * VERTS_PER_CHUNK;
         let mut wet = false;
 
+        // The true corner position at every grid slot, including the ring one
+        // cell *outside* the chunk — which is what the normal pass differences
+        // against. `positions` cannot serve that purpose: its outer ring is the
+        // skirt, a duplicate of the border corner, so a central difference there
+        // silently degenerated into a one-sided one. See `build_normals`.
+        //
+        // This costs no extra `corner_height` work: `positions` is filled from
+        // this grid, and the skirt ring is a copy of the border rather than a
+        // fresh evaluation.
+        let mut corners = [0f32; VERTS_PER_CHUNK * 3];
+        for gj in 0..VERTS_PER_EDGE {
+            for gi in 0..VERTS_PER_EDGE {
+                // Clamped to the corners the one-deep ghost ring can support:
+                // `corner_height` averages cells `g - 1 ..= g`, so `g` may run
+                // from 0 to N and no further. At a face edge the ring therefore
+                // still duplicates, and those twelve cube edges keep the
+                // one-sided normals; every chunk border inside a face gets the
+                // real neighbour.
+                let gx = (cgx as i32 + gi as i32 - 1).clamp(0, N as i32);
+                let gy = (cgy as i32 + gj as i32 - 1).clamp(0, N as i32);
+                let terrain = self.corner_height(face, gx, gy);
+                let dir = corner_direction(face, gx, gy);
+                let r = BASE_RADIUS + terrain * HEIGHT_TO_RADIUS;
+                let k = (gj * VERTS_PER_EDGE + gi) * 3;
+                corners[k] = dir[0] * r;
+                corners[k + 1] = dir[1] * r;
+                corners[k + 2] = dir[2] * r;
+            }
+        }
+
         for gj in 0..VERTS_PER_EDGE {
             for gi in 0..VERTS_PER_EDGE {
                 // The skirt ring clamps onto the border corner and drops.
@@ -257,10 +304,15 @@ impl Mesh {
                 let dir = corner_direction(face, gx, gy);
 
                 let vi = vbase + gj * VERTS_PER_EDGE + gi;
-                let r = BASE_RADIUS + terrain * HEIGHT_TO_RADIUS;
-                self.positions[vi * 3] = dir[0] * r;
-                self.positions[vi * 3 + 1] = dir[1] * r;
-                self.positions[vi * 3 + 2] = dir[2] * r;
+                // Copied from the corner grid rather than recomputed, so the two
+                // can never disagree: the skirt ring reads the border slot it
+                // duplicates, exactly as the `i`/`j` clamp above says it should.
+                let src = ((gj.clamp(1, VERTS_PER_EDGE - 2)) * VERTS_PER_EDGE
+                    + gi.clamp(1, VERTS_PER_EDGE - 2))
+                    * 3;
+                self.positions[vi * 3] = corners[src];
+                self.positions[vi * 3 + 1] = corners[src + 1];
+                self.positions[vi * 3 + 2] = corners[src + 2];
 
                 let rw = BASE_RADIUS + surface * HEIGHT_TO_RADIUS;
                 self.water_positions[vi * 3] = dir[0] * rw;
@@ -292,7 +344,7 @@ impl Mesh {
         // tilt every first-interior-ring normal by the drop distance — and that
         // shows up as a bright seam along every chunk border, which is exactly
         // the artefact the skirt exists to prevent.
-        self.build_normals(chunk);
+        self.build_normals(chunk, &corners);
         self.sink_skirt(chunk);
     }
 
@@ -329,18 +381,38 @@ impl Mesh {
         }
     }
 
-    /// Central-difference normals over the vertex grid. The skirt ring copies its
+    /// Central-difference normals over the corner grid. The skirt ring copies its
     /// inward neighbour's normal so the skirt shades like the surface it hides.
-    fn build_normals(&mut self, chunk: usize) {
+    ///
+    /// # Why this differences `corners` and not `positions`
+    ///
+    /// `positions`' outer ring is the skirt: a duplicate of the border corner.
+    /// Differencing that, a border vertex's "central" difference collapsed to a
+    /// one-sided one — and to a differently-sided one on each side of the seam,
+    /// because a chunk's near border reads forward while its neighbour's far
+    /// border reads backward. The two chunks' copies of a shared vertex are
+    /// bit-identical in *position* (`face_boundary_vertices_coincide_exactly`)
+    /// and disagreed in *normal*, which drew a faint shading grid over the whole
+    /// planet every 16 cells — the artefact the skirt comment claims to have
+    /// eliminated, arriving by a different route.
+    ///
+    /// `corners` carries the real neighbour one cell outside the chunk, so both
+    /// sides difference the same four positions in the same order and land on the
+    /// same normal, bit for bit. `normals_agree_across_chunk_borders` pins it.
+    fn build_normals(&mut self, chunk: usize, corners: &[f32; VERTS_PER_CHUNK * 3]) {
         let vbase = chunk * VERTS_PER_CHUNK;
         let at = |gi: usize, gj: usize| vbase + gj * VERTS_PER_EDGE + gi;
+        let corner = |gi: usize, gj: usize| {
+            let k = (gj * VERTS_PER_EDGE + gi) * 3;
+            [corners[k], corners[k + 1], corners[k + 2]]
+        };
         for gj in 1..VERTS_PER_EDGE - 1 {
             for gi in 1..VERTS_PER_EDGE - 1 {
                 let vi = at(gi, gj);
-                let e = self.pos(at(gi + 1, gj));
-                let wv = self.pos(at(gi - 1, gj));
-                let nv = self.pos(at(gi, gj + 1));
-                let s = self.pos(at(gi, gj - 1));
+                let e = corner(gi + 1, gj);
+                let wv = corner(gi - 1, gj);
+                let nv = corner(gi, gj + 1);
+                let s = corner(gi, gj - 1);
                 let du = [e[0] - wv[0], e[1] - wv[1], e[2] - wv[2]];
                 let dv = [nv[0] - s[0], nv[1] - s[1], nv[2] - s[2]];
                 let mut n = [
@@ -353,11 +425,14 @@ impl Mesh {
                     let inv = rsqrt(len2);
                     n = [n[0] * inv, n[1] * inv, n[2] * inv];
                 } else {
-                    n = normalize(self.pos(vi));
+                    n = normalize(corner(gi, gj));
                 }
                 // Faces wind so that the outward normal points away from the
-                // planet centre; flip if the cross product came out inward.
-                let p = self.pos(vi);
+                // planet centre; flip if the cross product came out inward. Read
+                // from `corners`, not `positions`: identical here, but it keeps
+                // every input to a normal on the same grid, so the two chunks
+                // sharing a border cannot diverge through this branch either.
+                let p = corner(gi, gj);
                 if n[0] * p[0] + n[1] * p[1] + n[2] * p[2] < 0.0 {
                     n = [-n[0], -n[1], -n[2]];
                 }
@@ -382,6 +457,11 @@ impl Mesh {
         self.normals[dst * 3 + 2] = self.normals[src * 3 + 2];
     }
 
+    /// A vertex position, for the tests that check the buffer they were written
+    /// to. The mesher itself no longer reads `positions` back: normals are
+    /// differenced from the corner grid instead, which is what makes them agree
+    /// across a chunk border.
+    #[cfg(test)]
     fn pos(&self, vi: usize) -> [f32; 3] {
         [self.positions[vi * 3], self.positions[vi * 3 + 1], self.positions[vi * 3 + 2]]
     }
@@ -835,6 +915,63 @@ mod tests {
             let p = m.pos(vi);
             assert!(n[0] * p[0] + n[1] * p[1] + n[2] * p[2] > 0.0, "normal {vi} points inward");
         }
+    }
+
+    #[test]
+    fn normals_agree_across_chunk_borders() {
+        // Positions on a chunk border were already proven bit-identical; normals
+        // were not, and nothing checked them. They came out different, because a
+        // border vertex's central difference read the skirt duplicate on one side
+        // — forward on a chunk's near border, backward on its neighbour's far
+        // border — so the two copies of one vertex got two different normals and
+        // the planet wore a faint shading grid every 16 cells.
+        //
+        // Only borders *inside* a face are checked. `corner_height` needs cells
+        // `g - 1 ..= g` and the ghost ring is one cell deep, so at the twelve cube
+        // edges the outside corner is genuinely unavailable and both faces keep a
+        // one-sided difference there. That is a documented limit, not an
+        // oversight: fixing it needs a two-deep ghost ring.
+        let (_, m) = meshed();
+        let mut compared = 0usize;
+        for face in 0..6usize {
+            for cy in 0..CHUNKS_PER_EDGE {
+                for cx in 0..CHUNKS_PER_EDGE {
+                    // Compare this chunk's east border with the west border of
+                    // the chunk to its east, vertex for vertex.
+                    if cx + 1 >= CHUNKS_PER_EDGE {
+                        continue;
+                    }
+                    let a = (face * CHUNKS_PER_EDGE + cy) * CHUNKS_PER_EDGE + cx;
+                    let b = a + 1;
+                    // `i = 16` on A is the same corner as `i = 0` on B, i.e.
+                    // grid column 17 on A and column 1 on B.
+                    for gj in 1..VERTS_PER_EDGE - 1 {
+                        let va = a * VERTS_PER_CHUNK + gj * VERTS_PER_EDGE + (VERTS_PER_EDGE - 2);
+                        let vb = b * VERTS_PER_CHUNK + gj * VERTS_PER_EDGE + 1;
+                        // Positions first: if these ever disagree the vertices are
+                        // not the pair this test thinks they are.
+                        for k in 0..3 {
+                            assert_eq!(
+                                m.positions[va * 3 + k].to_bits(),
+                                m.positions[vb * 3 + k].to_bits(),
+                                "chunk {a}/{b} row {gj} component {k}: not the same vertex"
+                            );
+                            assert_eq!(
+                                m.normals[va * 3 + k].to_bits(),
+                                m.normals[vb * 3 + k].to_bits(),
+                                "chunk {a}/{b} row {gj} component {k}: normals differ \
+                                 ({} vs {})",
+                                m.normals[va * 3 + k],
+                                m.normals[vb * 3 + k]
+                            );
+                        }
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        // 6 faces x 4 rows of chunks x 3 interior borders x 17 shared vertices.
+        assert_eq!(compared, 6 * CHUNKS_PER_EDGE * (CHUNKS_PER_EDGE - 1) * (VERTS_PER_EDGE - 2));
     }
 
     #[test]

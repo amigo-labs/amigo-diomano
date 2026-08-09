@@ -51,7 +51,18 @@ export function createHand(
   // pointer icon — the player's whole read of "how much am I holding" is this.
   const palm = new THREE.Mesh(
     new THREE.SphereGeometry(1, 24, 16),
-    new THREE.MeshBasicMaterial({ color: 0xfff0d8, transparent: true, opacity: 0.28 }),
+    // `depthWrite: false` is load-bearing. The palm is a transparent shell with
+    // the fill sphere strictly inside it; three sorts two transparent meshes at
+    // the same position by creation order, so the palm drew first, wrote its
+    // front-face depth, and the fill failed the depth test entirely. The one
+    // diegetic readout §4.2 asks for — how much matter am I holding — was being
+    // z-rejected by its own container.
+    new THREE.MeshBasicMaterial({
+      color: 0xfff0d8,
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+    }),
   );
   const fill = new THREE.Mesh(
     new THREE.SphereGeometry(1, 20, 14),
@@ -81,13 +92,44 @@ export function createHand(
   let pendingSteps = 0;
   let modifier = 0;
 
+  /**
+   * Which cell the pointer is over.
+   *
+   * The ray is intersected with the mean sphere first and then re-intersected
+   * against the surface radius at whatever cell that found, twice. One
+   * intersection against the mean sphere is only correct where the ground is at
+   * sea level: relief reaches ~6% of the radius, and the error is
+   * `height * tan(incidence)`, so on a mountain seen at a glancing angle the
+   * mean-sphere pick lands several cells away from the ground the player is
+   * looking at. Two refinement steps put it on the visible surface.
+   *
+   * The original reason for using the mean radius — that raising ground would
+   * otherwise drag the cursor with it — survives the change: one terrace is
+   * 16 height units, which is 0.05 of a cell, so the per-step feedback is far
+   * below a cell. Where the pick does move over a long dig, it moves because the
+   * surface really did.
+   */
   const updateTarget = (): void => {
     raycaster.setFromCamera(pointer, camera.camera);
-    // Intersect the ray with the planet's mean sphere. Using the mean radius
-    // rather than the actual surface keeps picking stable while terrain moves
-    // under the cursor — otherwise raising ground would drag the cursor with it.
-    const hit = intersectSphere(raycaster.ray, BASE_RADIUS);
-    current = hit ? pickCell(hit, sim.N) : null;
+    let hit = intersectSphere(raycaster.ray, BASE_RADIUS);
+    if (!hit) {
+      current = null;
+      return;
+    }
+    let cell = pickCell(hit, sim.N);
+    for (let step = 0; step < 2; step++) {
+      const c = sim.idx(cell.face, cell.x, cell.y);
+      const height = sim.height[c] ?? 0;
+      const water = sim.water[c] ?? 0;
+      const surface = BASE_RADIUS + (height + Math.max(water, 0)) * HEIGHT_TO_RADIUS;
+      const refined = intersectSphere(raycaster.ray, surface);
+      // A ray that misses the raised surface still hit the mean sphere; keep
+      // the coarser answer rather than dropping the target entirely.
+      if (!refined) break;
+      hit = refined;
+      cell = pickCell(hit, sim.N);
+    }
+    current = cell;
   };
 
   canvas.addEventListener("pointermove", (ev) => {
@@ -144,6 +186,8 @@ export function createHand(
 
   const position = new THREE.Vector3();
   const targetPosition = new THREE.Vector3();
+  /** `RingGeometry` lies in the XY plane, so its normal is +Z. Hoisted. */
+  const ringNormal = new THREE.Vector3(0, 0, 1);
 
   return {
     group,
@@ -167,7 +211,15 @@ export function createHand(
     },
 
     sync(alpha: number): void {
-      group.visible = current !== null && !camera.panning;
+      // Re-pick every frame, not only on `pointermove`. Orbiting or zooming with
+      // the pointer held still used to leave the target on the cell it had been
+      // over before the planet turned, and a click then acted on that stale
+      // cell. This is two sphere intersections and a projection inverse.
+      updateTarget();
+      // Visible whenever it is over the planet, including while orbiting. The
+      // page sets `cursor: none`, so hiding the hand during a camera drag left
+      // the screen with no pointer of any kind.
+      group.visible = current !== null;
       if (!current) return;
 
       const dir = cellDirection(current.face, current.x, current.y, sim.N);
@@ -202,7 +254,7 @@ export function createHand(
 
       // Footprint ring, lying flat on the surface.
       ring.position.copy(dir).multiplyScalar(surface + 0.002);
-      ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+      ring.quaternion.setFromUnitVectors(ringNormal, dir);
       const radius = 1 + (modifier & MOD.THROWN ? 1 : 0) + (modifier & MOD.EXTREME ? 3 : 0);
       ring.scale.setScalar(cellScale * (radius + 0.5) * 2);
     },

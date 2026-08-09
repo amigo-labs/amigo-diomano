@@ -44,6 +44,15 @@ export interface Gestures {
   stop(): void;
   /** True once a spiral has armed gesture mode; the caller draws the trail. */
   readonly armed: boolean;
+  /**
+   * The stroke being drawn, in client pixels. Empty when nothing is tracked.
+   *
+   * §8 requires the armed state to be "confirmed by a light trail", and this is
+   * what the trail is drawn from. Before it existed, `armed` was exported and
+   * read by nobody: arming a gesture produced no feedback of any kind, so there
+   * was no way to tell gesture mode from a camera drag.
+   */
+  readonly stroke: readonly { readonly x: number; readonly y: number }[];
 }
 
 interface Point {
@@ -95,7 +104,18 @@ function templates(): Template[] {
   return templateCache;
 }
 
-export function createGestures(canvas: HTMLCanvasElement, emit: Emit): Gestures {
+/**
+ * @param armedFlag Written whenever gesture mode arms or disarms, so the camera
+ *   can stand down. `verbs.md` specifies right-drag as "orbit the planet" only
+ *   when there is *no spiral* — both were bound to the same button with nothing
+ *   implementing the qualifier, so every gesture spun the planet underneath
+ *   itself while the recogniser was matching a screen-space path against it.
+ */
+export function createGestures(
+  canvas: HTMLCanvasElement,
+  emit: Emit,
+  armedFlag: { value: boolean },
+): Gestures {
   let timer = 0;
   let tracking = false;
   let armed = false;
@@ -105,9 +125,14 @@ export function createGestures(canvas: HTMLCanvasElement, emit: Emit): Gestures 
   let live: Point | null = null;
   let modifier = 0;
 
+  const setArmed = (value: boolean): void => {
+    armed = value;
+    armedFlag.value = value;
+  };
+
   const reset = (): void => {
     path = [];
-    armed = false;
+    setArmed(false);
     spiralsThisStroke = 0;
     modifier = 0;
   };
@@ -139,7 +164,7 @@ export function createGestures(canvas: HTMLCanvasElement, emit: Emit): Gestures 
     if (spirals > spiralsThisStroke) {
       spiralsThisStroke = spirals;
       if (!armed) {
-        armed = true;
+        setArmed(true);
         armedAt = performance.now();
         // The stroke that armed the gesture is not part of the gesture.
         path = [{ ...live }];
@@ -190,6 +215,9 @@ export function createGestures(canvas: HTMLCanvasElement, emit: Emit): Gestures 
     },
     get armed(): boolean {
       return armed;
+    },
+    get stroke(): readonly { readonly x: number; readonly y: number }[] {
+      return path;
     },
   };
 }

@@ -27,7 +27,9 @@ import { createLoop } from "./loop";
 import { createAtmosphere } from "./renderer/atmosphere";
 import { createPlanet } from "./renderer/planet";
 import { createPost } from "./renderer/post";
+import { createTrail } from "./renderer/trail";
 import { createVegetation } from "./renderer/vegetation";
+import { createView } from "./renderer/view";
 import { createWater } from "./renderer/water";
 
 // ---------------------------------------------------------------------------
@@ -462,11 +464,17 @@ async function boot(): Promise<void> {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const scene = new THREE.Scene();
-    const camera = createCamera(canvas);
-    const planet = createPlanet(sim);
-    const water = createWater(sim);
-    const atmosphere = createAtmosphere();
-    const vegetation = createVegetation(sim, tier);
+    // Every shader's shared values live in one place; see `renderer/view.ts` for
+    // the three features that broke when they were per-material copies.
+    const view = createView();
+    // Set by the gesture recogniser and read by the camera, so a spiral takes
+    // the stroke away from the orbit control instead of sharing it.
+    const gestureArmed = { value: false };
+    const camera = createCamera(canvas, gestureArmed);
+    const planet = createPlanet(sim, view);
+    const water = createWater(sim, view);
+    const atmosphere = createAtmosphere(view);
+    const vegetation = createVegetation(sim, tier, view);
     planet.material.uniforms.uTier!.value = tier;
     water.material.uniforms.uTier!.value = tier;
     scene.add(planet.group, water.mesh, atmosphere.group, vegetation.group);
@@ -474,21 +482,30 @@ async function boot(): Promise<void> {
     const post = createPost(renderer, scene, camera.camera, tier);
     const audio = createAudio();
     const hand = createHand(sim, camera, canvas, LOCAL_PLAYER);
-    scene.add(hand.group);
-    const gestures = createGestures(canvas, (verb, modifier) => {
-      const target = hand.target();
-      if (!target) return;
-      sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
-      audio.gesture(verb);
-    });
+    const trail = createTrail();
+    scene.add(hand.group, trail.object);
+    const gestures = createGestures(
+      canvas,
+      (verb, modifier) => {
+        const target = hand.target();
+        if (!target) return;
+        sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
+        audio.gesture(verb);
+      },
+      gestureArmed,
+    );
 
-    addEventListener("resize", () => {
+    const applySize = (): void => {
+      // Re-read the device pixel ratio every time: dragging a window between a 1x and
+      // a 2x display fires `resize` without changing `innerWidth`, and a stale
+      // ratio renders the whole frame at the wrong resolution.
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.setSize(innerWidth, innerHeight, false);
       camera.resize(innerWidth / innerHeight);
       post.resize(innerWidth, innerHeight);
-    });
-    camera.resize(innerWidth / innerHeight);
-    post.resize(innerWidth, innerHeight);
+    };
+    addEventListener("resize", applySize);
+    applySize();
 
     const loop = createLoop({
       update() {
@@ -496,17 +513,22 @@ async function boot(): Promise<void> {
         sim.tick();
       },
       render(alpha, dtMs) {
+        // The camera goes first. Everything below reads its matrix — the shared
+        // view uniforms, the hand's pick ray, the trail's unprojection — and
+        // running it last meant all of them used the previous frame's view. With
+        // 71 ms of orbit smoothing that lag is visible as the cursor sliding
+        // behind the terrain during a drag.
+        camera.update(dtMs);
+        const tick = sim.e.dio_tick_count();
+        view.sync(camera.camera, tick);
+
         sim.meshUpdate();
         planet.sync(sim.e.dio_sea_level());
-        water.sync(sim.e.dio_sea_level(), sim.e.dio_tick_count());
-        vegetation.sync();
+        water.sync();
+        vegetation.sync(tick);
         hand.sync(alpha);
-        atmosphere.sync(
-          sim.e.dio_tick_count(),
-          sim.e.dio_tide_phase(),
-          sim.e.dio_ticks_to_impact(),
-        );
-        camera.update(dtMs);
+        trail.sync(camera.camera, gestures.stroke, gestures.armed);
+        atmosphere.sync(sim.e.dio_tide_phase(), sim.e.dio_ticks_to_impact());
         audio.sync(sim, dtMs);
         post.render();
       },
@@ -525,6 +547,7 @@ async function boot(): Promise<void> {
       atmosphere,
       vegetation,
       camera,
+      view,
     };
 
     loop.start();

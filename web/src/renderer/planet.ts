@@ -22,6 +22,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL } from "./atmosphere";
+import type { View } from "./view";
 
 /** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
 export const BASE_RADIUS = 1.0;
@@ -79,7 +80,12 @@ const VERTEX_SHADER = /* glsl */ `
   uniform float uSeaRadius;
 
   void main() {
-    vNormal = normalize(normalMatrix * normal);
+    // World space, not normalMatrix. Three builds normalMatrix from the
+    // *modelView* matrix, so it yields a view-space normal — and every consumer
+    // below is world-space: the sun vector, up = normalize(vWorld), the slope
+    // blend and the sky bounce. Mixing the two made the terminator and the
+    // steep-reads-as-rock band swing around as the camera orbited.
+    vNormal = normalize(mat3(modelMatrix) * normal);
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
     vAttrib = attrib;
@@ -102,7 +108,6 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uCameraPosition;
   uniform vec3 uGodA;
   uniform vec3 uGodB;
-  uniform float uTime;
   uniform float uCloudTime;
   uniform float uTier;
 
@@ -142,7 +147,14 @@ const FRAGMENT_SHADER = /* glsl */ `
     albedo = mix(albedo, vec3(0.38, 0.36, 0.38), smoothstep(0.35, 0.75, slope));
 
     // Snow on high flat ground.
-    float snow = smoothstep(0.055, 0.085, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
+    //
+    // The band has to sit inside the altitude the terrain can actually reach.
+    // world.rs generates with amp = 720, and 720 * HEIGHT_TO_RADIUS = 0.0576
+    // radii, so the old 0.055..0.085 band only ever reached about a tenth of its
+    // range at the global maximum: a tier-1 feature that was dead in practice.
+    // Starting at 0.032 puts the snowline around 400 height units, which
+    // hand-raised peaks and generated mountains both clear.
+    float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
     albedo = mix(albedo, vec3(0.94, 0.96, 1.0), snow);
 
     // Wet-sand band at the waterline: darken by distance to the current water
@@ -186,20 +198,21 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
-export function createPlanet(sim: Sim): Planet {
+export function createPlanet(sim: Sim, view: View): Planet {
   const group = new THREE.Group();
 
   const material = new THREE.ShaderMaterial({
     vertexShader: VERTEX_SHADER,
     fragmentShader: FRAGMENT_SHADER,
     uniforms: {
-      uSunDirection: { value: new THREE.Vector3(0.6, 0.5, 0.6).normalize() },
-      uCameraPosition: { value: new THREE.Vector3() },
+      // Shared by reference with every other material — see `view.ts` for why
+      // these three are not allowed to be private copies.
+      uSunDirection: view.sunDirection,
+      uCameraPosition: view.cameraPosition,
+      uCloudTime: view.cloudTime,
       uSeaRadius: { value: BASE_RADIUS },
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
-      uTime: { value: 0 },
-      uCloudTime: { value: 0 },
       uTier: { value: 2 },
     },
   });
@@ -324,15 +337,34 @@ export function pickCell(dir: THREE.Vector3, N: number): { face: number; x: numb
 
 /** Forward map: cell centre to a unit direction. The inverse of `pickCell`. */
 export function cellDirection(face: number, x: number, y: number, N: number): THREE.Vector3 {
-  const warp = (t: number): number => Math.tan((t * Math.PI) / 4);
-  const a = warp(((x + 0.5) * 2) / N - 1);
-  const b = warp(((y + 0.5) * 2) / N - 1);
+  return cellDirectionInto(new THREE.Vector3(), face, x + 0.5, y + 0.5, N);
+}
+
+/**
+ * Forward map at a *continuous* face coordinate, writing into `out`.
+ *
+ * `fx`/`fy` are in cell units with cell `i` centred at `i + 0.5` — the same
+ * convention `walkers.rs` spawns with (`(x << 16) + ONE / 2`), so a walker's
+ * Q16.16 position can be passed straight in and drawn where the simulation
+ * actually put it rather than snapped to the nearest cell centre.
+ *
+ * Takes an `out` vector because the callers are per-instance loops running every
+ * tick; returning a fresh `Vector3` made this one of the largest sources of
+ * garbage in the frame.
+ */
+export function cellDirectionInto(
+  out: THREE.Vector3,
+  face: number,
+  fx: number,
+  fy: number,
+  N: number,
+): THREE.Vector3 {
+  const a = Math.tan((((fx * 2) / N - 1) * Math.PI) / 4);
+  const b = Math.tan((((fy * 2) / N - 1) * Math.PI) / 4);
   const n = FACE_NORMAL[face] ?? FACE_NORMAL[0]!;
   const r = FACE_RIGHT[face] ?? FACE_RIGHT[0]!;
   const u = FACE_UP[face] ?? FACE_UP[0]!;
-  return new THREE.Vector3(
-    n[0] + r[0] * a + u[0] * b,
-    n[1] + r[1] * a + u[1] * b,
-    n[2] + r[2] * a + u[2] * b,
-  ).normalize();
+  return out
+    .set(n[0] + r[0] * a + u[0] * b, n[1] + r[1] * a + u[1] * b, n[2] + r[2] * a + u[2] * b)
+    .normalize();
 }
