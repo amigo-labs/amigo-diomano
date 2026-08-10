@@ -310,6 +310,155 @@ Recorded rather than resolved silently. See the run summary for the full list.
 - [ ] Setup, not a code change: point the Workers Builds **build command** at
       `bash ./scripts/cloudflare-build.sh`
 
+### 17. The renderer, looked at on a screen ✅
+
+The geometry pipeline was in good shape and the shading layer had never been
+inspected against an actual frame. Built the client, drove it in headless
+Chromium at four camera positions, and isolated causes by hiding layers and
+patching uniforms in a live page.
+
+- [x] **`uCameraPosition` was declared in three shaders and written by none.** It
+      stayed at the origin, so `viewDir` was the inward radial everywhere: the
+      terrain's rim term evaluated to 1.0 over the *whole* planet rather than at
+      the limb — a flat blue-grey wash on every pixel of ground, which is why the
+      world read as a featureless ball; water Fresnel saturated the same way and
+      replaced 70% of the Beer–Lambert gradient with flat sky; and the atmosphere
+      shell's rim came out **exactly zero**, so the §7.3 effect called "highest
+      impact per line in the whole list" drew nothing at all — and with it the
+      whole no-HUD tide telegraph, which only multiplies that rim
+- [x] **Two sun vectors and a frozen cloud clock**, the same class of defect:
+      `planet.ts` and `water.ts` each built private copies of values
+      `atmosphere.ts` was advancing. Terrain's terminator stood still while the
+      clouds turned; ground shadows sampled a frozen noise field while the shell
+      scrolled — exactly the failure `CLOUD_NOISE_GLSL` is shared to prevent.
+      Sharing the noise stopped the pattern drifting; nobody had shared the clock
+- [x] `renderer/view.ts` now owns all four shared values and every material takes
+      the uniform objects by reference, so the drift is unrepresentable rather
+      than merely fixed
+- [x] **Normals were view-space, lit by a world-space sun.** `normalMatrix` is
+      built from the modelView matrix; the terminator and the steep-reads-as-rock
+      band swung around as the camera orbited
+- [x] **`vertexColors: true` with no `color` attribute** on the settlement and
+      walker materials: `USE_COLOR` got defined, the attribute was unbound,
+      `MeshLambertMaterial` has no `defaultAttributeValues`, so `vColor` collapsed
+      to zero and **settlements and walkers rendered black** — visible as a black
+      hexagon on every screenshot — while the tier-2 night lights added nothing
+- [x] **The hand's fill sphere was z-rejected by its own container**: the palm is
+      transparent and wrote depth, so §4.2's one diegetic readout was invisible
+- [x] FXAA moved after `OutputPass` (three documents the requirement), and two
+      DPR sizing bugs alongside it
+
+**Camera.** §7.2's "horizon always visible" is arithmetically unreachable while
+the camera looks at the planet's centre: the limb needs `d >= 2.61 R` at 45°, and
+`MIN_DISTANCE` is 1.35 R where the angular radius is 47.8°. Even the 2.3 R default
+had the globe cut off top and bottom.
+
+- [x] The camera tilts toward the horizon as it comes in and widens from 45° to
+      56°, so curvature is on screen at *every* distance with the close working
+      distance kept. `camera.up` is the local tangent, which also removes the
+      `lookAt` degeneracy the pitch clamp was guarding
+- [x] Right-drag orbits *until a spiral arms gesture mode* — `verbs.md` always
+      said "(no spiral)" and nothing implemented it, so every gesture spun the
+      planet under a path being matched in screen space
+- [x] The gesture light trail §8 requires. `gestures.armed` was exported with the
+      comment "the caller draws the trail" and read by nobody
+- [x] Wheel normalised by `deltaMode` (zoom was dead in Firefox), drag
+      sensitivity scaled by distance, zoom to the pointer, near plane tracking
+      the distance
+- [x] Picking refined against the surface instead of the mean sphere, and
+      recomputed per frame instead of only on `pointermove`
+
+**Models.** A tree was `cellScale * 1.6` tall against a total relief of 2.4 cells
+— two thirds of the tallest peak — on an unjittered lattice, sawing through the
+limb from orbit.
+
+- [x] Trees a third of a cell, several stems per cell instead of one giant one,
+      hashed jitter and rotation, hashed colour variation, ambient raised so the
+      shadow side is shadow rather than black
+- [x] Settlements draw as a cluster whose *count* is the tier; walker size keyed
+      to rank rather than to `strength` (which §4.7 lets reach 255); champions and
+      leaders finally distinguishable
+- [x] Walkers drawn at their true Q16.16 sub-cell position — it was being floored,
+      directly under a comment claiming otherwise — with bilinear surface height
+- [x] The papal magnet has a visual at all. `dio_magnet_active` and friends were
+      declared and never called, for the game's only click-verb
+- [x] The snowline moved into the altitude the terrain can reach: it was
+      `smoothstep(0.055, 0.085)` against a maximum of 0.0576, so a tier-1 feature
+      never appeared
+- [x] `vegetation.sync` is gated on the tick changing and trees rebuild every 15
+      ticks, instead of rebuilding ~7,700 instances every frame
+
+**Mesher.** Two real artefacts, both found by looking:
+
+- [x] **Chunk-border normals disagreed.** `build_normals` differenced `positions`,
+      whose outer ring is the skirt duplicate, so a border vertex got a one-sided
+      difference — forward on one chunk, backward on its neighbour. Now
+      differenced from a corner grid that includes the ring outside the chunk, at
+      no extra `corner_height` cost. `normals_agree_across_chunk_borders`, and it
+      was confirmed to fail against the old code before being kept
+- [x] **`SKIRT_DROP` is zero.** The visible hairline grid every 16 cells was the
+      skirt, not the normals: both chunks drop their shared ring, so the pair cuts
+      a V-groove along every border. No value works — hiding a stale neighbour
+      needs at least one terrace, 0.00128, and 0.0008 was already visible. What
+      closes the window is `update` dirtying both sides, which it does
+- [ ] The twelve cube edges keep one-sided normals: the corner outside a face
+      needs a two-deep ghost ring and the ring is one deep. Documented, not fixed
+
+**Not done, and deliberately separate** — these are new content rather than
+repairs to shipped features, and lava needs a new vertex-attribute channel
+through the mesher, which is a wasm ABI change with its own tests:
+
+- [x] Lava has no visual. `sim.lava` is mapped and read by no renderer file, so a
+      volcano shows ash afterwards and never hot lava — **done in §18**
+- [x] No verb effects at all — flood, volcano, swamp, earthquake, armageddon have
+      no particles, decals or shake; feedback is audio plus the next re-mesh —
+      **done in §18**
+- [x] `fertility` and `sediment` are mapped and unused; §7.4 asks for all five —
+      **done in §18**
+
+### 18. Lava, the missing attributes, and the verb effects ✅
+
+The three items above, done as their own change because they are new content
+rather than repairs, and because lava needed a wasm ABI change.
+
+- [x] **`attribs2`: lava, fertility, sediment.** `attribs` was full, so §7.4's
+      "write them as vertex attributes" was three-fifths done. Lava is drawn
+      emissively — over the shaded result, not multiplied by the sun, because it
+      *is* the light source — on a depth ramp whose core sits above the bloom
+      threshold, so a flow glows into the air around it
+- [x] Lava is the **maximum** of the four cells at a corner, not the mean: it is a
+      fluid front, and averaging fades the edge over a cell and a half when what
+      the player has to read is where the front is
+- [x] **Everything in the vertex buffers is now in `chunk_content_hash`.** Lava is
+      what made this load-bearing — it moves every tick over ground that does not,
+      so its chunk would never have been re-meshed and the attribute would have
+      gone stale on the first frame.
+      `lava_reaches_the_vertex_buffer_and_dirties_its_chunk` asserts both
+      directions, including that a cooled flow stops glowing
+- [x] **A verb-event ring**, written where the census already counts verbs and past
+      the same gating. So a power refused on cost throws no sparks, and the
+      *opponent's* casts become visible — which a click-driven effect system cannot
+      do, since a client sees its own commands and never theirs. Instrumentation,
+      excluded from the hash, covered by `the_census_is_not_hashed`
+- [x] One instanced draw call for every particle of every effect, plus camera shake
+      applied to the eye and not the target, so the horizon stays level
+- [x] Two things that had to be right: a burst starts spread across the brush
+      radius, or forty coincident additive sprites saturate to a white blob; and
+      per-particle colour is a fraction of the intended brightness, or every effect
+      looks identical
+- [x] Verified in the browser rather than assumed: the AI's own volcano was caught
+      firing (verb 6 in the ring, particles alive), and a cast earthquake spent
+      exactly its 120 mana and emitted its 38 particles
+- [ ] Raise, lower, magnet and set-hand deliberately have no effect: their feedback
+      is the terrain and the hand, and sparks on every terrace step would be
+      constant noise
+
+Measured: meshing is **1.00 ms/tick at 15.3 chunks**, up from 0.60. The increase is
+the corner grid the §17 normal fix needs plus the new attribute channel. Two
+candidate savings were measured and **rejected** — reading the scalar height back
+from the corner grid, and moving the per-chunk scratch off the stack — because
+neither moved the number. The cost is the two vertex passes.
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on

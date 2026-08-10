@@ -14,12 +14,13 @@
 
 import * as THREE from "three";
 import type { Sim } from "../main";
-import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./planet";
+import { BASE_RADIUS } from "./planet";
+import type { View } from "./view";
 
 export interface Water {
   readonly mesh: THREE.Group;
   readonly material: THREE.ShaderMaterial;
-  sync(seaLevel: number, tick: number): void;
+  sync(): void;
 }
 
 const VERTEX_SHADER = /* glsl */ `
@@ -34,7 +35,11 @@ const VERTEX_SHADER = /* glsl */ `
 
   void main() {
     vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
-    vNormal = normalize(normalMatrix * normal);
+    // World space, for the same reason as planet.ts: normalMatrix is view-space
+    // and the sun, the Fresnel view vector and the ripple tangent frame are all
+    // world-space. The normal attribute here *is* the position buffer, so this
+    // is the outward radial.
+    vNormal = normalize(mat3(modelMatrix) * normal);
     vDepth = attrib.r;
     vInfluence = attrib.g * 2.0 - 1.0;
     vFoam = attrib.b;
@@ -128,7 +133,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
-export function createWater(sim: Sim): Water {
+export function createWater(sim: Sim, view: View): Water {
   const group = new THREE.Group();
 
   const material = new THREE.ShaderMaterial({
@@ -137,9 +142,10 @@ export function createWater(sim: Sim): Water {
     transparent: true,
     depthWrite: false,
     uniforms: {
-      uSunDirection: { value: new THREE.Vector3(0.6, 0.5, 0.6).normalize() },
-      uCameraPosition: { value: new THREE.Vector3() },
-      uTime: { value: 0 },
+      // Shared by reference — see `view.ts`.
+      uSunDirection: view.sunDirection,
+      uCameraPosition: view.cameraPosition,
+      uTime: view.time,
       uTier: { value: 2 },
       uGodA: { value: new THREE.Color(1.05, 0.95, 0.85) },
       uGodB: { value: new THREE.Color(0.85, 0.92, 1.1) },
@@ -173,14 +179,24 @@ export function createWater(sim: Sim): Water {
   indexAttribute.setUsage(THREE.DynamicDrawUsage);
   geometry.setIndex(indexAttribute);
 
-  let wetSignature = "";
+  // The wet set, as it was when the index buffer was last built. Compared
+  // element-wise rather than by building a 96-character string every frame:
+  // this runs once per frame forever, and the string was pure garbage.
+  const wetSignature = new Uint8Array(sim.chunks);
+  let haveSignature = false;
   const rebuildIndices = (): void => {
-    let signature = "";
-    for (let chunk = 0; chunk < sim.chunks; chunk++) {
-      signature += sim.meshWaterPresent[chunk] ? "1" : "0";
+    if (haveSignature) {
+      let changed = false;
+      for (let chunk = 0; chunk < sim.chunks; chunk++) {
+        if (wetSignature[chunk] !== sim.meshWaterPresent[chunk]) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return;
     }
-    if (signature === wetSignature) return;
-    wetSignature = signature;
+    wetSignature.set(sim.meshWaterPresent);
+    haveSignature = true;
 
     let out = 0;
     for (let chunk = 0; chunk < sim.chunks; chunk++) {
@@ -205,7 +221,7 @@ export function createWater(sim: Sim): Water {
   return {
     mesh: group,
     material,
-    sync(seaLevel: number, tick: number): void {
+    sync(): void {
       rebuildIndices();
       position.clearUpdateRanges();
       attrib.clearUpdateRanges();
@@ -221,11 +237,9 @@ export function createWater(sim: Sim): Water {
         position.needsUpdate = true;
         attrib.needsUpdate = true;
       }
-      // Render time, not simulation time: this drives ripples only, and a
-      // ripple phase must never be able to reach simulation state (§10).
-      material.uniforms.uTime!.value = tick / 30;
-      void seaLevel;
-      void HEIGHT_TO_RADIUS;
+      // `uTime` is the shared render clock in `view.ts`; nothing to set here.
+      // It drives ripples only, and a ripple phase must never be able to reach
+      // simulation state (§10).
     },
   };
 }

@@ -238,7 +238,7 @@ pub const MERGE_MAX_HP: i16 = MERGE_MAX_STRENGTH as i16 * 16;
 /// Nothing in the simulation may *read* these. They are write-only from the
 /// simulation's point of view, which is what keeps them from becoming state.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Census {
     /// Walker-vs-walker pairs that exchanged damage.
     pub combat_resolutions: u32,
@@ -248,11 +248,64 @@ pub struct Census {
     /// appears in a log but never here was rejected every time — which a corpus
     /// must report rather than count as coverage.
     pub verb_applied: [u32; VERB_COUNT as usize],
+    /// Ring of *where* verbs landed, for the renderer's effects.
+    ///
+    /// The counts above say a verb fired; an effect needs the place. Recorded in
+    /// the same spot and past the same gating, so a power that was refused on
+    /// cost throws no sparks — the picture cannot claim something the simulation
+    /// declined to do.
+    ///
+    /// A ring rather than a per-tick list because the renderer samples it at
+    /// frame rate, not tick rate, and must be free to be behind: it tracks
+    /// `verb_events_written` and reads forward from wherever it got to. Falling
+    /// more than [`VERB_EVENTS`] behind drops the oldest, which for a cosmetic
+    /// is the right failure.
+    pub verb_events: [VerbEvent; VERB_EVENTS],
+    /// Total events ever written. The ring index is this modulo its length.
+    pub verb_events_written: u32,
+}
+
+/// Capacity of the verb-event ring. At most one command per verb per player per
+/// tick survives gating, so this holds several ticks' worth.
+pub const VERB_EVENTS: usize = 64;
+
+/// Where and what, for one applied verb. Render-side only, never hashed.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VerbEvent {
+    pub face: u8,
+    pub x: u8,
+    pub y: u8,
+    pub verb: u8,
+    pub player: u8,
+    pub modifier: u8,
+    /// Radius the brush actually used, in cells, so an effect can match its size.
+    pub radius: u8,
+    pub _pad: u8,
+}
+
+impl VerbEvent {
+    pub const ZEROED: Self =
+        Self { face: 0, x: 0, y: 0, verb: 0, player: 0, modifier: 0, radius: 0, _pad: 0 };
+}
+
+/// Hand-written rather than derived: `Default` for `[T; N]` stops at 32 elements
+/// and the event ring is 64. Keeping the ring big enough to absorb a catch-up
+/// burst of ticks is worth one impl block.
+impl Default for Census {
+    fn default() -> Self {
+        Self::ZEROED
+    }
 }
 
 impl Census {
-    pub const ZEROED: Self =
-        Self { combat_resolutions: 0, merges: 0, verb_applied: [0; VERB_COUNT as usize] };
+    pub const ZEROED: Self = Self {
+        combat_resolutions: 0,
+        merges: 0,
+        verb_applied: [0; VERB_COUNT as usize],
+        verb_events: [VerbEvent::ZEROED; VERB_EVENTS],
+        verb_events_written: 0,
+    };
 }
 
 /// HANDOFF §4.5: `(face, x: Q16.16, y: Q16.16, strength, hp)`.
@@ -1628,6 +1681,20 @@ mod tests {
         w.census.combat_resolutions = 4_242;
         w.census.merges = 99;
         w.census.verb_applied[VERB_RAISE as usize] = 1_000;
+        // The verb-event ring is instrumentation by the same argument: it exists
+        // so the renderer can throw sparks where a power landed, and a cosmetic
+        // must not be able to desync a match.
+        w.census.verb_events[3] = VerbEvent {
+            face: 5,
+            x: 60,
+            y: 12,
+            verb: VERB_RAISE,
+            player: 1,
+            modifier: 7,
+            radius: 4,
+            _pad: 0,
+        };
+        w.census.verb_events_written = 123;
         assert_eq!(w.state_hash(), base, "a diagnostic counter reached the state hash");
     }
 

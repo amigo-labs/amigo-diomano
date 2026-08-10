@@ -22,6 +22,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL } from "./atmosphere";
+import type { View } from "./view";
 
 /** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
 export const BASE_RADIUS = 1.0;
@@ -70,19 +71,27 @@ export interface Planet {
 
 const VERTEX_SHADER = /* glsl */ `
   attribute vec4 attrib;   // material / 255, vegetation, influence + 128, depth
+  attribute vec4 attrib2;  // lava, fertility, sediment, spare
 
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying vec4 vAttrib;
+  varying vec4 vAttrib2;
   varying float vAltitude;
 
   uniform float uSeaRadius;
 
   void main() {
-    vNormal = normalize(normalMatrix * normal);
+    // World space, not normalMatrix. Three builds normalMatrix from the
+    // *modelView* matrix, so it yields a view-space normal — and every consumer
+    // below is world-space: the sun vector, up = normalize(vWorld), the slope
+    // blend and the sky bounce. Mixing the two made the terminator and the
+    // steep-reads-as-rock band swing around as the camera orbited.
+    vNormal = normalize(mat3(modelMatrix) * normal);
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
     vAttrib = attrib;
+    vAttrib2 = attrib2;
     // Metres above the current waterline, roughly. The wet-sand band and the
     // snowline both key off this, so both migrate as sea level moves.
     vAltitude = length(position) - uSeaRadius;
@@ -96,13 +105,13 @@ const FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying vec4 vAttrib;
+  varying vec4 vAttrib2;
   varying float vAltitude;
 
   uniform vec3 uSunDirection;
   uniform vec3 uCameraPosition;
   uniform vec3 uGodA;
   uniform vec3 uGodB;
-  uniform float uTime;
   uniform float uCloudTime;
   uniform float uTier;
 
@@ -133,6 +142,16 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     vec3 albedo = materialColour(vAttrib.r);
 
+    // Fertility enriches and darkens soil; sediment pales it toward silt. Both
+    // are simulation state that reached the renderer for the first time here —
+    // §7.4 asks for all five fields and only three were being written, so ground
+    // that the simulation treats as rich or as silted up looked identical to bare
+    // material. Subtle on purpose: these are properties of the ground, and the
+    // reading the player needs from them is "this valley is different", not a
+    // colour key.
+    albedo = mix(albedo, albedo * vec3(0.80, 0.94, 0.68), vAttrib2.g * 0.55);
+    albedo = mix(albedo, vec3(0.72, 0.66, 0.52), vAttrib2.b * 0.40);
+
     // Vegetation is simulation state, not a shader flourish — this is the same
     // field that damps water transfer in §4.3.
     float veg = vAttrib.g;
@@ -142,7 +161,14 @@ const FRAGMENT_SHADER = /* glsl */ `
     albedo = mix(albedo, vec3(0.38, 0.36, 0.38), smoothstep(0.35, 0.75, slope));
 
     // Snow on high flat ground.
-    float snow = smoothstep(0.055, 0.085, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
+    //
+    // The band has to sit inside the altitude the terrain can actually reach.
+    // world.rs generates with amp = 720, and 720 * HEIGHT_TO_RADIUS = 0.0576
+    // radii, so the old 0.055..0.085 band only ever reached about a tenth of its
+    // range at the global maximum: a tier-1 feature that was dead in practice.
+    // Starting at 0.032 puts the snowline around 400 height units, which
+    // hand-raised peaks and generated mountains both clear.
+    float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
     albedo = mix(albedo, vec3(0.94, 0.96, 1.0), snow);
 
     // Wet-sand band at the waterline: darken by distance to the current water
@@ -182,24 +208,43 @@ const FRAGMENT_SHADER = /* glsl */ `
     float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 4.0);
     lit += rim * vec3(0.10, 0.15, 0.26);
 
+    // Lava, and it is emissive rather than lit: it *is* the light source, so it
+    // is written over the shaded result instead of being multiplied by the sun.
+    // That is also why it survives the night side and the cloud shadows, which is
+    // the whole point of a volcano at night.
+    //
+    // Until now the renderer could not see lava at all — the field was mapped
+    // into JavaScript and read by nothing — so §5.3's volcano produced no hot
+    // lava anywhere, only ash-coloured ground once it had already cooled. The
+    // ramp runs dark crust to yellow-white core by depth, and the peak lands
+    // above the bloom threshold on purpose, so a flow glows into the air around
+    // it.
+    float lava = vAttrib2.r;
+    if (lava > 0.002) {
+      float heat = smoothstep(0.03, 0.60, lava);
+      vec3 molten = mix(vec3(0.30, 0.035, 0.012), vec3(1.75, 0.80, 0.20), heat);
+      lit = mix(lit, molten, smoothstep(0.008, 0.09, lava));
+    }
+
     gl_FragColor = vec4(lit, 1.0);
   }
 `;
 
-export function createPlanet(sim: Sim): Planet {
+export function createPlanet(sim: Sim, view: View): Planet {
   const group = new THREE.Group();
 
   const material = new THREE.ShaderMaterial({
     vertexShader: VERTEX_SHADER,
     fragmentShader: FRAGMENT_SHADER,
     uniforms: {
-      uSunDirection: { value: new THREE.Vector3(0.6, 0.5, 0.6).normalize() },
-      uCameraPosition: { value: new THREE.Vector3() },
+      // Shared by reference with every other material — see `view.ts` for why
+      // these three are not allowed to be private copies.
+      uSunDirection: view.sunDirection,
+      uCameraPosition: view.cameraPosition,
+      uCloudTime: view.cloudTime,
       uSeaRadius: { value: BASE_RADIUS },
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
-      uTime: { value: 0 },
-      uCloudTime: { value: 0 },
       uTier: { value: 2 },
     },
   });
@@ -221,13 +266,16 @@ export function createPlanet(sim: Sim): Planet {
   const position = new THREE.BufferAttribute(sim.meshPositions, 3);
   const normal = new THREE.BufferAttribute(sim.meshNormals, 3);
   const attrib = new THREE.BufferAttribute(sim.meshAttribs, 4, true);
+  const attrib2 = new THREE.BufferAttribute(sim.meshAttribs2, 4, true);
   position.setUsage(THREE.DynamicDrawUsage);
   normal.setUsage(THREE.DynamicDrawUsage);
   attrib.setUsage(THREE.DynamicDrawUsage);
+  attrib2.setUsage(THREE.DynamicDrawUsage);
 
   geometry.setAttribute("position", position);
   geometry.setAttribute("normal", normal);
   geometry.setAttribute("attrib", attrib);
+  geometry.setAttribute("attrib2", attrib2);
   geometry.setIndex(new THREE.BufferAttribute(buildPlanetIndices(sim), 1));
   // The terrain deforms constantly, so a bounding sphere computed from the
   // vertices would be stale within a second. One that always contains the
@@ -245,6 +293,7 @@ export function createPlanet(sim: Sim): Planet {
       position.clearUpdateRanges();
       normal.clearUpdateRanges();
       attrib.clearUpdateRanges();
+      attrib2.clearUpdateRanges();
       let dirty = 0;
       for (let chunk = 0; chunk < sim.chunks; chunk++) {
         if (sim.meshDirty[chunk] === 0) continue;
@@ -253,11 +302,13 @@ export function createPlanet(sim: Sim): Planet {
         position.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
         normal.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
         attrib.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
+        attrib2.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
       }
       if (dirty > 0) {
         position.needsUpdate = true;
         normal.needsUpdate = true;
         attrib.needsUpdate = true;
+        attrib2.needsUpdate = true;
       }
       material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
     },
@@ -324,15 +375,34 @@ export function pickCell(dir: THREE.Vector3, N: number): { face: number; x: numb
 
 /** Forward map: cell centre to a unit direction. The inverse of `pickCell`. */
 export function cellDirection(face: number, x: number, y: number, N: number): THREE.Vector3 {
-  const warp = (t: number): number => Math.tan((t * Math.PI) / 4);
-  const a = warp(((x + 0.5) * 2) / N - 1);
-  const b = warp(((y + 0.5) * 2) / N - 1);
+  return cellDirectionInto(new THREE.Vector3(), face, x + 0.5, y + 0.5, N);
+}
+
+/**
+ * Forward map at a *continuous* face coordinate, writing into `out`.
+ *
+ * `fx`/`fy` are in cell units with cell `i` centred at `i + 0.5` — the same
+ * convention `walkers.rs` spawns with (`(x << 16) + ONE / 2`), so a walker's
+ * Q16.16 position can be passed straight in and drawn where the simulation
+ * actually put it rather than snapped to the nearest cell centre.
+ *
+ * Takes an `out` vector because the callers are per-instance loops running every
+ * tick; returning a fresh `Vector3` made this one of the largest sources of
+ * garbage in the frame.
+ */
+export function cellDirectionInto(
+  out: THREE.Vector3,
+  face: number,
+  fx: number,
+  fy: number,
+  N: number,
+): THREE.Vector3 {
+  const a = Math.tan((((fx * 2) / N - 1) * Math.PI) / 4);
+  const b = Math.tan((((fy * 2) / N - 1) * Math.PI) / 4);
   const n = FACE_NORMAL[face] ?? FACE_NORMAL[0]!;
   const r = FACE_RIGHT[face] ?? FACE_RIGHT[0]!;
   const u = FACE_UP[face] ?? FACE_UP[0]!;
-  return new THREE.Vector3(
-    n[0] + r[0] * a + u[0] * b,
-    n[1] + r[1] * a + u[1] * b,
-    n[2] + r[2] * a + u[2] * b,
-  ).normalize();
+  return out
+    .set(n[0] + r[0] * a + u[0] * b, n[1] + r[1] * a + u[1] * b, n[2] + r[2] * a + u[2] * b)
+    .normalize();
 }

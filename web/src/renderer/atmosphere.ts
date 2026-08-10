@@ -17,6 +17,7 @@
 
 import * as THREE from "three";
 import { BASE_RADIUS } from "./planet";
+import type { View } from "./view";
 
 /** Tide phases, mirroring `world.rs`. */
 const TIDE_TELEGRAPH = 1;
@@ -24,11 +25,10 @@ const TIDE_IMPACT = 2;
 
 export interface Atmosphere {
   readonly group: THREE.Group;
+  /** The shared sun vector, for anything that needs to read it directly. */
   readonly sunDirection: THREE.Vector3;
   readonly material: THREE.ShaderMaterial;
-  /** Cloud scroll phase, so the terrain shader can cast the same shadows. */
-  readonly cloudTime: { value: number };
-  sync(tick: number, tidePhase: number, ticksToImpact: number): void;
+  sync(tidePhase: number, ticksToImpact: number): void;
 }
 
 /**
@@ -70,10 +70,10 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
 `;
 
 const VERTEX_SHADER = /* glsl */ `
-  varying vec3 vNormal;
   varying vec3 vWorld;
   void main() {
-    vNormal = normalize(normalMatrix * normal);
+    // No normal is interpolated: the glow is a function of the line of sight, not
+    // of the shell's surface orientation. See the fragment shader.
     vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
     gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
   }
@@ -81,7 +81,6 @@ const VERTEX_SHADER = /* glsl */ `
 
 const FRAGMENT_SHADER = /* glsl */ `
   precision highp float;
-  varying vec3 vNormal;
   varying vec3 vWorld;
 
   uniform vec3 uSunDirection;
@@ -91,23 +90,41 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uWarning;   // 0 calm .. 1 imminent
 
   void main() {
-    vec3 viewDir = normalize(uCameraPosition - vWorld);
-    // Drawn back-face, so the geometric normal points inward.
-    vec3 n = normalize(-vNormal);
-    float rim = pow(1.0 - abs(dot(n, viewDir)), 2.6);
-    // Thicker and hotter as a wave approaches; that thickening *is* the warning.
-    rim *= mix(1.0, 1.9, uWarning);
+    // # Why this is not a Fresnel rim
+    //
+    // The shell is drawn BackSide, so what is rasterised is the inner surface of
+    // its *far* hemisphere — and the planet occludes all of that except the
+    // annulus between the planet's limb and the shell's. The atmosphere is
+    // therefore only ever visible outside the planet's silhouette, and a
+    // 1 - dot(n, viewDir) falloff is brightest at the shell's own silhouette,
+    // i.e. at the edge furthest from the planet. That is upside down: it drew a
+    // dim blue tyre around the planet, brightening outward into space.
+    //
+    // Air density is a function of altitude, so brightness should be too. The
+    // impact parameter — how close this line of sight passes to the planet's
+    // centre — gives the altitude of the ray's closest approach directly, and
+    // falling off from it puts the bright edge against the surface where it
+    // belongs.
+    vec3 d = normalize(vWorld - uCameraPosition);
+    float b = length(cross(uCameraPosition, d));
+    float h = b - 1.0;
+    // Absolute, so the peak sits exactly on the limb and decays both into space
+    // and back over the planet. The inward half is mostly occluded; where it is
+    // not, a little airglow at the limb is the correct thing to see.
+    float thickness = mix(0.014, 0.032, uWarning);
+    float glow = exp(-abs(h) / thickness);
 
     float sunFacing = clamp(dot(normalize(vWorld), uSunDirection) * 0.5 + 0.5, 0.0, 1.0);
     vec3 tint = mix(uCalmTint, uWarningTint, uWarning);
-    vec3 colour = tint * rim * mix(0.35, 1.6, sunFacing);
-    gl_FragColor = vec4(colour, clamp(rim * mix(0.9, 1.5, uWarning), 0.0, 1.0));
+    // Thicker and hotter as a wave approaches; that thickening *is* the warning.
+    float strength = glow * mix(0.30, 1.5, sunFacing) * mix(1.0, 1.7, uWarning);
+    gl_FragColor = vec4(tint * strength, clamp(strength, 0.0, 1.0));
   }
 `;
 
-export function createAtmosphere(): Atmosphere {
+export function createAtmosphere(view: View): Atmosphere {
   const group = new THREE.Group();
-  const sunDirection = new THREE.Vector3(0.6, 0.5, 0.6).normalize();
+  const sunDirection = view.sunDirection.value;
 
   const material = new THREE.ShaderMaterial({
     vertexShader: VERTEX_SHADER,
@@ -117,15 +134,20 @@ export function createAtmosphere(): Atmosphere {
     side: THREE.BackSide,
     depthWrite: false,
     uniforms: {
-      uSunDirection: { value: sunDirection },
-      uCameraPosition: { value: new THREE.Vector3() },
+      // Shared by reference — see `view.ts`.
+      uSunDirection: view.sunDirection,
+      uCameraPosition: view.cameraPosition,
       uCalmTint: { value: new THREE.Color(0.35, 0.62, 1.0) },
       uWarningTint: { value: new THREE.Color(1.0, 0.42, 0.28) },
       uWarning: { value: 0 },
     },
   });
 
-  const shell = new THREE.Mesh(new THREE.SphereGeometry(BASE_RADIUS * 1.09, 64, 48), material);
+  // 1.075 radii, down from 1.09. Generated terrain reaches 1.0576 (amp 720 x
+  // HEIGHT_TO_RADIUS), so this keeps clearance over the highest peak while
+  // sitting low enough that its rim reads as a rim rather than as a halo from the
+  // close end of the camera's range.
+  const shell = new THREE.Mesh(new THREE.SphereGeometry(BASE_RADIUS * 1.075, 64, 48), material);
   // Drawn last of everything. The rim is additive, so anything drawn after it
   // alpha-blends *over* the glow and darkens it — which is what put a grey ring
   // around the planet when the cloud shell came after.
@@ -137,42 +159,56 @@ export function createAtmosphere(): Atmosphere {
   // disagree about where the sun is would be very hard to see and impossible to
   // reason about.
   const sun = new THREE.DirectionalLight(0xfff2dd, 2.4);
-  const fill = new THREE.AmbientLight(0x2c3d58, 1.2);
+  // Brighter and less saturated than it was. These two lights reach only the
+  // Lambert instanced meshes — trees, settlements, walkers — and at
+  // 0x2c3d58 * 1.2 against a dark albedo every face pointing away from the sun
+  // came out effectively black, so a forest read as green-and-black shards
+  // rather than as lit geometry. The terrain does its own sky bounce and is
+  // unaffected either way.
+  const fill = new THREE.AmbientLight(0x54648c, 1.9);
   group.add(sun, fill);
 
   // Cloud shell (§7.3 tier 2). A scrolling noise sphere just above the terrain;
   // the terrain shader samples the same noise so the shadows are the clouds
   // rather than a second, unrelated pattern.
-  const cloudTime = { value: 0 };
   const cloudMaterial = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
     uniforms: {
-      uSunDirection: { value: sunDirection },
-      uTime: cloudTime,
+      uSunDirection: view.sunDirection,
+      uTime: view.cloudTime,
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
+      varying vec3 vWorld;
       void main() {
         vDir = normalize(position);
+        vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
       }
     `,
     fragmentShader: /* glsl */ `
       precision highp float;
       varying vec3 vDir;
+      varying vec3 vWorld;
       uniform vec3 uSunDirection;
       uniform float uTime;
       ${CLOUD_NOISE_GLSL}
       void main() {
         float cover = dioClouds(vDir, uTime);
         if (cover <= 0.001) discard;
-        // Fade out towards the sphere's silhouette. Without this the shell's
-        // own limb — which curves onto the night side — draws a dark ring
-        // around the whole planet, over space, where there is no atmosphere to
-        // be seen edge-on in the first place.
-        float facing = dot(vDir, normalize(cameraPosition));
-        float visible = smoothstep(0.28, 0.62, facing);
+        // The shell is larger than the planet, so a band of it projects *outside*
+        // the planet's silhouette, against space — and clouds drawn there are grey
+        // blobs floating off the horizon with no ground under them.
+        //
+        // The exact condition is whether this line of sight passes the planet at
+        // all: the impact parameter is the altitude of its closest approach, and
+        // above the surface there is nothing for a cloud to be in front of. This
+        // replaces a dot(vDir, cameraDir) threshold that had to be retuned for
+        // every camera distance and was wrong at the ends of the range either way.
+        vec3 d = normalize(vWorld - cameraPosition);
+        float b = length(cross(cameraPosition, d));
+        float visible = 1.0 - smoothstep(0.985, 1.0, b);
         if (visible <= 0.001) discard;
         // Lit from the same direction as everything else, and dimmer on the
         // night side so clouds do not glow over a dark hemisphere.
@@ -182,8 +218,13 @@ export function createAtmosphere(): Atmosphere {
       }
     `,
   });
+  // Above the highest ground, not below it: at 1.03 radii the shell sat under
+  // every peak taller than 375 height units, so mountains pushed through the
+  // cloud layer and the shell's cut edge was visible against them. Shadow
+  // alignment is unaffected — the terrain samples the noise by direction, not by
+  // radius.
   const clouds = new THREE.Mesh(
-    new THREE.SphereGeometry(BASE_RADIUS * 1.03, 96, 64),
+    new THREE.SphereGeometry(BASE_RADIUS * 1.065, 96, 64),
     cloudMaterial,
   );
   // Terrain 0, water 1, clouds 2, atmosphere 3.
@@ -199,15 +240,9 @@ export function createAtmosphere(): Atmosphere {
     group,
     sunDirection,
     material,
-    cloudTime,
-    sync(tick: number, tidePhase: number, ticksToImpact: number): void {
-      // Simulation time, so clouds move at a rate a player can relate to the
-      // tide clock. It reaches no simulation state; the flow is one-way.
-      cloudTime.value = tick / 30;
-      // The sun has its own slow day cycle rather than being fixed in space
-      // (§7.2). One full turn every four minutes of play.
-      const angle = (tick / (30 * 240)) * Math.PI * 2;
-      sunDirection.set(Math.cos(angle), 0.42, Math.sin(angle)).normalize();
+    sync(tidePhase: number, ticksToImpact: number): void {
+      // The sun's day cycle and the cloud clock live in `view.ts` now, because
+      // three other materials need the same values and private copies drifted.
 
       // Warning ramps up over the last ten seconds before impact and stays hot
       // through the surge.

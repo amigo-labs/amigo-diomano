@@ -45,21 +45,36 @@ export function createPost(
   const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.22 : 0.1, 0.4, 0.92);
   composer.addPass(bloom);
 
+  // `OutputPass` before FXAA, not after. FXAA thresholds on luma, so it needs
+  // sRGB input; three's own `OutputPass` documents the requirement ("if a pass
+  // requires sRGB input (e.g. like FXAA), the pass must follow OutputPass").
+  // Run the other way round it evaluates tone-mapped linear-light data and
+  // under-detects edges in shadow while over-smoothing highlights — on exactly
+  // the aliasing-instanced-trees content §7.3 makes FXAA non-optional for.
+  composer.addPass(new OutputPass());
   const fxaa = new ShaderPass(FXAAShader);
   composer.addPass(fxaa);
-  composer.addPass(new OutputPass());
 
   const setSize = (width: number, height: number): void => {
-    const dpr = renderer.getPixelRatio();
+    // `EffectComposer.setSize` already multiplies by its pixel ratio for every
+    // pass it owns, so calling `bloom.setSize(width, height)` afterwards — which
+    // this used to — put bloom back to CSS resolution, i.e. half-res on a 2x
+    // display.
     composer.setSize(width, height);
-    bloom.setSize(width, height);
+    const dpr = renderer.getPixelRatio();
     // FXAA works in texels, so it needs the *buffer* size, not the CSS size.
     // Getting this wrong is invisible on a 1x display and blurs everything on a
     // retina one.
     const res = fxaa.material.uniforms.resolution;
     if (res) res.value.set(1 / (width * dpr), 1 / (height * dpr));
   };
-  setSize(renderer.domElement.width || 1, renderer.domElement.height || 1);
+  // CSS pixels, matching what `resize` is called with. `domElement.width` is the
+  // drawing buffer — CSS x DPR already — so passing it here counted DPR twice
+  // and allocated targets four times too large until the first real resize.
+  setSize(
+    renderer.domElement.width / renderer.getPixelRatio() || 1,
+    renderer.domElement.height / renderer.getPixelRatio() || 1,
+  );
 
   return {
     render(): void {

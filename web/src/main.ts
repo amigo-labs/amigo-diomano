@@ -25,9 +25,12 @@ import { createGestures } from "./gestures";
 import { createHand } from "./hand";
 import { createLoop } from "./loop";
 import { createAtmosphere } from "./renderer/atmosphere";
+import { createEffects } from "./renderer/effects";
 import { createPlanet } from "./renderer/planet";
 import { createPost } from "./renderer/post";
+import { createTrail } from "./renderer/trail";
 import { createVegetation } from "./renderer/vegetation";
+import { createView } from "./renderer/view";
 import { createWater } from "./renderer/water";
 
 // ---------------------------------------------------------------------------
@@ -97,6 +100,7 @@ interface RawExports {
   dio_mesh_normals_ptr(): number;
   dio_mesh_attribs_ptr(): number;
   dio_mesh_water_positions_ptr(): number;
+  dio_mesh_attribs2_ptr(): number;
   dio_mesh_water_attribs_ptr(): number;
   dio_mesh_indices_ptr(): number;
   dio_mesh_dirty_ptr(): number;
@@ -109,6 +113,8 @@ interface RawExports {
   dio_max_settlements(): number;
   dio_max_pickups(): number;
   dio_pickup_stride(): number;
+  dio_verb_event_capacity(): number;
+  dio_verb_event_stride(): number;
   dio_walker_stride(): number;
   dio_settlement_stride(): number;
   dio_chunk_cells(): number;
@@ -140,6 +146,9 @@ interface RawExports {
   dio_state_hash_lo(): number;
   dio_state_hash_hi(): number;
 
+  dio_verb_events_ptr(): number;
+  dio_verb_events_written(): number;
+
   dio_log_ptr(): number;
   dio_log_capacity(): number;
   dio_replay(len: number): number;
@@ -161,6 +170,8 @@ const WALKER = {
 };
 /** Offsets into the `#[repr(C)] Pickup` struct in `world.rs`. */
 const PICKUP = { FACE: 0, X: 1, Y: 2, POWER: 3, FLAGS: 4 };
+/** Offsets into the `#[repr(C)] VerbEvent` struct in `world.rs`. */
+const VERB_EVENT = { FACE: 0, X: 1, Y: 2, VERB: 3, PLAYER: 4, MODIFIER: 5, RADIUS: 6 };
 /** Offsets into the `#[repr(C)] Settlement` struct in `world.rs`. */
 const SETTLEMENT = {
   PROGRESS: 0,
@@ -190,6 +201,18 @@ export interface PickupView {
   x: number;
   y: number;
   power: number;
+}
+
+/** One applied verb, for the effects renderer. */
+export interface VerbEventView {
+  face: number;
+  x: number;
+  y: number;
+  verb: number;
+  player: number;
+  modifier: number;
+  /** Brush radius in cells, so an effect can be the size of what it came from. */
+  radius: number;
 }
 
 export interface SettlementView {
@@ -226,6 +249,8 @@ export interface Sim {
   readonly meshPositions: Float32Array;
   readonly meshNormals: Float32Array;
   readonly meshAttribs: Uint8Array;
+  /** Per vertex: lava depth, fertility, sediment, spare. */
+  readonly meshAttribs2: Uint8Array;
   readonly waterPositions: Float32Array;
   readonly waterAttribs: Uint8Array;
   readonly meshIndices: Uint16Array;
@@ -240,6 +265,15 @@ export interface Sim {
   walkers(): WalkerView[];
   settlements(): SettlementView[];
   pickups(): PickupView[];
+  /**
+   * Verbs applied since `sinceWritten`, oldest first, plus the new high-water
+   * mark. The caller keeps the mark and passes it back.
+   *
+   * Reads a ring the simulation writes and never reads, so this cannot influence
+   * anything: it is the render side's only way to learn that the *opponent* cast
+   * something, since the client sees its own commands but not theirs.
+   */
+  verbEvents(sinceWritten: number): { events: VerbEventView[]; written: number };
   stateHash(): bigint;
 }
 
@@ -295,6 +329,13 @@ export async function loadSim(
   const maxPickups = e.dio_max_pickups();
   const pickupStride = e.dio_pickup_stride();
   const pickupBytes = new DataView(buf, e.dio_pickups_ptr(), maxPickups * pickupStride);
+  const verbEventCapacity = e.dio_verb_event_capacity();
+  const verbEventStride = e.dio_verb_event_stride();
+  const verbEventBytes = new DataView(
+    buf,
+    e.dio_verb_events_ptr(),
+    verbEventCapacity * verbEventStride,
+  );
 
   const sim: Sim = {
     e,
@@ -320,6 +361,7 @@ export async function loadSim(
     meshPositions: new Float32Array(buf, e.dio_mesh_positions_ptr(), totalVerts * 3),
     meshNormals: new Float32Array(buf, e.dio_mesh_normals_ptr(), totalVerts * 3),
     meshAttribs: new Uint8Array(buf, e.dio_mesh_attribs_ptr(), totalVerts * 4),
+    meshAttribs2: new Uint8Array(buf, e.dio_mesh_attribs2_ptr(), totalVerts * 4),
     waterPositions: new Float32Array(buf, e.dio_mesh_water_positions_ptr(), totalVerts * 3),
     waterAttribs: new Uint8Array(buf, e.dio_mesh_water_attribs_ptr(), totalVerts * 4),
     meshIndices: new Uint16Array(buf, e.dio_mesh_indices_ptr(), indicesPerChunk),
@@ -382,6 +424,28 @@ export async function loadSim(
         });
       }
       return out;
+    },
+
+    verbEvents(sinceWritten: number): { events: VerbEventView[]; written: number } {
+      const written = e.dio_verb_events_written() >>> 0;
+      const events: VerbEventView[] = [];
+      if (written === sinceWritten) return { events, written };
+      // Clamp to the ring: a caller more than a full ring behind has lost the
+      // oldest events, and reading them anyway would replay stale ones as new.
+      const first = Math.max(sinceWritten, written - verbEventCapacity);
+      for (let seq = first; seq < written; seq++) {
+        const o = (seq % verbEventCapacity) * verbEventStride;
+        events.push({
+          face: verbEventBytes.getUint8(o + VERB_EVENT.FACE),
+          x: verbEventBytes.getUint8(o + VERB_EVENT.X),
+          y: verbEventBytes.getUint8(o + VERB_EVENT.Y),
+          verb: verbEventBytes.getUint8(o + VERB_EVENT.VERB),
+          player: verbEventBytes.getUint8(o + VERB_EVENT.PLAYER),
+          modifier: verbEventBytes.getUint8(o + VERB_EVENT.MODIFIER),
+          radius: verbEventBytes.getUint8(o + VERB_EVENT.RADIUS),
+        });
+      }
+      return { events, written };
     },
 
     stateHash(): bigint {
@@ -462,11 +526,17 @@ async function boot(): Promise<void> {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const scene = new THREE.Scene();
-    const camera = createCamera(canvas);
-    const planet = createPlanet(sim);
-    const water = createWater(sim);
-    const atmosphere = createAtmosphere();
-    const vegetation = createVegetation(sim, tier);
+    // Every shader's shared values live in one place; see `renderer/view.ts` for
+    // the three features that broke when they were per-material copies.
+    const view = createView();
+    // Set by the gesture recogniser and read by the camera, so a spiral takes
+    // the stroke away from the orbit control instead of sharing it.
+    const gestureArmed = { value: false };
+    const camera = createCamera(canvas, gestureArmed);
+    const planet = createPlanet(sim, view);
+    const water = createWater(sim, view);
+    const atmosphere = createAtmosphere(view);
+    const vegetation = createVegetation(sim, tier, view);
     planet.material.uniforms.uTier!.value = tier;
     water.material.uniforms.uTier!.value = tier;
     scene.add(planet.group, water.mesh, atmosphere.group, vegetation.group);
@@ -474,21 +544,33 @@ async function boot(): Promise<void> {
     const post = createPost(renderer, scene, camera.camera, tier);
     const audio = createAudio();
     const hand = createHand(sim, camera, canvas, LOCAL_PLAYER);
-    scene.add(hand.group);
-    const gestures = createGestures(canvas, (verb, modifier) => {
-      const target = hand.target();
-      if (!target) return;
-      sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
-      audio.gesture(verb);
-    });
+    const trail = createTrail();
+    const effects = createEffects(sim);
+    scene.add(hand.group, trail.object, effects.group);
+    /** High-water mark in the simulation's verb-event ring. */
+    let seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
+    const gestures = createGestures(
+      canvas,
+      (verb, modifier) => {
+        const target = hand.target();
+        if (!target) return;
+        sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
+        audio.gesture(verb);
+      },
+      gestureArmed,
+    );
 
-    addEventListener("resize", () => {
+    const applySize = (): void => {
+      // Re-read the device pixel ratio every time: dragging a window between a 1x and
+      // a 2x display fires `resize` without changing `innerWidth`, and a stale
+      // ratio renders the whole frame at the wrong resolution.
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
       renderer.setSize(innerWidth, innerHeight, false);
       camera.resize(innerWidth / innerHeight);
       post.resize(innerWidth, innerHeight);
-    });
-    camera.resize(innerWidth / innerHeight);
-    post.resize(innerWidth, innerHeight);
+    };
+    addEventListener("resize", applySize);
+    applySize();
 
     const loop = createLoop({
       update() {
@@ -496,17 +578,27 @@ async function boot(): Promise<void> {
         sim.tick();
       },
       render(alpha, dtMs) {
+        // The camera goes first. Everything below reads its matrix — the shared
+        // view uniforms, the hand's pick ray, the trail's unprojection — and
+        // running it last meant all of them used the previous frame's view. With
+        // 71 ms of orbit smoothing that lag is visible as the cursor sliding
+        // behind the terrain during a drag.
+        camera.update(dtMs);
+        const tick = sim.e.dio_tick_count();
+        view.sync(camera.camera, tick, dtMs);
+
         sim.meshUpdate();
         planet.sync(sim.e.dio_sea_level());
-        water.sync(sim.e.dio_sea_level(), sim.e.dio_tick_count());
-        vegetation.sync();
+        water.sync();
+        vegetation.sync(tick);
         hand.sync(alpha);
-        atmosphere.sync(
-          sim.e.dio_tick_count(),
-          sim.e.dio_tide_phase(),
-          sim.e.dio_ticks_to_impact(),
-        );
-        camera.update(dtMs);
+        trail.sync(camera.camera, gestures.stroke, gestures.armed);
+        // Effects read what the simulation *applied*, so the opponent's powers
+        // are visible too and a power refused on cost throws nothing.
+        const fired = sim.verbEvents(seenVerbEvents);
+        seenVerbEvents = fired.written;
+        camera.shake(effects.sync(sim, fired.events, dtMs));
+        atmosphere.sync(sim.e.dio_tide_phase(), sim.e.dio_ticks_to_impact());
         audio.sync(sim, dtMs);
         post.render();
       },
@@ -525,6 +617,9 @@ async function boot(): Promise<void> {
       atmosphere,
       vegetation,
       camera,
+      view,
+      effects,
+      trail,
     };
 
     loop.start();
