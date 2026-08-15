@@ -75,6 +75,20 @@ export interface OrbitCamera {
   shake(amplitude: number): void;
   /** True while the pointer is dragging the planet rather than the terrain. */
   readonly panning: boolean;
+  /**
+   * Point the orbit at a world-space direction (unit vector from the planet's
+   * centre). With `immediate` the view snaps there; otherwise it eases via the
+   * normal smoothing.
+   */
+  aimAt(dir: THREE.Vector3, immediate: boolean): void;
+  /**
+   * A one-time eased pan to a direction over `durationMs` — the match-start
+   * tour from the opponent's spawn to the player's. Cancelled by any pointer
+   * or wheel input: the player's intent always wins over a cinematic.
+   */
+  intro(dir: THREE.Vector3, durationMs: number): void;
+  /** Slow automatic yaw, in radians per second. Used behind the title and the end card; 0 stops it. */
+  drift(radPerSec: number): void;
 }
 
 /**
@@ -103,6 +117,17 @@ export function createCamera(
   let panning = false;
   let lastX = 0;
   let lastY = 0;
+  /** Intro pan state. Interpolates yaw/pitch directly: the 71 ms smoothing
+   *  constant would collapse a 4.5 s tour into a 0.3 s snap. */
+  let introActive = false;
+  let introFromYaw = 0;
+  let introFromPitch = 0;
+  let introToYaw = 0;
+  let introToPitch = 0;
+  let introElapsed = 0;
+  let introDuration = 1;
+  /** Automatic yaw drift, radians per second. */
+  let driftRate = 0;
   /** Where the pointer was when the wheel last turned, in NDC. */
   let zoomAnchorX = 0;
   let zoomAnchorY = 0;
@@ -110,6 +135,8 @@ export function createCamera(
   const PITCH_LIMIT = Math.PI * 0.49;
 
   const onPointerDown = (ev: PointerEvent): void => {
+    // Any press ends the intro tour — the player's intent wins.
+    introActive = false;
     // Middle or right button pans; left is the hand (§8: direct drag is
     // raise/lower, and it must stay frictionless).
     if (ev.button !== 2 && ev.button !== 1) return;
@@ -150,6 +177,7 @@ export function createCamera(
 
   const onWheel = (ev: WheelEvent): void => {
     ev.preventDefault();
+    introActive = false;
     const before = targetDistance;
     targetDistance = clamp(
       targetDistance * Math.exp(wheelPixels(ev) * 0.0012),
@@ -195,9 +223,25 @@ export function createCamera(
       camera.updateProjectionMatrix();
     },
     update(dtMs: number): void {
+      if (driftRate !== 0 && !panning && !introActive) {
+        targetYaw += driftRate * dtMs * 0.001;
+      }
       const k = 1 - Math.exp(-SMOOTHING * dtMs);
-      yaw += (targetYaw - yaw) * k;
-      pitch += (targetPitch - pitch) * k;
+      if (introActive) {
+        // Cubic ease in-out, driven directly: the smoothing constant below
+        // would turn a slow tour into a snap.
+        introElapsed += dtMs;
+        const t = Math.min(introElapsed / introDuration, 1);
+        const eased = t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
+        yaw = introFromYaw + (introToYaw - introFromYaw) * eased;
+        pitch = introFromPitch + (introToPitch - introFromPitch) * eased;
+        targetYaw = yaw;
+        targetPitch = pitch;
+        if (t >= 1) introActive = false;
+      } else {
+        yaw += (targetYaw - yaw) * k;
+        pitch += (targetPitch - pitch) * k;
+      }
       distance += (targetDistance - distance) * (1 - Math.exp(-ZOOM_SMOOTHING * dtMs));
 
       const cp = Math.cos(pitch);
@@ -264,7 +308,46 @@ export function createCamera(
     get panning(): boolean {
       return panning;
     },
+
+    aimAt(dir: THREE.Vector3, immediate: boolean): void {
+      const { yaw: toYaw, pitch: toPitch } = anglesFor(dir, targetYaw);
+      targetYaw = toYaw;
+      targetPitch = toPitch;
+      if (immediate) {
+        yaw = toYaw;
+        pitch = toPitch;
+      }
+    },
+
+    intro(dir: THREE.Vector3, durationMs: number): void {
+      const { yaw: toYaw, pitch: toPitch } = anglesFor(dir, yaw);
+      introFromYaw = yaw;
+      introFromPitch = pitch;
+      introToYaw = toYaw;
+      introToPitch = toPitch;
+      introElapsed = 0;
+      introDuration = Math.max(durationMs, 1);
+      introActive = true;
+    },
+
+    drift(radPerSec: number): void {
+      driftRate = radPerSec;
+    },
   };
+}
+
+/**
+ * Orbit angles that put the camera over `dir`, with the yaw expressed as the
+ * equivalent nearest `referenceYaw` — otherwise a pan can take the long way
+ * around the planet.
+ */
+function anglesFor(dir: THREE.Vector3, referenceYaw: number): { yaw: number; pitch: number } {
+  const pitch = Math.asin(clamp(dir.y, -1, 1));
+  let yaw = Math.atan2(dir.x, dir.z);
+  const twoPi = Math.PI * 2;
+  while (yaw - referenceYaw > Math.PI) yaw -= twoPi;
+  while (referenceYaw - yaw > Math.PI) yaw += twoPi;
+  return { yaw, pitch };
 }
 
 /**
