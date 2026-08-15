@@ -45,10 +45,7 @@ function serve() {
       const url = new URL(req.url ?? "/", "http://localhost");
       let rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
       if (rel === "/" || rel === "") rel = "index.html";
-      const candidates = [
-        join(WEB_ROOT, "dist", rel),
-        join(WEB_ROOT, "public", rel),
-      ];
+      const candidates = [join(WEB_ROOT, "dist", rel), join(WEB_ROOT, "public", rel)];
       for (const path of candidates) {
         if (!path.startsWith(WEB_ROOT)) continue;
         if (!existsSync(path) || path.endsWith("/")) continue;
