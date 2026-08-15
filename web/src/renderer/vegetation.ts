@@ -425,49 +425,81 @@ function hazedLambert(view: View, colour: number, extra = ""): THREE.MeshLambert
     shader.uniforms.uSunDirection = view.sunDirection;
     shader.uniforms.uCameraPosition = view.cameraPosition;
     shader.uniforms.uWarning = view.warning;
-    shader.vertexShader = shader.vertexShader
-      .replace(
-        "#include <common>",
-        `#include <common>
-         varying vec3 vDioWorld;`,
-      )
-      .replace(
-        "#include <project_vertex>",
-        `#include <project_vertex>
-         // Through the instance matrix, which the world position this used to
-         // compute did not go through: for an InstancedMesh, \`transformed\` is
-         // still the *local* vertex, so the old
-         // \`(modelMatrix * vec4(transformed, 1.0)).xyz\` gave every building on
-         // the planet the same handful of positions near the origin — and the
-         // night-side test below reduced to which corner of the box a fragment
-         // was on rather than which side of the planet it stood on.
-         vec4 dioLocal = vec4(transformed, 1.0);
-         #ifdef USE_INSTANCING
-           dioLocal = instanceMatrix * dioLocal;
-         #endif
-         vDioWorld = (modelMatrix * dioLocal).xyz;`,
-      );
-    shader.fragmentShader = shader.fragmentShader
-      .replace(
-        "#include <common>",
-        `#include <common>
-         varying vec3 vDioWorld;
-         uniform vec3 uSunDirection;
-         uniform vec3 uCameraPosition;
-         uniform float uWarning;
-         ${SKY_GLSL}`,
-      )
-      .replace(
-        "#include <opaque_fragment>",
-        `${extra}
-         {
-           vec4 dioAir = dioAerial(vDioWorld, uCameraPosition, uSunDirection, uWarning);
-           outgoingLight = mix(outgoingLight, dioAir.rgb, dioAir.a);
-         }
-         #include <opaque_fragment>`,
-      );
+    let vertex = shader.vertexShader;
+    vertex = inject(
+      vertex,
+      "#include <common>",
+      `#include <common>
+       varying vec3 vDioWorld;`,
+    );
+    vertex = inject(
+      vertex,
+      "#include <project_vertex>",
+      `#include <project_vertex>
+       // Through the instance matrix, which the world position this used to
+       // compute did not go through: for an InstancedMesh, \`transformed\` is
+       // still the *local* vertex, so the old
+       // \`(modelMatrix * vec4(transformed, 1.0)).xyz\` gave every building on
+       // the planet the same handful of positions near the origin — and the
+       // night-side test below reduced to which corner of the box a fragment
+       // was on rather than which side of the planet it stood on.
+       vec4 dioLocal = vec4(transformed, 1.0);
+       #ifdef USE_INSTANCING
+         dioLocal = instanceMatrix * dioLocal;
+       #endif
+       vDioWorld = (modelMatrix * dioLocal).xyz;`,
+    );
+    shader.vertexShader = vertex;
+
+    let fragment = shader.fragmentShader;
+    fragment = inject(
+      fragment,
+      "#include <common>",
+      `#include <common>
+       varying vec3 vDioWorld;
+       uniform vec3 uSunDirection;
+       uniform vec3 uCameraPosition;
+       uniform float uWarning;
+       ${SKY_GLSL}`,
+    );
+    fragment = inject(
+      fragment,
+      "#include <opaque_fragment>",
+      `${extra}
+       {
+         vec4 dioAir = dioAerial(vDioWorld, uCameraPosition, uSunDirection, uWarning);
+         outgoingLight = mix(outgoingLight, dioAir.rgb, dioAir.a);
+       }
+       #include <opaque_fragment>`,
+    );
+    shader.fragmentShader = fragment;
   };
   return material;
+}
+
+/**
+ * `String.replace` against a three shader chunk, but it refuses to do nothing.
+ *
+ * The failure this exists to prevent already happened once, to two separate
+ * features, and went unnoticed for a dependency upgrade: `replace` with no match
+ * returns the string unchanged and reports nothing, so a renamed chunk does not
+ * break the build, does not warn, and does not fail a test — it just quietly
+ * deletes whatever was being injected. A shipped feature stops existing and the
+ * only symptom is that the game looks slightly different to someone who
+ * remembers.
+ *
+ * Throwing instead makes that class of upgrade impossible to miss: the first
+ * frame that compiles the material fails loudly, in the one place that names the
+ * chunk. Loud is the point — the alternative is not "it still works", it is
+ * "the feature is gone and nothing said so".
+ */
+function inject(source: string, marker: string, replacement: string): string {
+  if (!source.includes(marker)) {
+    throw new Error(
+      `shader chunk ${marker} is not in this material — three has renamed or removed it, and the patch that hooks it (aerial perspective, night lights, walker rim) would otherwise compile out in silence.`,
+    );
+  }
+  return source.replace(marker, replacement);
 }
 
 /**

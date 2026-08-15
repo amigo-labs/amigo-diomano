@@ -274,8 +274,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     // centre.
     vec3 d = normalize(vWorld - uCameraPosition);
     // Closest approach: the lowest point of the ray, where nearly all of its
-    // scattering happens and the only place worth asking about the sun.
-    float t = -dot(uCameraPosition, d);
+    // scattering happens and the only place worth asking about the sun. Clamped
+    // to the ray rather than the line — for every fragment this shell actually
+    // rasterises the closest approach is in front of the eye, but the same
+    // expression in the starfield is not so lucky (see makeStarfield), and two
+    // copies of one calculation that disagree about their domain is how that
+    // kind of bug gets to live in only one of them.
+    float t = max(-dot(uCameraPosition, d), 0.0);
     vec3 graze = uCameraPosition + d * t;
     float h = length(graze) - 1.0;
 
@@ -509,7 +514,16 @@ function makeStarfield(view: View): THREE.Points {
         // one detail that gives away that the sky is a decal over space rather
         // than something between the eye and it.
         vec3 d = normalize(world.xyz - uCameraPosition);
-        float h = length(uCameraPosition + d * (-dot(uCameraPosition, d))) - 1.0;
+        // Clamped to the ray, and this one matters: half the sky is in
+        // directions pointing *away* from the planet, and for those the closest
+        // approach of the infinite line lies behind the eye — down at the
+        // planet's own altitude. Unclamped, every star overhead was dimmed by
+        // the whole tangent column, which is the one part of the sky that has no
+        // air in front of it at all. Where the closest approach is behind the
+        // camera the nearest air on the ray is the camera's own altitude, which
+        // is what t = 0 gives.
+        float t = max(-dot(uCameraPosition, d), 0.0);
+        float h = length(uCameraPosition + d * t) - 1.0;
         float tau = mix(DIO_HAZE, DIO_HAZE_WARNING, uWarning)
                   * dioColumn(0.0) * exp(-max(h, 0.0) / DIO_SKY_HEIGHT);
         vClear = exp(-tau);
