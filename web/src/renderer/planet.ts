@@ -21,7 +21,7 @@
 
 import * as THREE from "three";
 import type { Sim } from "../main";
-import { CLOUD_NOISE_GLSL } from "./atmosphere";
+import { CLOUD_NOISE_GLSL, SKY_GLSL } from "./atmosphere";
 import type { View } from "./view";
 
 /** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
@@ -123,8 +123,10 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uCloudTime;
   uniform float uCloudFade;
   uniform float uTier;
+  uniform float uWarning;
 
   ${CLOUD_NOISE_GLSL}
+  ${SKY_GLSL}
 
   // Material ids from world.rs: 0 rock, 1 sand, 2 soil, 3 ash, 4 swamp.
   vec3 materialColour(float id) {
@@ -215,10 +217,6 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     vec3 lit = albedo * (lambert * vec3(1.15, 1.05, 0.92) + fill + sky * vec3(0.30, 0.42, 0.68));
 
-    // Rim light, so the limb separates from space at every camera angle.
-    float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 4.0);
-    lit += rim * vec3(0.10, 0.15, 0.26);
-
     // Lava, and it is emissive rather than lit: it *is* the light source, so it
     // is written over the shaded result instead of being multiplied by the sun.
     // That is also why it survives the night side and the cloud shadows, which is
@@ -237,6 +235,19 @@ const FRAGMENT_SHADER = /* glsl */ `
       lit = mix(lit, molten, smoothstep(0.008, 0.09, lava));
     }
 
+    // The air between here and the eye (atmosphere.ts, SKY_GLSL). This is what
+    // replaced the rim light that used to sit above: both exist to separate the
+    // limb from space, but a rim term keyed on the surface normal brightens
+    // every steep slope in the frame — including the pit the player is digging
+    // right under the camera — whereas the haze brightens only ground the view
+    // ray reaches through a lot of air, which is the limb and nothing else.
+    //
+    // Applied last, over the lava too: a distant flow seen through the whole
+    // horizon column *is* dimmer and bluer than one at the player's feet, and
+    // that is most of what tells the eye which one is far away.
+    vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
+    lit = mix(lit, air.rgb, air.a);
+
     gl_FragColor = vec4(lit, 1.0);
   }
 `;
@@ -254,6 +265,7 @@ export function createPlanet(sim: Sim, view: View): Planet {
       uCameraPosition: view.cameraPosition,
       uCloudTime: view.cloudTime,
       uCloudFade: view.cloudFade,
+      uWarning: view.warning,
       uSeaRadius: { value: BASE_RADIUS },
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },

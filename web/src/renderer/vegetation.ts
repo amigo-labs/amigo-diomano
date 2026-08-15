@@ -32,6 +32,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import type { QualityTier } from "../main";
+import { SKY_GLSL } from "./atmosphere";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
 import type { View } from "./view";
 
@@ -83,7 +84,12 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     treeGeometry,
     // Lighter than the old 0x2f5a2a: at this ambient level a dark albedo made
     // every face away from the sun read as black rather than as shadow.
-    new THREE.MeshLambertMaterial({ color: 0x4a7a3c }),
+    //
+    // Hazed like the ground it stands on. A forest is the densest edge detail on
+    // the planet, so a treeline that stayed crisp against ground the air had
+    // already washed out was the one thing that gave the horizon away as a
+    // painted band rather than as distance.
+    hazedLambert(view, 0x4a7a3c),
     MAX_TREES,
   );
   trees.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -108,7 +114,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   // light in the shader rather than relying on contrast (§7.3 tier 1).
   const walkerGeometry = new THREE.CapsuleGeometry(0.25, 0.5, 3, 6);
   walkerGeometry.translate(0, 0.5, 0);
-  const walkers = new THREE.InstancedMesh(walkerGeometry, walkerMaterial(), MAX_WALKERS);
+  const walkers = new THREE.InstancedMesh(walkerGeometry, walkerMaterial(view), MAX_WALKERS);
   walkers.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   walkers.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WALKERS * 3), 3);
   walkers.frustumCulled = false;
@@ -133,7 +139,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   // anything lying flat on the ground is not.
   const magnetGeometry = new THREE.ConeGeometry(0.16, 1.0, 4);
   magnetGeometry.translate(0, 0.5, 0);
-  const magnets = new THREE.InstancedMesh(magnetGeometry, walkerMaterial(), 2);
+  const magnets = new THREE.InstancedMesh(magnetGeometry, walkerMaterial(view), 2);
   magnets.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   magnets.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2 * 3), 3);
   magnets.frustumCulled = false;
@@ -377,6 +383,126 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 }
 
 /**
+ * A `MeshLambertMaterial` that stands in the same air as the terrain, plus an
+ * optional snippet of its own.
+ *
+ * # Why everything here goes through one function
+ *
+ * The aerial perspective of `atmosphere.ts` is what makes the horizon read as
+ * sky, and it only works if *everything* on the ground obeys it. Instanced
+ * objects are the easiest to forget and the worst to get wrong: they are the
+ * high-frequency detail in the frame, so a forest or a town that stays crisp
+ * against hazed ground is more conspicuous than the haze itself.
+ *
+ * # Two shader patches that were quietly doing nothing
+ *
+ * The settlement night-lights and the walker rim light were both injected at
+ * `#include <output_fragment>`, and three renamed that chunk to `opaque_fragment`
+ * in r155 — this project is on r180. `String.replace` with no match returns the
+ * string unchanged and reports nothing, so both features had been compiled out
+ * for as long as the dependency has been current: the night hemisphere had no
+ * settlement lights on it (§7.3 tier 2's stated readability argument) and
+ * walkers had no rim (§7.3 tier 1). Injecting *before* `opaque_fragment` and
+ * writing `outgoingLight` rather than `gl_FragColor` is also the correct place
+ * on its own merits — it lands before tone mapping and colour conversion instead
+ * of adding linear light to an sRGB pixel.
+ *
+ * `extra` therefore runs on `outgoingLight`, and the haze is applied after it,
+ * so a lit window seen across the planet is dimmed by the air like everything
+ * else.
+ */
+function hazedLambert(view: View, colour: number, extra = ""): THREE.MeshLambertMaterial {
+  // No `vertexColors: true`. It defines `USE_COLOR`, and `color_vertex.glsl`
+  // then runs `vColor *= color` against a `color` attribute that does not exist
+  // on this geometry. `MeshLambertMaterial` — unlike `ShaderMaterial` — has no
+  // `defaultAttributeValues`, so the generic attribute is (0,0,0,1), `vColor`
+  // collapses to zero, and every settlement and walker rendered *black*. The
+  // per-instance colour arrives through `instanceColor`, which sets
+  // `USE_INSTANCING_COLOR` on its own and needs no help from the material.
+  const material = new THREE.MeshLambertMaterial({ color: colour });
+  material.onBeforeCompile = (shader) => {
+    // Shared by reference — see `view.ts`.
+    shader.uniforms.uSunDirection = view.sunDirection;
+    shader.uniforms.uCameraPosition = view.cameraPosition;
+    shader.uniforms.uWarning = view.warning;
+    let vertex = shader.vertexShader;
+    vertex = inject(
+      vertex,
+      "#include <common>",
+      `#include <common>
+       varying vec3 vDioWorld;`,
+    );
+    vertex = inject(
+      vertex,
+      "#include <project_vertex>",
+      `#include <project_vertex>
+       // Through the instance matrix, which the world position this used to
+       // compute did not go through: for an InstancedMesh, \`transformed\` is
+       // still the *local* vertex, so the old
+       // \`(modelMatrix * vec4(transformed, 1.0)).xyz\` gave every building on
+       // the planet the same handful of positions near the origin — and the
+       // night-side test below reduced to which corner of the box a fragment
+       // was on rather than which side of the planet it stood on.
+       vec4 dioLocal = vec4(transformed, 1.0);
+       #ifdef USE_INSTANCING
+         dioLocal = instanceMatrix * dioLocal;
+       #endif
+       vDioWorld = (modelMatrix * dioLocal).xyz;`,
+    );
+    shader.vertexShader = vertex;
+
+    let fragment = shader.fragmentShader;
+    fragment = inject(
+      fragment,
+      "#include <common>",
+      `#include <common>
+       varying vec3 vDioWorld;
+       uniform vec3 uSunDirection;
+       uniform vec3 uCameraPosition;
+       uniform float uWarning;
+       ${SKY_GLSL}`,
+    );
+    fragment = inject(
+      fragment,
+      "#include <opaque_fragment>",
+      `${extra}
+       {
+         vec4 dioAir = dioAerial(vDioWorld, uCameraPosition, uSunDirection, uWarning);
+         outgoingLight = mix(outgoingLight, dioAir.rgb, dioAir.a);
+       }
+       #include <opaque_fragment>`,
+    );
+    shader.fragmentShader = fragment;
+  };
+  return material;
+}
+
+/**
+ * `String.replace` against a three shader chunk, but it refuses to do nothing.
+ *
+ * The failure this exists to prevent already happened once, to two separate
+ * features, and went unnoticed for a dependency upgrade: `replace` with no match
+ * returns the string unchanged and reports nothing, so a renamed chunk does not
+ * break the build, does not warn, and does not fail a test — it just quietly
+ * deletes whatever was being injected. A shipped feature stops existing and the
+ * only symptom is that the game looks slightly different to someone who
+ * remembers.
+ *
+ * Throwing instead makes that class of upgrade impossible to miss: the first
+ * frame that compiles the material fails loudly, in the one place that names the
+ * chunk. Loud is the point — the alternative is not "it still works", it is
+ * "the feature is gone and nothing said so".
+ */
+function inject(source: string, marker: string, replacement: string): string {
+  if (!source.includes(marker)) {
+    throw new Error(
+      `shader chunk ${marker} is not in this material — three has renamed or removed it, and the patch that hooks it (aerial perspective, night lights, walker rim) would otherwise compile out in silence.`,
+    );
+  }
+  return source.replace(marker, replacement);
+}
+
+/**
  * Settlements, with night-side lights (§7.3 tier 2).
  *
  * "Night side with emissive settlement lights. Doubles as readability —
@@ -385,55 +511,24 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
  * one place where you cannot read who holds what.
  */
 function settlementMaterial(view: View): THREE.MeshLambertMaterial {
-  // No `vertexColors: true`. It defines `USE_COLOR`, and `color_vertex.glsl`
-  // then runs `vColor *= color` against a `color` attribute that does not exist
-  // on this geometry. `MeshLambertMaterial` — unlike `ShaderMaterial` — has no
-  // `defaultAttributeValues`, so the generic attribute is (0,0,0,1), `vColor`
-  // collapses to zero, and every settlement and walker rendered *black*. The
-  // per-instance colour arrives through `instanceColor`, which sets
-  // `USE_INSTANCING_COLOR` on its own and needs no help from the material.
-  const material = new THREE.MeshLambertMaterial({ color: 0xd8cbb0 });
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uSunDirection = view.sunDirection;
-    shader.vertexShader = shader.vertexShader.replace(
-      "#include <common>",
-      `#include <common>
-       varying vec3 vDioWorld;`,
-    );
-    shader.vertexShader = shader.vertexShader.replace(
-      "#include <worldpos_vertex>",
-      `#include <worldpos_vertex>
-       vDioWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
-    );
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <common>",
-      `#include <common>
-       varying vec3 vDioWorld;
-       uniform vec3 uSunDirection;`,
-    );
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <output_fragment>",
-      `#include <output_fragment>
-       // Lights come on where the sun has gone down, and only there.
-       float dioNight = smoothstep(0.12, -0.25, dot(normalize(vDioWorld), uSunDirection));
-       gl_FragColor.rgb += vColor * vec3(1.0, 0.72, 0.36) * dioNight * 0.9;`,
-    );
-  };
-  return material;
+  return hazedLambert(
+    view,
+    0xd8cbb0,
+    /* glsl */ `
+      // Lights come on where the sun has gone down, and only there.
+      float dioNight = smoothstep(0.12, -0.25, dot(normalize(vDioWorld), uSunDirection));
+      outgoingLight += vColor * vec3(1.0, 0.72, 0.36) * dioNight * 0.9;`,
+  );
 }
 
 /** Lambert plus a rim term, so a walker never disappears into the ground. */
-function walkerMaterial(): THREE.MeshLambertMaterial {
-  // No `vertexColors` — same trap as `settlementMaterial`.
-  const material = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  material.onBeforeCompile = (shader) => {
-    shader.fragmentShader = shader.fragmentShader.replace(
-      "#include <output_fragment>",
-      `#include <output_fragment>
-       vec3 vd = normalize(vViewPosition);
-       float rimTerm = pow(1.0 - max(dot(normalize(vNormal), vd), 0.0), 2.0);
-       gl_FragColor.rgb += rimTerm * 0.55;`,
-    );
-  };
-  return material;
+function walkerMaterial(view: View): THREE.MeshLambertMaterial {
+  return hazedLambert(
+    view,
+    0xffffff,
+    /* glsl */ `
+      vec3 dioView = normalize(vViewPosition);
+      float dioRim = pow(1.0 - max(dot(normalize(vNormal), dioView), 0.0), 2.0);
+      outgoingLight += dioRim * 0.55;`,
+  );
 }

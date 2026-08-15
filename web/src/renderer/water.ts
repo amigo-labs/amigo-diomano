@@ -14,6 +14,7 @@
 
 import * as THREE from "three";
 import type { Sim } from "../main";
+import { SKY_GLSL } from "./atmosphere";
 import { BASE_RADIUS } from "./planet";
 import type { View } from "./view";
 
@@ -66,6 +67,9 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uTier;
   uniform vec3 uGodA;
   uniform vec3 uGodB;
+  uniform float uWarning;
+
+  ${SKY_GLSL}
 
   // Cheap value noise, for the tier-2 ripple normals. Procedural: no textures,
   // no licensing exposure, near-zero repo weight (§7.5).
@@ -115,7 +119,11 @@ const FRAGMENT_SHADER = /* glsl */ `
                min(abs(vInfluence) * 1.2, 0.4));
 
     float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 4.0);
-    vec3 sky = vec3(0.36, 0.52, 0.78);
+    // What the sea reflects is the sky it is actually under, from the one model
+    // of it in atmosphere.ts — so the water goes warm where the sun is low on it
+    // and red under a tide warning, instead of reflecting a constant blue that
+    // contradicts the horizon it sits against.
+    vec3 sky = dioAirColour(reflect(-viewDir, n), up, uSunDirection, uWarning) * 0.72;
     vec3 colour = mix(body, sky, fresnel * 0.7);
 
     if (uTier > 1.5) {
@@ -129,6 +137,14 @@ const FRAGMENT_SHADER = /* glsl */ `
     // simulation's own erosion marker, so foam appears exactly where terrain is
     // being cut — the visual and the mechanic cannot disagree.
     colour = mix(colour, vec3(0.92, 0.96, 0.98), clamp(vFoam * 2.2, 0.0, 0.7));
+
+    // The same air as the terrain, at the same strength — and only the colour
+    // is hazed, not the alpha. The ground showing through a shallow sea has
+    // already been hazed by exactly this much in its own shader, so fogging both
+    // layers by the same fraction and then blending them is the same result as
+    // fogging the blend, without the sea having to know what is under it.
+    vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
+    colour = mix(colour, air.rgb, air.a);
 
     float alpha = clamp(0.42 + depth * 0.010, 0.42, 0.96);
     gl_FragColor = vec4(colour, alpha);
@@ -148,6 +164,7 @@ export function createWater(sim: Sim, view: View): Water {
       uSunDirection: view.sunDirection,
       uCameraPosition: view.cameraPosition,
       uTime: view.time,
+      uWarning: view.warning,
       uTier: { value: 2 },
       uGodA: { value: new THREE.Color(1.05, 0.95, 0.85) },
       uGodB: { value: new THREE.Color(0.85, 0.92, 1.1) },
