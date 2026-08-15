@@ -126,17 +126,15 @@ verify" is not "verified".
 plus 667 hashes over 20,000 ticks on each of the ten `fixtures/match-NN.log`
 corpus matches, all identical between the native binary and headless Chromium.
 
-## The corpus, and the one criterion still open
+## The corpus
 
 `docs/HANDOFF.md` §6.3 asks for 10 recorded matches of ≥ 20,000 ticks each,
 covering every verb at least 20 times and at least 200 combat resolutions,
-replaying bit-identically native vs. headless browser. Three of those four hold;
-the combat count does not, for a structural reason, and the whole account —
-including why flood and swamp force the corpus to be split into two profiles —
-is in `netcode.md` rather than duplicated here.
-
-`diomano-cli corpus --strict` enforces the criterion in full; the default reports
-the shortfall as a KNOWN GAP on every run, so it cannot quietly become normal.
+replaying bit-identically native vs. headless browser. All four hold, and
+`diomano-cli corpus --check-only` enforces all four. The combat count was zero
+until the contact corridor connected the two spawns; the whole account —
+including why flood and swamp force the corpus into profiles — is in
+`netcode.md` rather than duplicated here.
 
 ## Diagnostic counters are not state
 

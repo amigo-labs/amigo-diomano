@@ -18,13 +18,35 @@
 //!
 //! It is fully deterministic: its only inputs are world state and tick count.
 //! Both peers running it would agree, so it survives the netcode phase unchanged.
+//!
+//! It teaches once, then it fights. After a single pass through the curriculum
+//! the script switches to [`WAR_SCRIPT`]: grow the economy, march the army at
+//! the enemy's strongest settlement, strike it when affordable, wall up when
+//! the tide telegraphs. Still only ordinary commands — a war of terraforming
+//! and marching, which is the only war this game has.
 
 use crate::world::{
-    Command, CommandBuf, MOD_THROWN, N, PLAYERS, VERB_LOWER, VERB_MAGNET, VERB_RAISE, VERB_VOLCANO,
-    World, idx,
+    Command, CommandBuf, MOD_THROWN, N, PLAYERS, TIDE_TELEGRAPH, VERB_EARTHQUAKE, VERB_LOWER,
+    VERB_MAGNET, VERB_RAISE, VERB_VOLCANO, World, idx, verb_power,
 };
 
-/// One step of the demonstration script.
+/// `AiState::phase` value once the curriculum has been shown once.
+pub const PHASE_WAR: u8 = 1;
+
+/// Mana the war phase keeps in hand before it pays for a strike, so it can
+/// always afford the next magnet and never bankrupts its own march.
+const WAR_RESERVE: i32 = 200;
+
+/// Where a move points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Aim {
+    /// The scripted player's own anchor settlement, plus the move's offset.
+    Home,
+    /// The *enemy's* strongest settlement, plus the move's offset.
+    EnemyBase,
+}
+
+/// One step of a script — a lesson in the curriculum, a move in the war.
 #[derive(Clone, Copy, Debug)]
 struct Lesson {
     /// What the player would press.
@@ -33,14 +55,44 @@ struct Lesson {
     hold: u32,
     /// Ticks of stillness afterwards, so the effect is watchable.
     pause: u32,
-    /// Offset from the anchor, in cells, for the target.
+    /// Offset from the aim point, in cells, for the target.
     dx: i8,
     dy: i8,
     modifier: u8,
+    aim: Aim,
+    /// Emit only while `mana >= cost + WAR_RESERVE` — the strike gate.
+    needs_reserve: bool,
+    /// Emit only during a tide telegraph — the defensive-wall gate.
+    telegraph_only: bool,
 }
 
 const fn lesson(verb: u8, hold: u32, pause: u32, dx: i8, dy: i8, modifier: u8) -> Lesson {
-    Lesson { verb, hold, pause, dx, dy, modifier }
+    Lesson {
+        verb,
+        hold,
+        pause,
+        dx,
+        dy,
+        modifier,
+        aim: Aim::Home,
+        needs_reserve: false,
+        telegraph_only: false,
+    }
+}
+
+#[expect(clippy::too_many_arguments, reason = "a const table row, not an API")]
+const fn war_move(
+    verb: u8,
+    hold: u32,
+    pause: u32,
+    dx: i8,
+    dy: i8,
+    modifier: u8,
+    aim: Aim,
+    needs_reserve: bool,
+    telegraph_only: bool,
+) -> Lesson {
+    Lesson { verb, hold, pause, dx, dy, modifier, aim, needs_reserve, telegraph_only }
 }
 
 /// The curriculum, in order. Each pass through it is one visible "turn".
@@ -56,13 +108,42 @@ const SCRIPT: &[Lesson] = &[
     lesson(VERB_RAISE, 24, 90, -6, 0, MOD_THROWN),
     // Move the magnet: the only command in the game.
     lesson(VERB_MAGNET, 1, 120, -10, 6, 0),
-    // Dig a channel towards the sea, so water has somewhere to go.
-    lesson(VERB_LOWER, 30, 30, 0, 9, MOD_THROWN),
+    // Dig a channel towards the sea, so water has somewhere to go. Southward:
+    // the contact corridor approaches every spawn from the north, and the
+    // original (0, +9) target dug straight through it — the opponent was
+    // severing its own only road to the enemy in its fourth lesson.
+    lesson(VERB_LOWER, 30, 30, 0, -9, MOD_THROWN),
     // Reclaim land with lava, which is the counter-play to the tide.
     lesson(VERB_VOLCANO, 1, 150, 4, -9, 0),
     // Raise a wall across the approach: the terrain response that saves a
     // settlement under siege.
     lesson(VERB_RAISE, 30, 120, -2, -7, MOD_THROWN),
+];
+
+/// The war, after one pass of teaching. Same interpreter, different table:
+/// grow the economy, march the army at the enemy over the causeway, strike
+/// the enemy base when affordable, wall up when the sea telegraphs.
+///
+/// One pass is ~19 s — under a tide cycle — so every wave sees a march. It
+/// still emits nothing but ordinary commands: contact and combat resolve
+/// autonomously (§4.7), because there is no attack order to issue.
+const WAR_SCRIPT: &[Lesson] = &[
+    // Refill the hand.
+    war_move(VERB_LOWER, 24, 12, 8, 0, 0, Aim::Home, false, false),
+    // Flatten ground beside home: settlements found themselves, and they are
+    // the economy — influence, mana and walkers all grow from them.
+    war_move(VERB_RAISE, 46, 30, -6, 2, MOD_THROWN, Aim::Home, false, false),
+    // The march: drop the magnet on the enemy's strongest settlement and give
+    // the army a tide cycle's recovery window to walk the causeway.
+    war_move(VERB_MAGNET, 1, 300, 0, 0, 0, Aim::EnemyBase, false, false),
+    // The strike, when affordable past the reserve. Earthquake, deliberately
+    // never volcano: a lava pool on the enemy plateau makes the AI's *own*
+    // magnet cell impassable, the flow field falls back, and the army walks
+    // home from its own siege — traced, both armies parked for a whole match.
+    // Broken ground starves the settlement (§5.2) and blocks nobody.
+    war_move(VERB_EARTHQUAKE, 1, 90, 1, -1, 0, Aim::EnemyBase, true, false),
+    // The sea is coming: a wall across home's seaward approach.
+    war_move(VERB_RAISE, 30, 30, -2, -7, MOD_THROWN, Aim::Home, false, true),
 ];
 
 /// Emit this tick's commands for the scripted player.
@@ -71,23 +152,36 @@ const SCRIPT: &[Lesson] = &[
 /// through exactly the same path as a human's input.
 pub fn step(w: &mut World, out: &mut CommandBuf) {
     let player = (w.cfg.ai_player as usize) % PLAYERS;
-    if w.outcome != 0 {
+    // A decided match silences the opponent — except in endless worlds, where
+    // the world itself keeps running (the §6.3 corpus) and a mute opponent
+    // would halve the coverage of exactly the phase the corpus is there for.
+    if w.outcome != 0 && w.cfg.endless == 0 {
         return;
     }
 
     // Re-anchor on the scripted player's strongest settlement whenever the
     // script wraps, so the demonstration follows the action instead of playing
-    // out next to a crater.
-    if w.ai.script_pc as usize >= SCRIPT.len() {
+    // out next to a crater. After one full pass of teaching, the gloves come
+    // off: the curriculum hands over to the war table. Both tables are
+    // non-empty, so this settles in at most two rounds.
+    loop {
+        if (w.ai.script_pc as usize) < current_script(w).len() {
+            break;
+        }
         w.ai.script_pc = 0;
         w.ai.timer = 0;
+        w.ai.repeat = w.ai.repeat.wrapping_add(1);
+        if w.ai.phase != PHASE_WAR && w.ai.repeat >= 1 {
+            w.ai.phase = PHASE_WAR;
+            w.ai.repeat = 0;
+        }
         reanchor(w, player);
     }
     if w.ai.anchor_face == 0 && w.ai.anchor_x == 0 && w.ai.anchor_y == 0 {
         reanchor(w, player);
     }
 
-    let l = SCRIPT[w.ai.script_pc as usize];
+    let l = current_script(w)[w.ai.script_pc as usize];
     let t = w.ai.timer;
     w.ai.timer = t.wrapping_add(1);
     if t >= l.hold + l.pause {
@@ -99,14 +193,35 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
         return; // the pause: stand back and let the world respond
     }
 
-    let (x, y) = target(w, l);
+    // A wall is only worth raising while the sea telegraphs; on a calm tick
+    // the whole move is skipped rather than half-held.
+    if l.telegraph_only && w.tide.phase != TIDE_TELEGRAPH {
+        if t == 0 {
+            w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
+            w.ai.timer = 0;
+        }
+        return;
+    }
+
+    // The reserve gate: never spend down past the next magnet. Emitting
+    // nothing this tick is fine — the timer still advances, so an unaffordable
+    // strike is a skipped beat and not a stall.
+    let verb = l.verb;
+    if l.needs_reserve {
+        let cost = verb_power(verb).map_or(0, |p| i32::from(w.cfg.power_cost[p]));
+        if w.mana_units(player) < cost + WAR_RESERVE {
+            return;
+        }
+    }
+
+    let (face, x, y) = target(w, player, l);
     out.push(Command {
         tick: w.tick,
         x,
         y,
         player: player as u8,
-        verb: l.verb,
-        face: w.ai.anchor_face,
+        verb,
+        face,
         modifier: l.modifier,
     });
 
@@ -116,15 +231,30 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
     w.ai.cursor = w.ai.cursor.wrapping_add(1);
 }
 
-fn target(w: &World, l: Lesson) -> (u16, u16) {
-    let x = (i32::from(w.ai.anchor_x) + i32::from(l.dx)).clamp(0, N as i32 - 1);
-    let y = (i32::from(w.ai.anchor_y) + i32::from(l.dy)).clamp(0, N as i32 - 1);
-    (x as u16, y as u16)
+fn current_script(w: &World) -> &'static [Lesson] {
+    if w.ai.phase == PHASE_WAR { WAR_SCRIPT } else { SCRIPT }
 }
 
-/// Point the script at the scripted player's best settlement, or at their
-/// starting face if they have none left.
-fn reanchor(w: &mut World, player: usize) {
+fn target(w: &World, player: usize, l: Lesson) -> (u8, u16, u16) {
+    let (face, ax, ay) = match l.aim {
+        Aim::Home => (w.ai.anchor_face, w.ai.anchor_x, w.ai.anchor_y),
+        Aim::EnemyBase => {
+            let enemy = (player + 1) % PLAYERS;
+            strongest_settlement(w, enemy).unwrap_or_else(|| {
+                let (f, x, y) = crate::settlements::STARTS[enemy];
+                (f as u8, x as u8, y as u8)
+            })
+        }
+    };
+    let x = (i32::from(ax) + i32::from(l.dx)).clamp(0, N as i32 - 1);
+    let y = (i32::from(ay) + i32::from(l.dy)).clamp(0, N as i32 - 1);
+    (face, x as u16, y as u16)
+}
+
+/// A player's strongest settlement: tier descending, slot ascending — the
+/// exact mirror of `reanchor`'s scan, so both gods agree on what "strongest"
+/// means.
+fn strongest_settlement(w: &World, player: usize) -> Option<(u8, u8, u8)> {
     let mut best: Option<(u8, usize)> = None;
     for (i, s) in w.settlements.iter().enumerate() {
         if !s.alive() || s.owner as usize != player {
@@ -135,15 +265,24 @@ fn reanchor(w: &mut World, player: usize) {
             _ => best = Some((s.tier, i)),
         }
     }
-    if let Some((_, i)) = best {
+    best.map(|(_, i)| {
         let s = w.settlements[i];
-        w.ai.anchor_face = s.face;
-        w.ai.anchor_x = s.x;
-        w.ai.anchor_y = s.y;
+        (s.face, s.x, s.y)
+    })
+}
+
+/// Point the script at the scripted player's best settlement, or at their
+/// starting position if they have none left.
+fn reanchor(w: &mut World, player: usize) {
+    if let Some((face, x, y)) = strongest_settlement(w, player) {
+        w.ai.anchor_face = face;
+        w.ai.anchor_x = x;
+        w.ai.anchor_y = y;
     } else {
-        w.ai.anchor_face = if player == 0 { 4 } else { 5 };
-        w.ai.anchor_x = (N / 2) as u8;
-        w.ai.anchor_y = (N / 2) as u8;
+        let (face, x, y) = crate::settlements::STARTS[player];
+        w.ai.anchor_face = face as u8;
+        w.ai.anchor_x = x as u8;
+        w.ai.anchor_y = y as u8;
     }
     let _ = idx(w.ai.anchor_face as usize, w.ai.anchor_x as usize, w.ai.anchor_y as usize);
 }
@@ -175,8 +314,9 @@ mod tests {
     fn the_opponent_only_uses_verbs_the_player_also_has() {
         // The teaching claim is only true if this holds. A verb the AI can use
         // and the player cannot would be a tutorial for something that is not in
-        // the game.
-        for l in SCRIPT {
+        // the game. The war table is held to the same rule: pillar 3 has no
+        // phase exemption.
+        for l in SCRIPT.iter().chain(WAR_SCRIPT) {
             assert!(l.verb < VERB_COUNT, "unknown verb {} in the script", l.verb);
             assert!(verb_power(l.verb).is_some(), "verb {} is not a player-facing power", l.verb);
         }
@@ -249,9 +389,12 @@ mod tests {
 
     #[test]
     fn a_full_tick_loop_with_the_opponent_enabled_stays_reproducible() {
+        // Long enough to cross the tutorial→war transition, so the war phase
+        // is covered by the same reproducibility guarantee.
+        let ticks = script_ticks() + 600;
         let run = || {
             let mut w = ai_world();
-            for _ in 0..600 {
+            for _ in 0..ticks {
                 w.tick(&[]);
             }
             w.state_hash()
@@ -266,5 +409,86 @@ mod tests {
         step(&mut w, &mut buf);
         assert_eq!(w.ai.anchor_face, w.settlements[1].face);
         assert_eq!(w.ai.anchor_x, w.settlements[1].x);
+    }
+
+    /// Steps to drive `step` through one full curriculum pass and into the
+    /// wrap check: each lesson costs `hold + pause` ticks plus one advancing
+    /// call, plus one call to trigger the wrap itself.
+    fn one_pass_steps() -> u32 {
+        script_ticks() + SCRIPT.len() as u32 + 1
+    }
+
+    #[test]
+    fn after_one_curriculum_pass_the_opponent_goes_to_war() {
+        let mut w = ai_world();
+        let mut buf = CommandBuf::new();
+        for _ in 0..one_pass_steps() {
+            buf.clear();
+            step(&mut w, &mut buf);
+        }
+        assert_eq!(w.ai.phase, PHASE_WAR, "the opponent is still stuck in the tutorial");
+    }
+
+    #[test]
+    fn the_war_phase_marches_on_the_enemy() {
+        // Full tick loop: the magnet command has to travel the real path
+        // (pass 2b → apply_commands) to move the magnet. The enemy is player
+        // 0, whose settlements live around STARTS[0].
+        let mut w = ai_world();
+        let mut marched = false;
+        for _ in 0..script_ticks() + 1200 {
+            w.tick(&[]);
+            if w.magnet[1].active == 0 {
+                continue;
+            }
+            let on_enemy = w.settlements.iter().any(|s| {
+                s.alive()
+                    && s.owner == 0
+                    && s.face == w.magnet[1].face
+                    && s.x == w.magnet[1].x
+                    && s.y == w.magnet[1].y
+            });
+            if on_enemy {
+                marched = true;
+                break;
+            }
+        }
+        assert!(marched, "the war phase never sent the army at the enemy");
+    }
+
+    #[test]
+    fn the_war_phase_never_overdraws_its_reserve() {
+        // Drive `step` directly with mana pinned at zero: past the tutorial,
+        // no strike may be emitted at all — the reserve gate holds.
+        let mut w = ai_world();
+        let mut buf = CommandBuf::new();
+        for _ in 0..one_pass_steps() {
+            buf.clear();
+            step(&mut w, &mut buf);
+        }
+        assert_eq!(w.ai.phase, PHASE_WAR);
+        for _ in 0..2000 {
+            w.mana[1] = 0;
+            buf.clear();
+            step(&mut w, &mut buf);
+            for c in buf.as_slice() {
+                assert!(
+                    c.verb != VERB_VOLCANO && c.verb != VERB_EARTHQUAKE,
+                    "a broke opponent still paid for a strike"
+                );
+            }
+        }
+        // And with a full purse the strike does happen.
+        let mut struck = false;
+        for _ in 0..2000 {
+            w.mana[1] = 9_999 << 16;
+            buf.clear();
+            step(&mut w, &mut buf);
+            if buf.as_slice().iter().any(|c| c.verb == VERB_VOLCANO || c.verb == VERB_EARTHQUAKE) {
+                struck = true;
+                break;
+            }
+        }
+        assert!(struck, "a rich opponent never strikes");
     }
 }

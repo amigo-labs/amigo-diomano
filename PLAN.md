@@ -243,13 +243,12 @@ Recorded rather than resolved silently. See the run summary for the full list.
       10-way CI matrix so the wall clock is one match rather than the sum of ten
 - [x] `World::census` instrumentation, excluded from the state hash and pinned so
       by `the_census_is_not_hashed`
-- [ ] ❌ **200 combat resolutions: the corpus records zero.** Structural rather
-      than a tuning problem — the two starting positions are compile-time
-      constants on opposite faces, diomano has no naval movement, and on
-      mostly-ocean terrain the flow-field BFS never reaches the far side. Traced,
-      with both walkers pinned on their spawn cell for a whole match. Printed as a
-      KNOWN GAP on every run; `--strict` enforces it. Combat determinism is
-      covered by the two 100-run stress tests instead of being left unguarded
+- [x] **200 combat resolutions — closed by §19's contact corridor.** It was a
+      structural zero for as long as the spawns had no land route between them
+      (opposite faces, no naval movement, ocean between); the causeway plus a
+      rally window long enough to actually march put the corpus at 16,000+
+      resolutions, and `verify-corpus` now enforces the criterion in full.
+      Combat determinism is additionally covered by the two 100-run stress tests
 - [x] Two properties of the *verbs*, found here and recorded: `VERB_FLOOD` is
       monotonic, so the 20 uses the criterion demands drown the planet and
       guarantee zero combat; and the shipped §5.4 manifest disables swamp, so
@@ -459,6 +458,81 @@ candidate savings were measured and **rejected** — reading the scalar height b
 from the corner grid, and moving the per-chunk scratch off the stack — because
 neither moved the number. The cost is the two vertex passes.
 
+### 19. Making it a game: contact, an opponent, an ending, a front door ✅
+
+Everything above built a simulation; this pass made it playable. The findings and
+the fixes, in causal order:
+
+- [x] **The contact corridor.** The two peoples could never meet: antipodal
+      spawns, no naval movement, ocean between — the §14 gap was really a
+      game-design hole. `settlements::carve_contact_corridor` now carves a
+      3-wide great-circle causeway between the spawns at init: **rock**, because
+      a sand ridge 400 units above the sea floor obeys the angle of repose and
+      dissolved within a few hundred ticks (measured); height 40, above the calm
+      sea and `FLOOD_CAP` but below every wave peak, so the tide closes the road
+      at every impact and returns it at every recovery — §5.5's contested
+      causeway as literal geography. Habitable, so holding the road pays.
+      `spawns_are_connected_at_tick_zero` (3 terrains × 4 seeds) is the
+      load-bearing test; `the_causeway_survives_the_early_game` pins it against
+      physics and tide
+- [x] **Flow-field fallback.** An active magnet was the *sole* BFS seed, so a
+      magnet across water froze the whole army for the rest of the match. Pass
+      two now seeds the unreached remainder from the home targets at
+      `FALLBACK_BASE` — a misplaced magnet means "the army regroups", never
+      "the army is bricked"
+- [x] **The opponent fights back.** After one pass of the six-lesson curriculum
+      (kept verbatim), `ai.rs` switches to a war table: grow the economy, magnet
+      onto the enemy's strongest settlement, earthquake it when affordable past
+      a mana reserve, wall up at tide telegraphs. Two self-sabotages found on
+      the way: lesson 4 dug its channel straight through the corridor's northern
+      approach (moved south), and a volcano strike made the AI's *own* magnet
+      cell impassable, recalling its army mid-siege (strike is earthquake-only).
+      Traced end state: the AI marches the causeway and wins by sudden death
+      against a non-defending script in under two minutes
+- [x] **Matches end now.** `World::tick` freezes on a decided outcome (commands
+      ignored, hash cadence kept, `cfg.endless` opts the corpus out), the client
+      finally reads `dio_outcome`/`dio_score`, plays a procedural sting, drifts
+      the camera over the final tableau, and shows an end card with the per-wave
+      score and two restarts (same seed / new seed) via in-place `dio_init` —
+      verified re-callable, plus `planet/water.refreshAll()` because the dirty
+      flags are consumed before the client can see them
+- [x] **A front door.** Title card with the premise and the controls table
+      (German, per Phase 9), click-to-start doubling as the audio unlock, sim
+      gated behind it, then a one-time camera tour: two seconds on the opponent's
+      spawn — the other god exists and its casts are audible now — then an eased
+      pan home. Any input cancels it
+- [x] **Input repairs.** The magnet click test compared a *residue* of the drag
+      accumulator, so nearly every sculpt ended by teleporting the population
+      (now: 5 px slop from the down point + 400 ms); fast drags lost everything
+      past one step per tick (now: queued and drained at the release target);
+      the modifier ring stuck after release; the mana glow saturated at 8% of
+      its range (now: sqrt anchored at the armageddon price, with a pulse when
+      the big one is affordable); pickup charges were entirely invisible (now:
+      gold motes orbiting the hand)
+- [x] **Truthful cast feedback.** The old confirm played on gesture
+      *recognition* — including for swamp, which the manifest disables. Casts
+      now confirm from the applied-verb ring (the sim's own record, written past
+      cost/enabled gating), a cast whose event never arrives gets an audible
+      refusal plus a hand flash, the opponent's casts play quietly, and
+      raise/lower finally makes a sound (a leaky-integrator grind, not a
+      machine gun)
+- [x] **Balance.** Armageddon 4000 → 2500 (a whole match's income could not buy
+      the stalemate breaker; `armageddon_is_earnable_in_a_match` pins the
+      constants henceforth), flood 400 → 600 with `FLOOD_CAP` at two terraces
+      (uncapped it drowned the planet in 20 casts — and at four terraces two
+      casts amputated the causeway for good), swamp stays disabled
+- [x] **Honest tabs.** `visibilitychange` pauses the loop and audio instead of
+      silently deleting up to a minute of simulation through the catch-up cap
+- [x] Corpus regenerated and the §6.3 combat criterion **enforced**: 16,598
+      resolutions over ten matches, rally windows six cycles long (walkers cross
+      at ONE/16 cells per tick — a rally that rotates faster than an army can
+      march is a yo-yo nobody reaches, measured as exactly zero combat), matches
+      8–9 running the scripted opponent for cross-build coverage of both its
+      phases
+- [x] `web/tools/screenshot.mjs` — headless smoke test of the shell UI: title,
+      intro pan, gameplay, forced ending, end card, restart, all screenshotted
+      and the restart asserted to produce a running match
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on
@@ -469,6 +543,9 @@ still un-designed — design it first, because the Lobby DO must not stay alive 
 a match, that is failure mode 5, and it will never show up in testing with two
 people and one match.
 
-The combat-coverage gap in §14 is the other open item, and it needs a decision
-rather than more effort: either a scripted land bridge across a seam, or a fixture
-format that can place walkers directly, which changes the log contract.
+Playtest balance is the other open item, now that matches actually resolve: the
+war-phase AI beats a passive player by sudden death in a couple of minutes, the
+causeway invites a dig-and-turtle counter whose price (your own expansion) is
+asserted nowhere, and the §5.5 target of "roughly 15 minutes" per match has not
+been measured against a human. Phase 8's playtesting can finally begin, because
+there is finally a game to playtest.

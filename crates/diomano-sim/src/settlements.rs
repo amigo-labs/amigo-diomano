@@ -299,6 +299,126 @@ fn spawn_population(w: &mut World) {
     }
 }
 
+/// Starting positions, one per god. Faces 4 (+z) and 5 (-z) are opposite,
+/// which is as far apart as this topology allows. Public so the CLI and the
+/// opponent script read the same cells instead of keeping copies.
+pub const STARTS: [(usize, usize, usize); PLAYERS] = [(4, N / 2, N / 2), (5, N / 2, N / 2)];
+
+/// Causeway spine height: two and a half terraces (TERRACE = 16).
+///
+/// Three constraints pin this number. Above the calm sea, so the road is
+/// normally open. Above `powers::FLOOD_CAP` (two terraces), so no amount of
+/// flooding closes it *permanently* — traced: with the road below the cap,
+/// two flood casts amputated the game's one artery and every walker on both
+/// sides parked at home for the rest of the match. And below every wave peak
+/// (the first is 48), so each tide impact still floods the road and each
+/// recovery hands it back — the contest is temporary by design, §5.5.
+pub const CAUSEWAY_HEIGHT: i16 = 2 * crate::world::TERRACE + crate::world::TERRACE / 2;
+
+/// Flanks sit one unit lower: still passable, but no 3x3 equal-height plateau
+/// ever forms on the causeway, so nobody founds settlements on the road.
+pub const CAUSEWAY_FLANK_HEIGHT: i16 = CAUSEWAY_HEIGHT - 1;
+
+/// Great-circle steps from one spawn to its antipode: half of the 4N loop.
+pub const CORRIDOR_STEPS: usize = 2 * N;
+
+/// Visit every spine cell of the contact corridor in walk order: a great
+/// circle from `STARTS[0]` heading north for `CORRIDOR_STEPS` cells, then an
+/// L-join to `STARTS[1]`, so the endpoint is exact whatever the seam flips
+/// did to the walk. Pure in its path — it reads no world state — which is what
+/// lets `corridor_cell` replay it for scripts.
+fn walk_corridor(mut visit: impl FnMut(usize, i32, i32)) {
+    let (start_face, sx, sy) = STARTS[0];
+    let (target_face, tx, ty) = STARTS[1];
+    let (mut face, mut x, mut y) = (start_face, sx as i32, sy as i32);
+    let mut dir = crate::seams::DIR_N;
+    visit(face, x, y);
+    for _ in 0..CORRIDOR_STEPS {
+        let (nf, nx, ny, nd) = crate::seams::step(face, x, y, dir);
+        face = nf;
+        x = nx;
+        y = ny;
+        dir = nd;
+        visit(face, x, y);
+    }
+    if face != target_face {
+        // Unreachable on the shipped STARTS: the walk is the great circle
+        // through both spawns. Kept as a guard rather than a panic so a future
+        // STARTS change degrades to "no L-join" instead of a crash.
+        return;
+    }
+    let (tx, ty) = (tx as i32, ty as i32);
+    while x != tx {
+        x += (tx - x).signum();
+        visit(face, x, y);
+    }
+    while y != ty {
+        y += (ty - y).signum();
+        visit(face, x, y);
+    }
+}
+
+/// The corridor's spine cell at walk index `i`, clamped to the far end. A pure
+/// function of `i`, so a recorded script can name causeway waypoints without
+/// the log ever depending on world state.
+#[must_use]
+pub fn corridor_cell(i: usize) -> (u8, u8, u8) {
+    let mut k = 0usize;
+    let mut out = (STARTS[0].0 as u8, STARTS[0].1 as u8, STARTS[0].2 as u8);
+    walk_corridor(|face, x, y| {
+        if k <= i {
+            out = (face as u8, x as u8, y as u8);
+        }
+        k += 1;
+    });
+    out
+}
+
+/// Raise one corridor cell to at least `h` and make it dry, bare rock.
+///
+/// Existing land above `h` — including the spawn plateaus at 320 — is left
+/// alone: the corridor only ever adds passage, it never digs. `MAT_ROCK` is
+/// deliberate twice over. Physically: rock is the one material that neither
+/// erodes (§4.4 — "the absence is the rule") nor obeys the angle of repose, and
+/// a sand ridge 400+ units above the sea floor sheds `(diff - 24) / 4` per tick
+/// per neighbour — a sand causeway dissolves within the first few hundred
+/// ticks, measured. Strategically: rock is habitable, so the road is not just
+/// passage but contestable, *scoring* ground — holding the causeway pays,
+/// which is exactly the fight §5.5 wants the geography to cause.
+fn carve_cell(w: &mut World, face: usize, x: i32, y: i32, h: i16) {
+    let c = idx(face, x as usize, y as usize);
+    if w.height[c] < h {
+        w.height[c] = h;
+        w.material[c] = crate::world::MAT_ROCK;
+        w.sediment[c] = 0;
+        w.vegetation[c] = 0;
+        w.fertility[c] = 0;
+    }
+    // Carved cells all sit above the calm sea; whatever the terrain fill put
+    // here is gone. The tide will flood the road again — that is the game.
+    w.water[c] = 0;
+    w.lava[c] = 0;
+}
+
+/// The contested causeway between the two spawns (HANDOFF §1 pillar 5).
+///
+/// Without a land connection the two peoples never meet on an archipelago:
+/// walkers cannot swim, the tide returns to baseline every wave, and the §6.3
+/// corpus recorded exactly zero combat resolutions because of it. A low,
+/// narrow road that every wave floods and every recovery returns makes
+/// contact inevitable but permanently contested — either god can cut it,
+/// fortify it, or fight over it, and "every causeway you build also serves
+/// your opponent" (§5.5) becomes literal geography.
+fn carve_contact_corridor(w: &mut World) {
+    walk_corridor(|face, x, y| {
+        carve_cell(w, face, x, y, CAUSEWAY_HEIGHT);
+        for dir in 0..4usize {
+            let (nf, nx, ny, _) = crate::seams::step(face, x, y, dir);
+            carve_cell(w, nf, nx, ny, CAUSEWAY_FLANK_HEIGHT);
+        }
+    });
+}
+
 /// Bootstrap: one settlement per god, antipodal, so influence is non-zero from
 /// tick zero.
 ///
@@ -306,9 +426,6 @@ fn spawn_population(w: &mut World) {
 /// is projected from settlements. Populous solved the same circularity by simply
 /// placing the first hut.
 pub fn seed_starting_positions(w: &mut World) {
-    // Faces 4 (+z) and 5 (-z) are opposite, which is as far apart as this
-    // topology allows.
-    const STARTS: [(usize, usize, usize); PLAYERS] = [(4, N / 2, N / 2), (5, N / 2, N / 2)];
     for (player, &(face, cx, cy)) in STARTS.iter().enumerate() {
         let size = 5usize;
         let half = (size / 2) as i32;
@@ -342,6 +459,7 @@ pub fn seed_starting_positions(w: &mut World) {
         }
         w.settlement_count = w.settlement_count.saturating_add(1);
     }
+    carve_contact_corridor(w);
     w.ghost_copy_all();
     detect_plateaus(w);
 }
@@ -575,5 +693,123 @@ mod tests {
             w.influence[c] = 40;
         }
         update(&mut w); // must not panic looking for a free slot
+    }
+
+    /// The load-bearing playability assertion: whatever the terrain noise
+    /// does, a land path between the two spawns exists from tick zero. If this
+    /// fails, the two peoples cannot meet and the game has no war in it.
+    #[test]
+    fn spawns_are_connected_at_tick_zero() {
+        for terrain in [
+            crate::world::TERRAIN_ARCHIPELAGO,
+            crate::world::TERRAIN_PANGAEA,
+            crate::world::TERRAIN_VOLCANO,
+        ] {
+            for seed in [0x5EEDu32, 1, 7, 99] {
+                let mut cfg = MapConfig::DEFAULT;
+                cfg.terrain = terrain;
+                cfg.seed = seed;
+                let mut w = World::boxed();
+                w.init(&cfg);
+
+                let start = idx(STARTS[0].0, STARTS[0].1, STARTS[0].2);
+                let goal = idx(STARTS[1].0, STARTS[1].1, STARTS[1].2);
+                let mut seen = alloc::vec![false; crate::world::CELLS];
+                let mut queue = alloc::vec![start];
+                seen[start] = true;
+                let mut reached = false;
+                while let Some(c) = queue.pop() {
+                    if c == goal {
+                        reached = true;
+                        break;
+                    }
+                    for dir in 0..4usize {
+                        let n = crate::world::live_neighbour(c, dir);
+                        if !seen[n] && w.passable(n) {
+                            seen[n] = true;
+                            queue.push(n);
+                        }
+                    }
+                }
+                assert!(reached, "spawns disconnected on terrain {terrain} seed {seed:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_causeway_floods_at_wave_peak_and_reopens() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        // Mid side-face, guaranteed to be carved ocean rather than spawn
+        // plateau: a quarter of the way along the corridor.
+        let (face, x, y) = corridor_cell(N);
+        let c = idx(face as usize, x as usize, y as usize);
+        assert!(w.passable(c), "the causeway is not passable at calm sea");
+
+        let peak = crate::tide::wave_strength(&w, 0);
+        assert!(
+            i32::from(CAUSEWAY_HEIGHT) < i32::from(w.sea_base) + i32::from(peak),
+            "the first wave peak does not clear the causeway"
+        );
+        w.sea_level = w.sea_base + peak;
+        assert!(!w.passable(c), "the causeway survives a wave peak");
+        w.sea_level = w.sea_base;
+        assert!(w.passable(c), "the causeway does not reopen after the wave");
+    }
+
+    #[test]
+    fn the_causeway_is_passable_and_unsettleable() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let mut carved_ocean = 0usize;
+        for i in 0..CORRIDOR_STEPS {
+            let (face, x, y) = corridor_cell(i);
+            let c = idx(face as usize, x as usize, y as usize);
+            assert!(w.passable(c), "corridor cell {i} is not passable");
+            if w.height[c] == CAUSEWAY_HEIGHT {
+                carved_ocean += 1;
+                // The flank offset exists so no 3x3 equal-height plateau ever
+                // forms on the road: contestable ground, never a build site.
+                assert!(w.plateau[c] < 3, "corridor cell {i} is a build site");
+            }
+        }
+        // On the archipelago most of the road really is reclaimed ocean; if
+        // nothing was carved the corridor did not do its job.
+        assert!(carved_ocean > CORRIDOR_STEPS / 2, "the causeway carved almost nothing");
+    }
+
+    /// The road has to survive the physics it is parked in: granular movement
+    /// would dissolve a sand ridge in minutes (measured — that is why it is
+    /// rock), and the first tide waves must close it only *temporarily*. Two
+    /// full tide cycles of empty ticks, then the spawns must still connect.
+    #[test]
+    fn the_causeway_survives_the_early_game() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        for _ in 0..3_600 {
+            w.tick(&[]);
+        }
+        // Sea back at base between waves; the road must be open again.
+        assert_eq!(w.sea_level, w.sea_base, "not sampled between waves — adjust the tick count");
+        let start = idx(STARTS[0].0, STARTS[0].1, STARTS[0].2);
+        let goal = idx(STARTS[1].0, STARTS[1].1, STARTS[1].2);
+        let mut seen = alloc::vec![false; crate::world::CELLS];
+        let mut queue = alloc::vec![start];
+        seen[start] = true;
+        let mut reached = false;
+        while let Some(c) = queue.pop() {
+            if c == goal {
+                reached = true;
+                break;
+            }
+            for dir in 0..4usize {
+                let n = crate::world::live_neighbour(c, dir);
+                if !seen[n] && w.passable(n) {
+                    seen[n] = true;
+                    queue.push(n);
+                }
+            }
+        }
+        assert!(reached, "the causeway did not survive 3,600 ticks of physics and tide");
     }
 }

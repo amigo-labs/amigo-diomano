@@ -18,6 +18,15 @@ use crate::world::{
     VERB_VOLCANO, World, idx, verb_power, walk,
 };
 
+/// Highest `sea_base` the flood verb can reach: two terraces above the
+/// starting sea. Enough to drown coastal flats on both sides — real strategic
+/// pressure — while staying below `settlements::CAUSEWAY_HEIGHT`, so flooding
+/// can never *permanently* sever the contact corridor: a road only the tide
+/// may close, and only temporarily. (At four terraces, two casts amputated
+/// the game's one artery for good — traced, both armies parked for the rest
+/// of the match.)
+pub const FLOOD_CAP: i16 = 2 * TERRACE;
+
 /// Apply one command.
 ///
 /// Cost and availability are checked first and uniformly, so a power that is
@@ -91,7 +100,11 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         VERB_VOLCANO => volcano(w, face, cx, cy, radius),
         VERB_FLOOD => {
             // Raises global sea level one step. Damages both players (§5.2).
-            w.sea_base = w.sea_base.saturating_add(TERRACE);
+            // Capped: the rise is monotonic (there is deliberately no ebb
+            // verb), and uncapped it drowns the whole planet in ~20 casts —
+            // the corpus proved that empirically. A cast at the cap still
+            // spends its mana; the gate above has already charged.
+            w.sea_base = w.sea_base.saturating_add(TERRACE).min(FLOOD_CAP);
         }
         VERB_CHAMPION => {
             crate::walkers::make_champion(w, player);
@@ -604,6 +617,10 @@ pub fn parse_log_header(src: &str) -> Result<LogHeader, ParseError> {
             "terrain" => cfg.terrain = v.clamp(0, 2) as u8,
             "waves" => cfg.waves = v.clamp(1, crate::world::MAX_WAVES as i64) as u8,
             "ai" => cfg.ai_enabled = u8::from(v != 0),
+            // Keep simulating past the decided outcome. Corpus logs set this:
+            // a default match decides around tick 10,000 and a frozen second
+            // half would gut the §6.3 coverage. Real matches freeze.
+            "endless" => cfg.endless = u8::from(v != 0),
             // Bitmask over the power ids: bit `i` enables power `i`.
             //
             // Here because §6.3 asks a corpus to cover every verb at least 20
@@ -1011,5 +1028,44 @@ enabled = true
     fn log_header_rejects_a_mismatched_grid() {
         assert!(parse_log_header("seed 1\nn 64\nticks 10\n").is_ok());
         assert!(parse_log_header("seed 1\nn 96\n").is_err());
+    }
+
+    #[test]
+    fn flood_saturates_at_the_cap() {
+        let mut w = crate::world::World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let casts = 2 * (FLOOD_CAP / crate::world::TERRACE) as usize;
+        let cmd =
+            Command { tick: 0, x: 0, y: 0, player: 0, verb: VERB_FLOOD, face: 0, modifier: 0 };
+        for _ in 0..casts {
+            w.mana[0] = 9_999 << 16;
+            apply(&mut w, 0, &cmd);
+        }
+        assert_eq!(w.sea_base, FLOOD_CAP, "flood did not saturate at the cap");
+        // The spawn plateaus must survive a maximally flooded planet.
+        let (f, x, y) = crate::settlements::STARTS[0];
+        w.sea_level = w.sea_base;
+        assert!(w.passable(idx(f, x, y)), "the cap still drowns a spawn plateau");
+    }
+
+    /// Constants-level guard for the armageddon price: a plausible late-game
+    /// holding (250 habitable cells, four settlements) must be able to save it
+    /// up inside two tide cycles, computed with `accrue_mana`'s own integer
+    /// formula. A retune that makes the stalemate breaker unreachable again
+    /// should fail a test, not a playtest.
+    #[test]
+    fn armageddon_is_earnable_in_a_match() {
+        let cells = 250i64;
+        let mult = 16 + 4 * i64::from(crate::world::TIER_STRENGTH[2]);
+        let per_tick_q16 = (cells * mult) << 16;
+        let per_tick_units = (per_tick_q16 / (256 * 16)) >> 16;
+        let cfg = MapConfig::DEFAULT;
+        let two_cycles = 2 * i64::from(cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks);
+        let earned = per_tick_units * two_cycles;
+        let price = i64::from(cfg.power_cost[crate::world::POWER_ARMAGEDDON]);
+        assert!(
+            earned >= price,
+            "armageddon ({price}) is out of reach: two late-game tide cycles earn only {earned}"
+        );
     }
 }

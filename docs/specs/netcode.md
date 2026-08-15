@@ -104,29 +104,26 @@ injected divergence **is caught** — a detector never seen to fire is a comment
 least 20 times and at least 200 combat resolutions, replaying bit-identically
 native vs. headless browser.
 
-**Status: three of four met.** `fixtures/match-00..09` are ten matches of 20,000
+**Status: all four met.** `fixtures/match-00..09` are ten matches of 20,000
 ticks; `just verify-match N` replays each natively *and* in headless Chromium, as
 a 10-way CI matrix so the wall clock is one match rather than ten. Every verb
-clears 20 uses across the corpus (`just verify-corpus`).
+clears 20 uses and the corpus records thousands of combat resolutions
+(`just verify-corpus` enforces all of it).
 
-**Not met: 200 combat resolutions. The corpus records zero.** The cause is
-structural, not a script that needs more tuning:
+**The combat count was zero for a long time, and the fix was geography, not
+scripting.** The cause was structural: `seed_starting_positions` places the two
+players on opposite faces, diomano has no naval movement, and on mostly-ocean
+terrain there was no land route between the two homes — the flow-field BFS never
+reached the far side, and both armies sat on their spawns for entire matches.
+What closed it is the **contact corridor** (`settlements::carve_contact_corridor`):
+a low rock causeway carved between the spawns at init, above the calm sea and
+below every wave peak, so it exists on every terrain and seed, floods at every
+tide impact and reopens at every recovery. The corpus script rallies both magnets
+on `corridor_cell(CORRIDOR_STEPS / 2)` in six-cycle windows — the window length
+matters, because walkers cross at ONE/16 cells per tick and a rally that rotates
+faster than an army can march is a yo-yo nobody ever reaches.
 
-- `seed_starting_positions` places the two players on **opposite faces**, at
-  compile-time constants, "as far apart as this topology allows".
-- diomano has no naval movement, and `step_walker` only follows its own flow
-  field onto passable ground.
-- On mostly-ocean terrain there is no land route between the two homes, so the
-  flow-field BFS never reaches the far side. Traced: both walkers pinned on their
-  spawn cell for an entire 20,000-tick match.
-
-So a log — which by design cannot read the world — would have to terraform a land
-bridge across a seam before either army could meet. The alternative is a fixture
-format that can place walkers directly, which changes the log contract.
-`diomano-cli corpus --strict` enforces the criterion; the default reports it as a
-KNOWN GAP on every run, so it cannot quietly become the new normal.
-
-Combat determinism is meanwhile covered natively rather than left unguarded:
+Combat determinism is additionally covered natively:
 `combat::stress_200_simultaneous_contacts_is_deterministic` (200 simultaneous
 contacts, 100 runs) and `stress_200_friendly_contacts_is_deterministic`.
 
@@ -135,12 +132,15 @@ contacts, 100 runs) and `stress_200_friendly_contacts_is_deterministic`.
 Found while building the corpus, and worth recording because both are properties
 of the verbs rather than of the harness:
 
-1. **`VERB_FLOOD` is monotonic.** It raises `sea_base` and nothing ever lowers it.
-   Twenty floods — the minimum the criterion asks for — leave the planet under
-   water, which drowns every route and guarantees zero combat. So the corpus is
-   split: five `war` matches that stay habitable, five `cataclysm` matches that
-   issue flood and armageddon. Counts are met across the corpus, per-match numbers
-   all printed.
+1. **`VERB_FLOOD` is monotonic.** It raises `sea_base` and nothing ever lowers
+   it. Uncapped, twenty floods — the minimum the criterion asks for — left the
+   planet under water, which drowned every route and guaranteed zero combat;
+   `powers::FLOOD_CAP` now bounds the rise at two terraces, below the contact
+   corridor, so flooding pressures the coasts without ever amputating the road.
+   The corpus is still split — `war` matches that stay pristine, `cataclysm`
+   matches that issue flood and armageddon, and two `ai-war` matches that give
+   the scripted opponent's both phases long cross-build coverage. Counts are met
+   across the corpus, per-match numbers all printed.
 2. **The shipped §5.4 manifest disables swamp.** On that mask `VERB_SWAMP` is
    inert and "every verb at least 20 times" is unreachable no matter how long a
    match runs. The corpus therefore enables all eight powers and zeroes their
