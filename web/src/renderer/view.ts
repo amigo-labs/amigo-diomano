@@ -69,6 +69,16 @@ export interface View {
    * or shadows of vanished clouds crawl over the ground on their own.
    */
   readonly cloudFade: { value: number };
+  /**
+   * The tide telegraph, 0 calm to 1 imminent. Written by `atmosphere.sync`.
+   *
+   * It lives here rather than in `atmosphere.ts` because the warning is a
+   * property of the air, and since the air is now evaluated by every ground
+   * shader as well as by the limb shell (`SKY_GLSL`), a private copy would
+   * redden the rim while leaving the haze over the ground calmly blue — the
+   * exact class of split-brain drift this file exists to make unrepresentable.
+   */
+  readonly warning: { value: number };
   sync(camera: THREE.Camera, tick: number, dtMs: number): void;
 }
 
@@ -82,6 +92,7 @@ export function createView(): View {
   const time = { value: 0 };
   const cameraDistance = { value: 3 };
   const cloudFade = { value: 1 };
+  const warning = { value: 0 };
 
   return {
     cameraPosition,
@@ -90,6 +101,7 @@ export function createView(): View {
     time,
     cameraDistance,
     cloudFade,
+    warning,
     sync(camera: THREE.Camera, tick: number, dtMs: number): void {
       // `matrixWorld` rather than `position`, so this stays correct if the
       // camera is ever parented to something.
