@@ -108,6 +108,21 @@ async function main() {
     await page.waitForTimeout(4000);
     await shoot("4-gameplay");
 
+    // Close working view: zoom to the floor. The clouds must dissolve on the
+    // way in (view.ts, cloudFade) so the terrain under the hand is readable.
+    await page.mouse.move(640, 400);
+    for (let i = 0; i < 14; i++) {
+      await page.mouse.wheel(0, -400);
+      await page.waitForTimeout(120);
+    }
+    await page.waitForTimeout(1200);
+    await shoot("4b-close");
+    for (let i = 0; i < 14; i++) {
+      await page.mouse.wheel(0, 400);
+      await page.waitForTimeout(60);
+    }
+    await page.waitForTimeout(800);
+
     // Force the match to its end quickly: tick the sim hard from the console.
     // (The dev handle exists exactly for this kind of interrogation.)
     const outcome = await page.evaluate(() => {

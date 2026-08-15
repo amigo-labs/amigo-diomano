@@ -121,6 +121,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uGodA;
   uniform vec3 uGodB;
   uniform float uCloudTime;
+  uniform float uCloudFade;
   uniform float uTier;
 
   ${CLOUD_NOISE_GLSL}
@@ -199,9 +200,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     albedo *= exp(-depth * 0.0016);
 
     float lambert = max(dot(n, uSunDirection), 0.0);
-    // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2).
+    // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2),
+    // fading out with the shell as the camera comes in (view.ts, cloudFade) —
+    // a shadow whose cloud has dissolved would crawl over the ground alone.
     if (uTier > 1.5) {
-      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.45;
+      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.45 * uCloudFade;
     }
     vec3 viewDir = normalize(uCameraPosition - vWorld);
     // Soft camera-anchored fill so the night side stays readable (§7.2). Small:
@@ -250,6 +253,7 @@ export function createPlanet(sim: Sim, view: View): Planet {
       uSunDirection: view.sunDirection,
       uCameraPosition: view.cameraPosition,
       uCloudTime: view.cloudTime,
+      uCloudFade: view.cloudFade,
       uSeaRadius: { value: BASE_RADIUS },
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },

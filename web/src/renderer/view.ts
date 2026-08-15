@@ -57,6 +57,18 @@ export interface View {
   readonly time: { value: number };
   /** Distance from the planet centre, for distance-keyed shading. */
   readonly cameraDistance: { value: number };
+  /**
+   * Cloud visibility keyed to the camera distance: 1 pulled back, 0 close in.
+   *
+   * The cloud shell sits at 1.065 radii and the camera's floor is 1.35, so the
+   * eye can never physically pass under the clouds — but sculpting is done at
+   * the close end, and a cloud bank parked over the working area hides exactly
+   * the terrain the player is trying to read. Fading the cover out on approach
+   * *is* descending below the weather, done in the only axis available. Shared
+   * here because the terrain's ground shadows must fade in step with the shell,
+   * or shadows of vanished clouds crawl over the ground on their own.
+   */
+  readonly cloudFade: { value: number };
   sync(camera: THREE.Camera, tick: number, dtMs: number): void;
 }
 
@@ -69,6 +81,7 @@ export function createView(): View {
   const cloudTime = { value: 0 };
   const time = { value: 0 };
   const cameraDistance = { value: 3 };
+  const cloudFade = { value: 1 };
 
   return {
     cameraPosition,
@@ -76,11 +89,18 @@ export function createView(): View {
     cloudTime,
     time,
     cameraDistance,
+    cloudFade,
     sync(camera: THREE.Camera, tick: number, dtMs: number): void {
       // `matrixWorld` rather than `position`, so this stays correct if the
       // camera is ever parented to something.
       cameraPosition.value.setFromMatrixPosition(camera.matrixWorld);
       cameraDistance.value = cameraPosition.value.length();
+      // Full cover from 2.15 radii out, fully dissolved by 1.55 — the close
+      // half of the zoom range works under a clear sky. BASE_RADIUS is 1, so
+      // the distance already is in radii. Smoothstep, computed once here
+      // rather than per-fragment in two shaders.
+      const t = Math.min(Math.max((cameraDistance.value - 1.55) / (2.15 - 1.55), 0), 1);
+      cloudFade.value = t * t * (3 - 2 * t);
       const angle = (tick / DAY_TICKS) * Math.PI * 2;
       sunDirection.value.set(Math.cos(angle), 0.42, Math.sin(angle)).normalize();
       // Simulation time, so clouds move at a rate a player can relate to the
