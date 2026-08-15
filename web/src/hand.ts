@@ -23,6 +23,22 @@ import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirection, pickCell } from "./render
 /** Screen pixels of vertical drag per terrace command. */
 const DRAG_PIXELS_PER_STEP = 14;
 
+/**
+ * A press that moved less than this (squared pixels) and released within
+ * `CLICK_MAX_MS` is a click. Distance from the *down point*, not a residue of
+ * the step accumulator: the old test compared against what was left of
+ * `dragOriginY` after steps were consumed, so nearly every sculpting drag
+ * ended by accidentally teleporting the population.
+ */
+const CLICK_SLOP_SQ = 5 * 5;
+const CLICK_MAX_MS = 400;
+
+/** Cap on queued terrace steps: a wild flick drains for at most ~0.8 s. */
+const MAX_PENDING_STEPS = 24;
+
+/** Mana at which the palm starts its "the big one is affordable" pulse. */
+const PULSE_THRESHOLD = 2500;
+
 export interface Target {
   face: number;
   x: number;
@@ -37,6 +53,8 @@ export interface Hand {
   beforeTick(): void;
   /** Update the visual. `alpha` is the sub-tick interpolation factor. */
   sync(alpha: number): void;
+  /** Briefly dim the palm to a dull red: the diegetic "no". */
+  flash(): void;
 }
 
 export function createHand(
@@ -44,6 +62,8 @@ export function createHand(
   camera: OrbitCamera,
   canvas: HTMLCanvasElement,
   player: number,
+  /** Called for casts that cost mana (the magnet), so the feedback tracker sees them. */
+  onCast?: (verb: number) => void,
 ): Hand {
   const group = new THREE.Group();
 
@@ -80,6 +100,24 @@ export function createHand(
       depthWrite: false,
     }),
   );
+  // Collected pickup charges, shown as gold motes orbiting the palm. Without
+  // these the free-single-use mechanic (§5.3) is entirely invisible: the sim
+  // grants the charge and nothing anywhere tells the player they hold one.
+  const motes: THREE.Mesh[] = [];
+  const moteMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffd75e,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  for (let i = 0; i < 3; i++) {
+    const mote = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8), moteMaterial);
+    mote.visible = false;
+    motes.push(mote);
+    group.add(mote);
+  }
+
   group.add(palm, fill, ring);
 
   const raycaster = new THREE.Raycaster();
@@ -91,6 +129,17 @@ export function createHand(
   /** Accumulated steps not yet emitted. Positive raises, negative lowers. */
   let pendingSteps = 0;
   let modifier = 0;
+  /** Where the press started and how far it ever strayed — the click test. */
+  let downX = 0;
+  let downY = 0;
+  let downT = 0;
+  let movedSq = 0;
+  /** Where queued steps keep landing after the button is released. */
+  let drainTarget: Target | null = null;
+  /** Modifier for the post-release drain (live `modifier` resets on release). */
+  let drainModifier = 0;
+  /** `performance.now()` until which the palm shows the refusal flash. */
+  let flashUntil = 0;
 
   /**
    * Which cell the pointer is over.
@@ -132,16 +181,29 @@ export function createHand(
     current = cell;
   };
 
+  /** §5.3's modifiers, read live so releasing shift mid-drag takes effect. */
+  const readModifier = (ev: PointerEvent | MouseEvent): number =>
+    (ev.shiftKey ? MOD.THROWN : 0) |
+    (ev.altKey ? MOD.INCREASED : 0) |
+    (ev.ctrlKey ? MOD.EXTREME : 0);
+
   canvas.addEventListener("pointermove", (ev) => {
     pointer.x = (ev.clientX / innerWidth) * 2 - 1;
     pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
     if (dragging) {
+      const dx = ev.clientX - downX;
+      const dyTotal = ev.clientY - downY;
+      movedSq = Math.max(movedSq, dx * dx + dyTotal * dyTotal);
+      modifier = readModifier(ev);
       // Vertical drag distance decides how much and which way. Upward raises,
       // which is the only mapping anybody guesses correctly.
       const dy = dragOriginY - ev.clientY;
       const steps = Math.trunc(dy / DRAG_PIXELS_PER_STEP);
       if (steps !== 0) {
-        pendingSteps += steps;
+        pendingSteps = Math.max(
+          -MAX_PENDING_STEPS,
+          Math.min(MAX_PENDING_STEPS, pendingSteps + steps),
+        );
         dragOriginY -= steps * DRAG_PIXELS_PER_STEP;
       }
     }
@@ -152,25 +214,38 @@ export function createHand(
     if (ev.button !== 0) return;
     dragging = true;
     dragOriginY = ev.clientY;
+    downX = ev.clientX;
+    downY = ev.clientY;
+    downT = performance.now();
+    movedSq = 0;
+    // A fresh press abandons whatever a previous flick left queued: the player
+    // has visibly moved on.
     pendingSteps = 0;
+    drainTarget = null;
     // Thrown vs. poured, increased/extreme (§5.3) as drag modifiers, so the
     // constant verb stays a single uninterrupted motion.
-    modifier =
-      (ev.shiftKey ? MOD.THROWN : 0) |
-      (ev.altKey ? MOD.INCREASED : 0) |
-      (ev.ctrlKey ? MOD.EXTREME : 0);
+    modifier = readModifier(ev);
     canvas.setPointerCapture(ev.pointerId);
   });
 
   const endDrag = (ev: PointerEvent): void => {
     if (!dragging) return;
     dragging = false;
-    // A click with no drag places the papal magnet — the only command in the
-    // game (§5.1).
-    if (Math.abs(dragOriginY - ev.clientY) < DRAG_PIXELS_PER_STEP && current) {
+    // A click — a press that never strayed and released promptly — places the
+    // papal magnet, the only command in the game (§5.1). Anything that moved
+    // is a sculpt, however its pixel count divided into steps.
+    const isClick = movedSq < CLICK_SLOP_SQ && performance.now() - downT < CLICK_MAX_MS;
+    if (isClick && current) {
       sim.push(player, VERB.MAGNET, current.face, current.x, current.y, 0);
+      onCast?.(VERB.MAGNET);
+      pendingSteps = 0;
+    } else if (pendingSteps !== 0 && current) {
+      // A fast flick accumulates more steps than the drag had ticks; they
+      // drain one per tick where the drag ended instead of being discarded.
+      drainTarget = current;
+      drainModifier = modifier;
     }
-    pendingSteps = 0;
+    modifier = 0;
     if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
   };
   canvas.addEventListener("pointerup", endDrag);
@@ -188,25 +263,32 @@ export function createHand(
   const targetPosition = new THREE.Vector3();
   /** `RingGeometry` lies in the XY plane, so its normal is +Z. Hoisted. */
   const ringNormal = new THREE.Vector3(0, 0, 1);
+  /** Scratch for the mote orbit, hoisted off the frame loop. */
+  const moteOffset = new THREE.Vector3();
 
   return {
     group,
     target: () => current,
 
     beforeTick(): void {
-      if (!current || pendingSteps === 0) return;
+      if (pendingSteps === 0) return;
+      // While dragging the steps land under the live pointer; after release
+      // they keep draining where the drag ended.
+      const at = dragging ? current : drainTarget;
+      if (!at) return;
       // One terrace step per tick at most: the simulation applies exactly one
-      // command per verb per tick, and queueing twenty would make a fast flick
-      // dig a canyon.
+      // command per verb per tick, and queueing twenty at once would make a
+      // fast flick dig a canyon in a single tick.
       const step = pendingSteps > 0 ? 1 : -1;
       pendingSteps -= step;
+      if (pendingSteps === 0 && !dragging) drainTarget = null;
       sim.push(
         player,
         step > 0 ? VERB.RAISE : VERB.LOWER,
-        current.face,
-        current.x,
-        current.y,
-        modifier,
+        at.face,
+        at.x,
+        at.y,
+        dragging ? modifier : drainModifier,
       );
     },
 
@@ -248,15 +330,54 @@ export function createHand(
       mat.color.setHex(material === 1 ? 0x4fa8d8 : material === 2 ? 0xff6a2a : 0xc9a06a);
 
       // Mana as a glow on the palm: more mana, brighter hand. Diegetic, and it
-      // reads peripherally without ever being a number (§8).
-      const mana = Math.min(sim.e.dio_mana(player) / 800, 1);
-      (palm.material as THREE.MeshBasicMaterial).opacity = 0.2 + mana * 0.45;
+      // reads peripherally without ever being a number (§8). The sqrt curve is
+      // anchored to the cost tiers — the old linear /800 saturated at 8% of
+      // the mana range, so "can afford an earthquake" and "can afford
+      // armageddon" looked identical. Above the armageddon price the palm
+      // pulses gently: the big one is affordable, still without a number.
+      const now = performance.now();
+      const mana = sim.e.dio_mana(player);
+      const glow = Math.min(Math.sqrt(mana / PULSE_THRESHOLD), 1);
+      const pulse = mana >= PULSE_THRESHOLD ? Math.sin(now / 240) * 0.06 : 0;
+      const palmMat = palm.material as THREE.MeshBasicMaterial;
+      if (now < flashUntil) {
+        // The refusal: a dull red dip, unmistakably "no" without a toast.
+        palmMat.color.setHex(0xb03a2a);
+        palmMat.opacity = 0.55;
+      } else {
+        palmMat.color.setHex(0xfff0d8);
+        palmMat.opacity = 0.18 + glow * 0.5 + pulse;
+      }
+
+      // Collected pickup charges orbit the palm.
+      let charges = 0;
+      for (let p = 0; p < 8; p++) charges += sim.e.dio_free_uses(player, p);
+      for (let i = 0; i < motes.length; i++) {
+        const mote = motes[i];
+        if (!mote) continue;
+        mote.visible = i < charges;
+        if (!mote.visible) continue;
+        const phase = now / 800 + (i * Math.PI * 2) / 3;
+        mote.scale.setScalar(cellScale * 0.25);
+        moteOffset
+          .set(Math.cos(phase), Math.sin(phase * 0.7), Math.sin(phase))
+          .normalize()
+          .multiplyScalar(cellScale * 2.2);
+        mote.position
+          .copy(position)
+          .addScaledVector(dir, Math.sin(phase * 2.7) * cellScale * 0.4)
+          .add(moteOffset);
+      }
 
       // Footprint ring, lying flat on the surface.
       ring.position.copy(dir).multiplyScalar(surface + 0.002);
       ring.quaternion.setFromUnitVectors(ringNormal, dir);
       const radius = 1 + (modifier & MOD.THROWN ? 1 : 0) + (modifier & MOD.EXTREME ? 3 : 0);
       ring.scale.setScalar(cellScale * (radius + 0.5) * 2);
+    },
+
+    flash(): void {
+      flashUntil = performance.now() + 180;
     },
   };
 }

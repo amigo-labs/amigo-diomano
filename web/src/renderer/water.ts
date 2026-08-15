@@ -21,6 +21,8 @@ export interface Water {
   readonly mesh: THREE.Group;
   readonly material: THREE.ShaderMaterial;
   sync(): void;
+  /** Full re-upload after an in-place world reset. See `Planet.refreshAll`. */
+  refreshAll(): void;
 }
 
 const VERTEX_SHADER = /* glsl */ `
@@ -240,6 +242,17 @@ export function createWater(sim: Sim, view: View): Water {
       // `uTime` is the shared render clock in `view.ts`; nothing to set here.
       // It drives ripples only, and a ripple phase must never be able to reach
       // simulation state (§10).
+    },
+
+    refreshAll(): void {
+      // Drop the wet-set cache too: a reset world may coincidentally match the
+      // old signature and skip the index rebuild it needs.
+      haveSignature = false;
+      rebuildIndices();
+      for (const a of [position, attrib]) {
+        a.clearUpdateRanges();
+        a.needsUpdate = true;
+      }
     },
   };
 }

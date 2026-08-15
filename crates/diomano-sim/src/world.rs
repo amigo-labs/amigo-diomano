@@ -556,6 +556,10 @@ pub struct MapConfig {
     /// Scripted opponent (this run only; not part of the shipped ruleset).
     pub ai_enabled: u8,
     pub ai_player: u8,
+    /// Keep simulating after the outcome is decided. Off for real matches —
+    /// an ended world freezes — but the §6.3 corpus needs 20,000 ticks of
+    /// activity from matches whose outcome lands around tick 10,000.
+    pub endless: u8,
 }
 
 impl Default for MapConfig {
@@ -577,9 +581,16 @@ impl MapConfig {
         escalation: 115,
         wave_strength: 48,
         power_enabled: [1, 1, 1, 0, 1, 1, 1, 1],
-        power_cost: [0, 20, 120, 200, 260, 400, 700, 4000],
+        // Armageddon at 2,500 is roughly a minute of late-game accrual — see
+        // `armageddon_is_earnable_in_a_match` — so the stalemate breaker is
+        // reachable exactly when a stalemate exists and not before. At the
+        // original 4,000 a whole match's income could not buy it. Flood is
+        // priced above volcano because it is board-wide and irreversible
+        // (`powers::FLOOD_CAP` bounds it).
+        power_cost: [0, 20, 120, 200, 260, 600, 700, 2500],
         ai_enabled: 0,
         ai_player: 1,
+        endless: 0,
     };
 }
 
@@ -613,13 +624,15 @@ pub struct TideState {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AiState {
     pub script_pc: u16,
+    /// Completed passes through the current script.
     pub repeat: u16,
     pub timer: u32,
     pub cursor: u32,
     pub anchor_face: u8,
     pub anchor_x: u8,
     pub anchor_y: u8,
-    pub _pad: u8,
+    /// 0 = tutorial curriculum, 1 = war. See `ai::PHASE_WAR`.
+    pub phase: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -784,7 +797,7 @@ impl World {
                 anchor_face: 0,
                 anchor_x: 0,
                 anchor_y: 0,
-                _pad: 0,
+                phase: 0,
             },
             magnet: [Magnet { face: 0, x: 0, y: 0, active: 0, leader: u16::MAX, _pad: 0 }; PLAYERS],
             hand: [Hand { material: HAND_EARTH, _pad: 0, amount: 0 }; PLAYERS],
@@ -1250,6 +1263,20 @@ impl World {
     /// scripted opponent, which emits ordinary commands and is therefore applied
     /// through exactly the same path as player input.
     pub fn tick(&mut self, commands: &[Command]) {
+        // An ended world freezes: commands are ignored (no post-match
+        // griefing), the sea settles at its base, and only the tick counter
+        // and the 30-tick hash cadence keep advancing so lockstep peers stay
+        // comparable while the final tableau is on screen.
+        if self.outcome != 0 && self.cfg.endless == 0 {
+            self.tide.offset = 0;
+            self.sea_level = self.sea_base;
+            if self.tick.is_multiple_of(30) {
+                self.last_hash = self.state_hash();
+            }
+            self.tick = self.tick.wrapping_add(1);
+            return;
+        }
+
         // 1. ghost border copy
         self.ghost_copy_all();
 
@@ -1707,5 +1734,50 @@ mod tests {
         // it, or an innocuous copy-order difference would read as a desync.
         w.height[idx_i(0, -1, 5)] = 12_345;
         assert_eq!(w.state_hash(), base);
+    }
+
+    #[test]
+    fn an_ended_world_ignores_commands_and_freezes() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        w.mana[0] = 9_000 << 16;
+        w.outcome = 1;
+        let tick_before = w.tick;
+        // Everything hashed must hold still; only the tick may advance, so
+        // compare hashes rather than a hand-picked list of fields.
+        w.tick = 0;
+        let frozen = w.state_hash();
+        w.tick = tick_before;
+
+        let cmd =
+            Command { tick: 0, x: 10, y: 10, player: 0, verb: VERB_VOLCANO, face: 0, modifier: 0 };
+        for _ in 0..100 {
+            w.tick(&[cmd]);
+        }
+        assert_eq!(
+            w.census.verb_applied[VERB_VOLCANO as usize], 0,
+            "a decided match accepted a command"
+        );
+        let tick_after = w.tick;
+        w.tick = 0;
+        assert_eq!(w.state_hash(), frozen, "a decided match kept simulating");
+        assert_eq!(tick_after, tick_before + 100, "the tick counter stalled");
+    }
+
+    #[test]
+    fn an_endless_world_keeps_running_after_the_outcome() {
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.endless = 1;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        w.mana[0] = 9_000 << 16;
+        w.outcome = 1;
+        let cmd =
+            Command { tick: 0, x: 10, y: 10, player: 0, verb: VERB_VOLCANO, face: 0, modifier: 0 };
+        w.tick(&[cmd]);
+        assert_eq!(
+            w.census.verb_applied[VERB_VOLCANO as usize], 1,
+            "endless mode still froze the world"
+        );
     }
 }

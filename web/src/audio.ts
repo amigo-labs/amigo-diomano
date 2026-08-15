@@ -21,8 +21,16 @@ import { VERB } from "./main";
 
 export interface Audio {
   resume(): Promise<void>;
+  suspend(): Promise<void>;
   sync(sim: Sim, dtMs: number): void;
-  gesture(verb: number): void;
+  /** Confirmation one-shot for an applied verb. `gain` scales it (opponent casts play quieter). */
+  gesture(verb: number, gain?: number): void;
+  /** Two falling dull pings: the diegetic "no" for a refused or empty cast. */
+  refusal(): void;
+  /** Earth being worked. Bumped per applied raise/lower, decays in `sync`. */
+  sculpt(): void;
+  /** Match-end sting. */
+  sting(kind: "win" | "loss" | "draw"): void;
 }
 
 export function createAudio(): Audio {
@@ -30,7 +38,10 @@ export function createAudio(): Audio {
   let master: GainNode | null = null;
   let surfGain: GainNode | null = null;
   let windGain: GainNode | null = null;
+  let sculptGain: GainNode | null = null;
   let smoothedFlow = 0;
+  /** Leaky integrator for the sculpt bed: work bumps it, `sync` drains it. */
+  let sculptLevel = 0;
 
   const ensure = (): AudioContext | null => {
     if (ctx) return ctx;
@@ -71,6 +82,22 @@ export function createAudio(): Audio {
     wind.connect(windFilter).connect(windGain).connect(master);
     wind.start();
 
+    // Sculpt: the same noise, band-passed low and gated by `sculptLevel`, so
+    // continuous terraforming sounds like ground being worked instead of a
+    // per-terrace machine gun. Raise/lower had no sound at all before this —
+    // 90% of playtime was silent.
+    const grind = ctx.createBufferSource();
+    grind.buffer = makeNoise(ctx, 4);
+    grind.loop = true;
+    const grindFilter = ctx.createBiquadFilter();
+    grindFilter.type = "bandpass";
+    grindFilter.frequency.value = 240;
+    grindFilter.Q.value = 0.8;
+    sculptGain = ctx.createGain();
+    sculptGain.gain.value = 0;
+    grind.connect(grindFilter).connect(sculptGain).connect(master);
+    grind.start();
+
     return ctx;
   };
 
@@ -101,6 +128,10 @@ export function createAudio(): Audio {
       if (c && c.state === "suspended") await c.resume();
     },
 
+    async suspend(): Promise<void> {
+      if (ctx && ctx.state === "running") await ctx.suspend();
+    },
+
     sync(sim: Sim, dtMs: number): void {
       if (!ctx || !surfGain || !windGain) return;
 
@@ -126,30 +157,65 @@ export function createAudio(): Audio {
       const toImpact = sim.e.dio_ticks_to_impact();
       const warning = phase === 1 ? 1 - Math.min(toImpact / 300, 1) : phase === 2 ? 1 : 0;
       windGain.gain.value = 0.04 + warning * 0.22;
+
+      // The sculpt bed drains on its own; a lone terrace step is a scuff, a
+      // held drag a steady grind.
+      sculptLevel = Math.max(0, sculptLevel - 0.0022 * dtMs);
+      if (sculptGain) sculptGain.gain.value = Math.min(sculptLevel, 0.6) * 0.3;
     },
 
-    gesture(verb: number): void {
+    gesture(verb: number, gain = 1): void {
       switch (verb) {
+        case VERB.MAGNET:
+          // The only command in the game finally sounds like one: a small
+          // bell, root plus a fifth.
+          ping(660, 0.35, "sine", 0.2 * gain);
+          ping(990, 0.3, "sine", 0.1 * gain);
+          break;
         case VERB.VOLCANO:
-          ping(70, 1.4, "sawtooth", 0.35);
+          ping(70, 1.4, "sawtooth", 0.35 * gain);
           break;
         case VERB.FLOOD:
-          ping(120, 1.1, "sine", 0.3);
+          ping(120, 1.1, "sine", 0.3 * gain);
           break;
         case VERB.EARTHQUAKE:
-          ping(48, 1.6, "square", 0.28);
+          ping(48, 1.6, "square", 0.28 * gain);
           break;
         case VERB.SWAMP:
-          ping(190, 0.7, "triangle", 0.22);
+          ping(190, 0.7, "triangle", 0.22 * gain);
           break;
         case VERB.CHAMPION:
-          ping(520, 0.5, "sawtooth", 0.24);
+          ping(520, 0.5, "sawtooth", 0.24 * gain);
           break;
         case VERB.ARMAGEDDON:
-          ping(38, 3.2, "sawtooth", 0.45);
+          ping(38, 3.2, "sawtooth", 0.45 * gain);
           break;
         default:
-          ping(320, 0.18, "sine", 0.14);
+          ping(320, 0.18, "sine", 0.14 * gain);
+      }
+    },
+
+    refusal(): void {
+      ping(210, 0.09, "triangle", 0.12);
+      setTimeout(() => ping(165, 0.11, "triangle", 0.12), 90);
+    },
+
+    sculpt(): void {
+      ensure();
+      sculptLevel = Math.min(sculptLevel + 0.18, 1);
+    },
+
+    sting(kind: "win" | "loss" | "draw"): void {
+      if (kind === "win") {
+        // A rising triad, staggered.
+        ping(330, 0.9, "sine", 0.3);
+        setTimeout(() => ping(415, 0.9, "sine", 0.3), 220);
+        setTimeout(() => ping(495, 1.4, "sine", 0.32), 440);
+      } else if (kind === "loss") {
+        ping(110, 2.5, "sawtooth", 0.28);
+        setTimeout(() => ping(82, 2.2, "sawtooth", 0.2), 500);
+      } else {
+        ping(220, 1.6, "sine", 0.24);
       }
     },
   };

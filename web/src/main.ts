@@ -26,12 +26,13 @@ import { createHand } from "./hand";
 import { createLoop } from "./loop";
 import { createAtmosphere } from "./renderer/atmosphere";
 import { createEffects } from "./renderer/effects";
-import { createPlanet } from "./renderer/planet";
+import { cellDirection, createPlanet } from "./renderer/planet";
 import { createPost } from "./renderer/post";
 import { createTrail } from "./renderer/trail";
 import { createVegetation } from "./renderer/vegetation";
 import { createView } from "./renderer/view";
 import { createWater } from "./renderer/water";
+import { createUi } from "./ui";
 
 // ---------------------------------------------------------------------------
 // Verbs and modifiers
@@ -142,6 +143,7 @@ interface RawExports {
   dio_magnet_y(player: number): number;
   dio_free_uses(player: number, power: number): number;
   dio_outcome(): number;
+  dio_wave_count(): number;
   dio_score(player: number, wave: number): number;
   dio_state_hash_lo(): number;
   dio_state_hash_hi(): number;
@@ -510,6 +512,7 @@ async function boot(): Promise<void> {
     const terrain = Number.parseInt(params.get("terrain") ?? "0", 10) || 0;
     const tier: QualityTier = params.get("tier") === "1" ? 1 : 2;
     const ai = params.get("ai") !== "0";
+    let currentSeed = seed;
 
     const sim = await loadSim("/diomano.wasm", seed, terrain, ai);
 
@@ -543,7 +546,19 @@ async function boot(): Promise<void> {
 
     const post = createPost(renderer, scene, camera.camera, tier);
     const audio = createAudio();
-    const hand = createHand(sim, camera, canvas, LOCAL_PLAYER);
+    const ui = createUi();
+
+    // Truthful cast feedback. A push is only a *request*: the sim may refuse
+    // it on cost or availability, and the old optimistic confirm played the
+    // swamp's sound for a power the manifest disables. So every tracked cast
+    // waits for its own verb-event — written past the sim's gating — and a
+    // cast whose event never arrives gets an audible refusal instead.
+    const pendingCasts: { verb: number; deadline: number }[] = [];
+    const trackCast = (verb: number): void => {
+      pendingCasts.push({ verb, deadline: sim.e.dio_tick_count() + 4 });
+    };
+
+    const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, trackCast);
     const trail = createTrail();
     const effects = createEffects(sim);
     scene.add(hand.group, trail.object, effects.group);
@@ -553,9 +568,14 @@ async function boot(): Promise<void> {
       canvas,
       (verb, modifier) => {
         const target = hand.target();
-        if (!target) return;
+        if (!target) {
+          // A gesture drawn over empty space used to vanish silently.
+          audio.refusal();
+          hand.flash();
+          return;
+        }
         sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
-        audio.gesture(verb);
+        trackCast(verb);
       },
       gestureArmed,
     );
@@ -572,8 +592,92 @@ async function boot(): Promise<void> {
     addEventListener("resize", applySize);
     applySize();
 
+    // The sim is gated behind the title card: the planet renders idle behind
+    // the overlay, but ticks only start once the player is actually looking —
+    // otherwise the opponent builds a lead against someone reading the
+    // controls.
+    let matchStarted = false;
+    /** Non-zero once the end card has been handled; mirrors `dio_outcome`. */
+    let handledOutcome = 0;
+
+    /** Local-player verbs whose one-shot only plays when the sim applied them. */
+    const consumeVerbFeedback = (events: VerbEventView[]): void => {
+      const tick = sim.e.dio_tick_count();
+      for (const ev of events) {
+        if (ev.player === LOCAL_PLAYER) {
+          if (ev.verb === VERB.RAISE || ev.verb === VERB.LOWER) {
+            audio.sculpt();
+            continue;
+          }
+          const i = pendingCasts.findIndex((p) => p.verb === ev.verb);
+          if (i >= 0) {
+            pendingCasts.splice(i, 1);
+            audio.gesture(ev.verb);
+          }
+        } else if (ev.verb !== VERB.RAISE && ev.verb !== VERB.LOWER && ev.verb !== VERB.SET_HAND) {
+          // The opponent's casts, quieter. This is how the other god becomes
+          // audible — the client sees its own commands but never theirs, so
+          // the applied-verb ring is the only source (§ effects, same idea).
+          audio.gesture(ev.verb, 0.4);
+        }
+      }
+      // Casts the sim never applied: refused on cost, or a disabled power.
+      for (let i = pendingCasts.length - 1; i >= 0; i--) {
+        const p = pendingCasts[i];
+        if (p && tick > p.deadline) {
+          pendingCasts.splice(i, 1);
+          audio.refusal();
+          hand.flash();
+        }
+      }
+    };
+
+    const restart = (newSeed: boolean): void => {
+      const nextSeed = newSeed ? (Math.random() * 0xffffffff) >>> 0 : currentSeed;
+      currentSeed = nextSeed;
+      // Keep the match shareable: the seed lives in the URL either way.
+      const url = new URL(location.href);
+      url.searchParams.set("seed", nextSeed.toString(16));
+      history.replaceState(null, "", url);
+      // In-place re-init: `World::init` starts from `zeroed()` and memory
+      // never grows, so every view stays valid — and the AudioContext stays
+      // unlocked, which a page reload would lose.
+      sim.e.dio_init(nextSeed, terrain, ai ? 1 : 0);
+      seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
+      pendingCasts.length = 0;
+      handledOutcome = 0;
+      // `dio_init` re-meshes, but its dirty flags are cleared inside the next
+      // `meshUpdate` before `sync` reads them and the content hashes then
+      // match — without a full re-upload the screen keeps the dead world.
+      sim.meshUpdate();
+      planet.refreshAll();
+      water.refreshAll();
+      camera.drift(0);
+      ui.hide();
+    };
+
+    const onMatchEnd = (outcome: number): void => {
+      handledOutcome = outcome;
+      audio.sting(outcome === 1 ? "win" : outcome === 2 ? "loss" : "draw");
+      // The frozen planet is the epilogue tableau; drift it slowly and let the
+      // sting land before the card comes up.
+      camera.drift(0.05);
+      const waves: { mine: number; theirs: number }[] = [];
+      const waveCount = Math.min(sim.e.dio_wave_count(), 16);
+      for (let wave = 0; wave < waveCount; wave++) {
+        waves.push({
+          mine: sim.e.dio_score(LOCAL_PLAYER, wave),
+          theirs: sim.e.dio_score(1 - LOCAL_PLAYER, wave),
+        });
+      }
+      setTimeout(() => {
+        if (handledOutcome !== 0) ui.showGameOver(outcome, waves, restart);
+      }, 2500);
+    };
+
     const loop = createLoop({
       update() {
+        if (!matchStarted) return;
         hand.beforeTick();
         sim.tick();
       },
@@ -597,9 +701,16 @@ async function boot(): Promise<void> {
         // are visible too and a power refused on cost throws nothing.
         const fired = sim.verbEvents(seenVerbEvents);
         seenVerbEvents = fired.written;
+        consumeVerbFeedback(fired.events);
         camera.shake(effects.sync(sim, fired.events, dtMs));
         atmosphere.sync(sim.e.dio_tide_phase(), sim.e.dio_ticks_to_impact());
         audio.sync(sim, dtMs);
+
+        // The match result, finally read by someone. The sim freezes itself
+        // once the outcome is decided; the client's job is the presentation.
+        const outcome = sim.e.dio_outcome();
+        if (outcome !== 0 && handledOutcome === 0) onMatchEnd(outcome);
+
         post.render();
       },
     });
@@ -622,11 +733,50 @@ async function boot(): Promise<void> {
       trail,
     };
 
+    // Honest tab handling: a hidden tab pauses the world instead of silently
+    // deleting up to a minute of simulation on return (the catch-up cap drops
+    // whatever rAF starvation accumulated). `loop.start` resets the
+    // accumulator, so resuming produces no burst.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        loop.stop();
+        void audio.suspend();
+      } else {
+        loop.start();
+        if (matchStarted) void audio.resume();
+      }
+    });
+
+    // Render first — the planet turns idly behind the title card — and only
+    // start ticking and listening for gestures once the player clicks through.
     loop.start();
+    camera.drift(0.03);
+    await ui.showTitle();
+    // The title click is the browsers' required activation gesture: unlock
+    // audio here and nothing is lost.
+    void audio.resume();
+    camera.drift(0);
+    matchStarted = true;
     gestures.start();
-    // Browsers require a gesture before audio may start; the first click is
-    // also the first thing a player does, so nothing is lost.
-    canvas.addEventListener("pointerdown", () => void audio.resume(), { once: true });
+
+    // A one-time tour: two seconds on the opponent's spawn — the other god
+    // exists, acts, and its first lessons are audible — then an eased pan
+    // home. Any input cancels it. Directions come from the settlements the
+    // sim seeded, so this survives any future spawn change.
+    const homes = sim.settlements();
+    const dirOf = (owner: number): THREE.Vector3 | null => {
+      const own = homes.filter((s) => s.owner === owner);
+      if (own.length === 0) return null;
+      const acc = new THREE.Vector3();
+      for (const s of own) acc.add(cellDirection(s.face, s.x, s.y, sim.N));
+      return acc.normalize();
+    };
+    const enemyDir = dirOf(1 - LOCAL_PLAYER);
+    const homeDir = dirOf(LOCAL_PLAYER);
+    if (enemyDir && homeDir) {
+      camera.aimAt(enemyDir, true);
+      setTimeout(() => camera.intro(homeDir, 4500), 2000);
+    }
   } catch (err) {
     canvas.style.display = "none";
     fallback.style.display = "grid";

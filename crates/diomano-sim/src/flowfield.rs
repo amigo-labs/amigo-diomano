@@ -14,6 +14,14 @@ use crate::world::{NO_FLOW, PLAYERS, TIER_STRENGTH, World, idx, live_neighbour};
 /// Unreachable marker for the BFS distance scratch.
 pub const UNREACHED: u16 = u16::MAX;
 
+/// Base distance for the fallback component when a magnet is active.
+///
+/// Cells the magnet cannot reach are seeded from the no-magnet targets at this
+/// offset, so magnet distances and fallback distances can never interleave —
+/// the longest possible path (every cell) is far below it, and
+/// `saturating_add` keeps fallback growth below `UNREACHED`.
+pub const FALLBACK_BASE: u16 = 0x8000;
+
 /// Cells per point of tier strength (§4.5 `[START]` `INFLUENCE_REACH = 6`).
 pub const INFLUENCE_REACH: i32 = 6;
 
@@ -28,42 +36,63 @@ fn rebuild_for(w: &mut World, player: usize) {
     w.dist[player].fill(UNREACHED);
     w.flow[player].fill(NO_FLOW);
 
-    let mut head = 0usize;
-    let mut tail = 0usize;
-
     // Targets, in a fixed order: the papal magnet first, then settlements by
     // slot index. The magnet is the only command in the game (§5.1), so it
     // outranks everything a walker would otherwise wander towards.
     if w.magnet[player].active != 0 {
         let m = w.magnet[player];
         let c = idx(m.face as usize, m.x as usize, m.y as usize);
+        let mut tail = 0usize;
         if w.dist[player][c] == UNREACHED {
             w.dist[player][c] = 0;
             w.queue[tail] = c as u32;
             tail += 1;
         }
+        flood(w, player, tail);
+
+        // Second pass over the cells the magnet could not reach, seeded from
+        // the no-magnet targets at FALLBACK_BASE. A magnet across water must
+        // mean "the army regroups at home", never "the army freezes": with no
+        // fallback every cut-off walker holds NO_FLOW until the magnet moves.
+        // Pass one never revisits a reached cell, so magnet flow is untouched.
+        let tail = seed_home_targets(w, player, FALLBACK_BASE);
+        flood(w, player, tail);
     } else {
-        // No magnet: seek the largest buildable plateau inside own influence
-        // (§4.5). The plateau field is already computed by the settlement pass,
-        // so "largest" costs a scan and no extra search.
-        if let Some(c) = best_plateau(w, player) {
-            w.dist[player][c] = 0;
+        let tail = seed_home_targets(w, player, 0);
+        flood(w, player, tail);
+    }
+}
+
+/// Seed the no-magnet targets — the largest buildable plateau inside own
+/// influence (§4.5), then settlements in slot order — at `base` distance,
+/// skipping cells an earlier pass already reached. Returns the queue tail.
+fn seed_home_targets(w: &mut World, player: usize, base: u16) -> usize {
+    let mut tail = 0usize;
+    if let Some(c) = best_plateau(w, player)
+        && w.dist[player][c] == UNREACHED
+    {
+        w.dist[player][c] = base;
+        w.queue[tail] = c as u32;
+        tail += 1;
+    }
+    for s in &w.settlements {
+        if !s.alive() || s.owner as usize != player {
+            continue;
+        }
+        let c = idx(s.face as usize, s.x as usize, s.y as usize);
+        if w.dist[player][c] == UNREACHED {
+            w.dist[player][c] = base;
             w.queue[tail] = c as u32;
             tail += 1;
         }
-        for s in &w.settlements {
-            if !s.alive() || s.owner as usize != player {
-                continue;
-            }
-            let c = idx(s.face as usize, s.x as usize, s.y as usize);
-            if w.dist[player][c] == UNREACHED {
-                w.dist[player][c] = 0;
-                w.queue[tail] = c as u32;
-                tail += 1;
-            }
-        }
     }
+    tail
+}
 
+/// The BFS itself, over whatever `w.queue[..tail]` holds. Neighbour order is
+/// fixed N, E, S, W and seeds arrive in a fixed order, so this is total.
+fn flood(w: &mut World, player: usize, mut tail: usize) {
+    let mut head = 0usize;
     while head < tail {
         let c = w.queue[head] as usize;
         head += 1;
@@ -437,5 +466,121 @@ mod tests {
             acc
         };
         assert_eq!(make(0, 1), make(9, 3), "influence depends on which slots were used");
+    }
+
+    #[test]
+    fn an_unreachable_magnet_falls_back_to_settlement_seeds() {
+        let mut w = island();
+        // Stale plateau/influence from `init` would add fallback seeds of
+        // their own; zero them so the settlement is the only home target.
+        w.plateau.fill(0);
+        w.influence.fill(0);
+        // Seal the magnet cell in by drowning its four neighbours: pass one
+        // reaches exactly one cell, and the whole rest of the sphere is the
+        // cut-off component that has to fall back rather than freeze.
+        for dir in 0..4usize {
+            let n = live_neighbour(idx(4, 32, 40), dir);
+            w.height[n] = -400;
+            w.water[n] = 800;
+        }
+        w.ghost_copy_all();
+        w.settlements[0] = Settlement {
+            progress: 1000,
+            face: 4,
+            x: 32,
+            y: 10,
+            size: 5,
+            tier: 2,
+            owner: 0,
+            pop: 0,
+            flags: SETTLE_ALIVE,
+        };
+        w.magnet[0] =
+            crate::world::Magnet { face: 4, x: 32, y: 40, active: 1, leader: u16::MAX, _pad: 0 };
+        rebuild(&mut w);
+
+        // The magnet component is exactly its own cell, at distance zero.
+        assert_eq!(w.dist[0][idx(4, 32, 40)], 0);
+
+        // Every other passable cell must flow in the fallback band. The
+        // settlement seed itself sits at FALLBACK_BASE with no outgoing flow,
+        // which is what "at the target" means.
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    if !w.passable(c) || c == idx(4, 32, 40) {
+                        continue;
+                    }
+                    assert!(
+                        w.dist[0][c] >= FALLBACK_BASE,
+                        "cell ({face},{x},{y}) claims magnet reachability"
+                    );
+                    if w.dist[0][c] > FALLBACK_BASE {
+                        assert_ne!(w.flow[0][c], NO_FLOW, "cut-off cell ({face},{x},{y}) froze");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The war depends on this: a magnet dropped on the enemy's spawn plateau
+    /// must be reachable from the *other* spawn through the contact corridor,
+    /// in the magnet component (not the fallback), on the shipped default map.
+    #[test]
+    fn a_magnet_on_the_enemy_spawn_is_reachable_over_the_causeway() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let (f0, x0, y0) = crate::settlements::STARTS[0];
+        let (f1, x1, y1) = crate::settlements::STARTS[1];
+        w.magnet[1] = crate::world::Magnet {
+            face: f0 as u8,
+            x: x0 as u8,
+            y: y0 as u8,
+            active: 1,
+            leader: u16::MAX,
+            _pad: 0,
+        };
+        rebuild(&mut w);
+        let home = idx(f1, x1, y1);
+        assert!(
+            w.dist[1][home] < FALLBACK_BASE,
+            "the far spawn is not in the magnet component (dist {:#x})",
+            w.dist[1][home]
+        );
+    }
+
+    #[test]
+    fn magnet_flow_still_wins_where_both_are_reachable() {
+        // No moat: with everything connected, the fallback pass must find no
+        // unreached cell to seed, and every walk terminates at the magnet.
+        let mut w = island();
+        w.settlements[0] = Settlement {
+            progress: 1000,
+            face: 4,
+            x: 32,
+            y: 10,
+            size: 5,
+            tier: 2,
+            owner: 0,
+            pop: 0,
+            flags: SETTLE_ALIVE,
+        };
+        w.magnet[0] =
+            crate::world::Magnet { face: 4, x: 32, y: 40, active: 1, leader: u16::MAX, _pad: 0 };
+        rebuild(&mut w);
+
+        let target = idx(4, 32, 40);
+        let settlement = idx(4, 32, 10);
+        let mut c = settlement;
+        let mut guard = 0;
+        while c != target {
+            let dir = w.flow[0][c];
+            assert_ne!(dir, NO_FLOW, "hole between settlement and magnet at {c}");
+            assert!(w.dist[0][c] < FALLBACK_BASE, "fallback leaked into the reachable component");
+            c = live_neighbour(c, dir as usize);
+            guard += 1;
+            assert!(guard < 4 * N * 6, "walk from the settlement did not reach the magnet");
+        }
     }
 }

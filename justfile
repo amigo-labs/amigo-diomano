@@ -131,10 +131,9 @@ verify-match n: wasm
     cd web && node tools/verify-cross.mjs ../fixtures/match-{{n}}.log
 
 # Replay the whole §6.3 corpus and check its coverage: ten matches of 20,000
-# ticks, every verb 20+ times, 200+ combat resolutions.
-#
-# The combat criterion is reported as a KNOWN GAP rather than enforced — see the
-# note the command prints, and `CATACLYSM_FROM` in the CLI. `--strict` enforces it.
+# ticks, every verb 20+ times, 200+ combat resolutions — all enforced. The
+# combat criterion stopped being a KNOWN GAP when the contact corridor landed:
+# the two spawns are connected by a causeway, so the armies actually meet.
 verify-corpus:
     cargo run --release -p diomano-cli -- corpus --check-only
 

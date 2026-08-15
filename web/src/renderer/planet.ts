@@ -60,6 +60,14 @@ export interface Planet {
   readonly material: THREE.ShaderMaterial;
   sync(seaLevel: number): void;
   /**
+   * Re-upload every vertex buffer in full. Needed after an in-place world
+   * reset: `dio_init` re-meshes everything, but `Mesh::update` clears the
+   * dirty flags at the top of the next call — before `sync` reads them — and
+   * the content hashes then match, so nothing ever re-uploads and the screen
+   * keeps showing the dead world.
+   */
+  refreshAll(): void;
+  /**
    * Which cell a direction from the planet centre points at.
    *
    * Inverts the tangent-adjusted cube projection of §3.2, so a click lands on
@@ -113,6 +121,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uGodA;
   uniform vec3 uGodB;
   uniform float uCloudTime;
+  uniform float uCloudFade;
   uniform float uTier;
 
   ${CLOUD_NOISE_GLSL}
@@ -191,9 +200,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     albedo *= exp(-depth * 0.0016);
 
     float lambert = max(dot(n, uSunDirection), 0.0);
-    // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2).
+    // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2),
+    // fading out with the shell as the camera comes in (view.ts, cloudFade) —
+    // a shadow whose cloud has dissolved would crawl over the ground alone.
     if (uTier > 1.5) {
-      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.45;
+      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.45 * uCloudFade;
     }
     vec3 viewDir = normalize(uCameraPosition - vWorld);
     // Soft camera-anchored fill so the night side stays readable (§7.2). Small:
@@ -242,6 +253,7 @@ export function createPlanet(sim: Sim, view: View): Planet {
       uSunDirection: view.sunDirection,
       uCameraPosition: view.cameraPosition,
       uCloudTime: view.cloudTime,
+      uCloudFade: view.cloudFade,
       uSeaRadius: { value: BASE_RADIUS },
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
@@ -312,6 +324,14 @@ export function createPlanet(sim: Sim, view: View): Planet {
       }
       material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
     },
+
+    refreshAll(): void {
+      for (const a of [position, normal, attrib, attrib2]) {
+        a.clearUpdateRanges();
+        a.needsUpdate = true;
+      }
+    },
+
     pick(dir: THREE.Vector3): { face: number; x: number; y: number } {
       return pickCell(dir, sim.N);
     },

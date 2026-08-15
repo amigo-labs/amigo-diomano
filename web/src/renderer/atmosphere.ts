@@ -177,6 +177,7 @@ export function createAtmosphere(view: View): Atmosphere {
     uniforms: {
       uSunDirection: view.sunDirection,
       uTime: view.cloudTime,
+      uCloudFade: view.cloudFade,
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
@@ -193,9 +194,13 @@ export function createAtmosphere(view: View): Atmosphere {
       varying vec3 vWorld;
       uniform vec3 uSunDirection;
       uniform float uTime;
+      uniform float uCloudFade;
       ${CLOUD_NOISE_GLSL}
       void main() {
-        float cover = dioClouds(vDir, uTime);
+        // Clouds dissolve as the camera comes in — the close working range is
+        // "under the weather" (see view.ts, cloudFade). Shared with the ground
+        // shadows so both vanish together.
+        float cover = dioClouds(vDir, uTime) * uCloudFade;
         if (cover <= 0.001) discard;
         // The shell is larger than the planet, so a band of it projects *outside*
         // the planet's silhouette, against space — and clouds drawn there are grey
@@ -214,7 +219,10 @@ export function createAtmosphere(view: View): Atmosphere {
         // night side so clouds do not glow over a dark hemisphere.
         float lambert = max(dot(vDir, uSunDirection), 0.0);
         vec3 colour = mix(vec3(0.42, 0.47, 0.58), vec3(1.0, 0.98, 0.95), lambert);
-        gl_FragColor = vec4(colour, cover * visible * 0.5);
+        // 0.42, down from 0.5: at full opacity the banks read as a milky veil
+        // over the one surface the player has to read (§8 spends the whole
+        // information budget on the world; the clouds must frame it, not fog it).
+        gl_FragColor = vec4(colour, cover * visible * 0.42);
       }
     `,
   });

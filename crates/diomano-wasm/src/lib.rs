@@ -382,6 +382,12 @@ pub extern "C" fn dio_outcome() -> u32 {
     u32::from(world().outcome)
 }
 
+/// How many waves this match plays, so the client can bound a score readout.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_wave_count() -> u32 {
+    u32::from(world().cfg.waves)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_score(player: u32, wave: u32) -> u32 {
     let w = world();
