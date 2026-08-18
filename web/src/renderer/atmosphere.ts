@@ -91,11 +91,10 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
   float dioClouds(vec3 dir, float t) {
     vec3 p = dir * 4.0 + vec3(t * 0.06, 0.0, t * 0.021);
     float v = dioNoise(p) * 0.55 + dioNoise(p * 2.3) * 0.28 + dioNoise(p * 5.1) * 0.17;
-    // Thresholded high on purpose. Clouds are atmosphere, not weather: at much
-    // more than a third cover they stop framing the planet and start hiding the
-    // thing the player is trying to read, and §8 has already spent the entire
-    // information budget on the world itself.
-    return smoothstep(0.55, 0.86, v);
+    // Broken banks, not a veil. 0.55..0.86 still covered most of the sunlit
+    // disk; white at even 0.20 over a dark sea is milk, and that is what made
+    // the day side a painted plastic hemisphere.
+    return smoothstep(0.74, 0.93, v);
   }
 `;
 
@@ -165,7 +164,7 @@ export const SKY_GLSL = /* glsl */ `
    * took from it lands where the sky is supposed to be. Populous horizons are
    * painted with the same bias, for the same reason.
    */
-  const float DIO_GRAZE = 2.0;
+  const float DIO_GRAZE = 2.4;
 
   // Rayleigh-ish: the colour of air with the sun off to one side. Saturated
   // rather than pale, and that is a decision about *this* planet: sunlit sand
@@ -247,7 +246,7 @@ export const SKY_GLSL = /* glsl */ `
    * digging stays earth, the limb stays sky.
    */
   float dioNearHaze(vec3 world, vec3 eye) {
-    return smoothstep(0.35, 1.45, length(eye - world));
+    return smoothstep(0.70, 2.20, length(eye - world));
   }
 `;
 
@@ -287,6 +286,14 @@ const FRAGMENT_SHADER = /* glsl */ `
     // that column is governed entirely by the ray's closest approach to the
     // centre.
     vec3 d = normalize(vWorld - uCameraPosition);
+    // Rays that strike the planet never reach this shell. The ground shaders
+    // already put the air in front of the surface. Without the test, a BackSide
+    // fragment whose closest approach sits *inside* the sphere (h ≈ 0, the
+    // whole tangent column) paints the disk with sky — which is the pale
+    // plastic day-side in every screenshot.
+    float b = length(cross(uCameraPosition, d));
+    float offPlanet = smoothstep(0.992, 1.004, b);
+    if (offPlanet <= 0.001) discard;
     // Closest approach: the lowest point of the ray, where nearly all of its
     // scattering happens and the only place worth asking about the sun. Clamped
     // to the ray rather than the line — for every fragment this shell actually
@@ -310,7 +317,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Additive against black space is identical to compositing over it, so this
     // is the same operator the terrain uses, not an approximation of it.
     vec3 colour = dioAirColour(d, normalize(graze), uSunDirection, uWarning);
-    gl_FragColor = vec4(colour * cover, 1.0);
+    gl_FragColor = vec4(colour * cover * offPlanet, 1.0);
   }
 `;
 
@@ -419,16 +426,14 @@ export function createAtmosphere(view: View): Atmosphere {
         // Lit from the same direction as everything else, and dimmer on the
         // night side so clouds do not glow over a dark hemisphere.
         float lambert = max(dot(vDir, uSunDirection), 0.0);
-        vec3 colour = mix(vec3(0.42, 0.47, 0.58), vec3(1.0, 0.98, 0.95), lambert);
+        vec3 colour = mix(vec3(0.50, 0.54, 0.60), vec3(0.88, 0.90, 0.92), lambert);
         // Through the same air as the ground beneath them. A cloud bank towards
         // the limb that stayed crisp while the terrain around it drowned in haze
         // would read as a decal on the lens rather than as weather in the world.
         vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
         colour = mix(colour, air.rgb, air.a);
-        // 0.20: even 0.42 over a pale sea was a second milky shell, and two
-        // translucent shells stacked into the glass-marble read. Clouds frame
-        // the planet; they must not become its surface.
-        gl_FragColor = vec4(colour, cover * visible * 0.20);
+        // Sparse and thin: clouds frame continents, they do not paint the sea.
+        gl_FragColor = vec4(colour, cover * visible * 0.12);
       }
     `,
   });

@@ -1,13 +1,9 @@
 /**
  * Post-processing. HANDOFF §7.3.
  *
- * Tier 1: FXAA and subtle bloom. FXAA is explicitly *not optional* in the spec,
- * and the reason is specific: instanced trees on a sphere alias badly, and MSAA
- * would cost more on the integrated-graphics reference floor of §7.6 for a worse
- * result on exactly that content.
- *
- * Tier 2 adds a stronger bloom. Tier 3 (SSAO, depth of field, god rays) is out
- * of scope for this run.
+ * Tier 1: FXAA and a tight bloom that only catches lava. FXAA is not
+ * optional: instanced trees on a sphere alias badly. Tier 3 (SSAO, DoF,
+ * god rays) is out of scope.
  *
  * Tone mapping is ACES and lives on the renderer rather than in a pass, so it
  * applies before the composer's colour space conversion.
@@ -36,13 +32,10 @@ export function createPost(
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
 
-  // Subtle at tier 1: bloom is the difference between "lit" and "glowing", and
-  // a god game that glows everywhere loses the diorama read of §7.
-  // Threshold high and strength low, deliberately. The planet fills most of the
-  // frame, so a generous bloom does not pick out highlights — it washes the
-  // whole image to a pale haze, which is the opposite of the crisp diorama
-  // silhouettes §7 asks for.
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.14 : 0.08, 0.35, 0.96);
+  // Tight and high-threshold: the atmosphere rim sits near 1.0 and must
+  // not bloom, or the whole sunlit disk washes to plastic. Lava at 1.75
+  // still clears 1.05.
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.12 : 0.06, 0.18, 1.05);
   composer.addPass(bloom);
 
   // `OutputPass` before FXAA, not after. FXAA thresholds on luma, so it needs

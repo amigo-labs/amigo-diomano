@@ -94,53 +94,40 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 n = normalize(vNormal);
 
     if (uTier > 1.5) {
-      // Two normal fields at different speeds and directions. One alone reads
-      // as a moving texture; two reads as water.
-      vec2 uv = vec2(vWorld.x + vWorld.z, vWorld.y - vWorld.z) * 40.0;
-      float a = noise(uv + vec2(uTime * 0.18, uTime * 0.11));
-      float b = noise(uv * 1.9 - vec2(uTime * 0.07, uTime * 0.23));
+      // Two scales: long swell readable from orbit, short chop under the hand.
+      vec2 uv = vec2(vWorld.x + vWorld.z, vWorld.y - vWorld.z);
+      float a = noise(uv * 9.0 + vec2(uTime * 0.10, uTime * 0.06));
+      float b = noise(uv * 42.0 - vec2(uTime * 0.18, uTime * 0.23));
       vec3 tangent = normalize(cross(up, vec3(0.0, 1.0, 0.0) + 0.001));
       vec3 bitangent = cross(up, tangent);
-      n = normalize(n + (tangent * (a - 0.5) + bitangent * (b - 0.5)) * 0.50);
+      n = normalize(n + (tangent * (a - 0.5) * 0.22 + bitangent * (b - 0.5) * 0.12));
     }
 
-    // Beer-Lambert absorption: transmittance falls exponentially with depth,
-    // and each channel falls at its own rate. That is the whole reason shallow
-    // water is teal and deep water is blue.
-    //
-    // Body colours stay dark. The previous shallow teal sat near the top of
-    // the exposure range; ACES + bloom turned every sunlit bay into a white
-    // sheet, and with alpha 0.42 the planet read as a glass marble.
-    float depth = vDepth * 255.0 * 8.0;         // back to height units
-    vec3 extinction = vec3(0.045, 0.018, 0.010);
-    vec3 transmit = exp(-extinction * depth * 0.45);
-    vec3 shallow = vec3(0.04, 0.20, 0.24);
-    vec3 deep = vec3(0.01, 0.04, 0.11);
+    // Beer-Lambert: shallows must read as turquoise against a navy open sea.
+    // Both ends dark was a single painted fill from orbit — the screenshot
+    // failure. The transition is steep so a coastal shelf is a visible ring.
+    float depth = vDepth * 255.0 * 8.0;
+    vec3 extinction = vec3(0.055, 0.022, 0.012);
+    vec3 transmit = exp(-extinction * depth * 0.55);
+    vec3 shallow = vec3(0.07, 0.28, 0.30);
+    vec3 deep = vec3(0.02, 0.07, 0.16);
     vec3 body = mix(deep, shallow, transmit);
-    // The sea has a terminator. Without it the sunlit hemisphere is a flat
-    // painted shell — the same "glass marble" the opacity fix was for.
     float day = max(dot(n, uSunDirection), 0.0);
-    body *= 0.38 + day * 0.72;
+    body *= 0.45 + day * 0.70;
 
-    // The two gods tint their own seas, faintly (§7.4).
     body = mix(body, body * mix(uGodB, uGodA, clamp(vInfluence * 0.5 + 0.5, 0.0, 1.0)),
-               min(abs(vInfluence) * 0.6, 0.18));
+               min(abs(vInfluence) * 0.5, 0.14));
 
-    float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 5.0);
-    // What the sea reflects is the sky it is actually under, from the one model
-    // of it in atmosphere.ts — so the water goes warm where the sun is low on it
-    // and red under a tide warning, instead of reflecting a constant blue that
-    // contradicts the horizon it sits against.
-    // A small mix: a 0.7 sky blend is a mirror, and a mirrored sphere is the
-    // "the planet is transparent" read.
-    vec3 sky = dioAirColour(reflect(-viewDir, n), up, uSunDirection, uWarning) * 0.55;
-    vec3 colour = mix(body, sky, fresnel * 0.28);
+    // Grazing water reflects a little sky, not a mirror. Looking across the
+    // close-in horizon used to turn the whole working frame into atmosphere.
+    float fresnel = pow(1.0 - max(dot(n, viewDir), 0.0), 6.0);
+    vec3 sky = dioAirColour(reflect(-viewDir, n), up, uSunDirection, uWarning) * 0.40;
+    vec3 colour = mix(body, sky, fresnel * 0.12);
 
     if (uTier > 1.5) {
-      // Sun glitter: high-exponent specular on the ocean.
       vec3 h = normalize(uSunDirection + viewDir);
-      float spec = pow(max(dot(n, h), 0.0), 280.0);
-      colour += spec * vec3(0.55, 0.50, 0.40);
+      float spec = pow(max(dot(n, h), 0.0), 320.0);
+      colour += spec * vec3(0.40, 0.38, 0.30);
     }
 
     // Foam where the water is moving fast enough to erode (§4.4). Driven by the
@@ -156,12 +143,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
     // Half the haze the land takes: water is already sky-coloured, so a full
     // mix turns the sea into the same pale sheet as the horizon.
-    colour = mix(colour, air.rgb, air.a * dioNearHaze(vWorld, uCameraPosition) * 0.5);
+    float limb = 1.0 - smoothstep(0.18, 0.58, max(dot(up, viewDir), 0.0));
+    colour = mix(colour, air.rgb, air.a * limb * 0.10);
 
-    // Opaque enough that the far side of the sphere cannot show through.
-    // Shallows still let a little seafloor through — that is the coastal read —
-    // but the previous 0.42 floor was a window, not a sea.
-    float alpha = clamp(0.84 + depth * 0.006, 0.84, 0.98);
+    float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995);
     gl_FragColor = vec4(colour, alpha);
   }
 `;
