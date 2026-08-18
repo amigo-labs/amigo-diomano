@@ -91,11 +91,9 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
   float dioClouds(vec3 dir, float t) {
     vec3 p = dir * 4.0 + vec3(t * 0.06, 0.0, t * 0.021);
     float v = dioNoise(p) * 0.55 + dioNoise(p * 2.3) * 0.28 + dioNoise(p * 5.1) * 0.17;
-    // Thresholded high on purpose. Clouds are atmosphere, not weather: at much
-    // more than a third cover they stop framing the planet and start hiding the
-    // thing the player is trying to read, and §8 has already spent the entire
-    // information budget on the world itself.
-    return smoothstep(0.55, 0.86, v);
+    // Broken banks, not a veil. Cover much above a third hides the surface
+    // the player has to read (§8), and white over a dark sea is milk.
+    return smoothstep(0.74, 0.93, v);
   }
 `;
 
@@ -105,10 +103,10 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
  * horizon whose ground and whose sky are different colours — a seam exactly
  * where the effect is supposed to be seamless.
  *
- * Provides `dioAirmass`, `dioAirColour` and `dioAerial`. Callers supply the sun
- * direction and the tide warning; nothing here reads a uniform of its own, so it
- * can be pasted into a `ShaderMaterial` or into a patched `MeshLambertMaterial`
- * without either having to agree on uniform names beyond those two.
+ * Provides `dioAirmass`, `dioAirColour`, `dioAerial` and `dioNearHaze`.
+ * Callers supply the sun direction and the tide warning; nothing here reads a
+ * uniform of its own, so it can be pasted into a `ShaderMaterial` or a patched
+ * `MeshLambertMaterial` without agreeing on uniform names beyond those two.
  */
 export const SKY_GLSL = /* glsl */ `
   /**
@@ -164,7 +162,7 @@ export const SKY_GLSL = /* glsl */ `
    * took from it lands where the sky is supposed to be. Populous horizons are
    * painted with the same bias, for the same reason.
    */
-  const float DIO_GRAZE = 2.0;
+  const float DIO_GRAZE = 2.4;
 
   // Rayleigh-ish: the colour of air with the sun off to one side. Saturated
   // rather than pale, and that is a decision about *this* planet: sunlit sand
@@ -235,6 +233,16 @@ export const SKY_GLSL = /* glsl */ `
     float tau = mix(DIO_HAZE, DIO_HAZE_WARNING, warning) * rho * dioColumn(dot(up, -rayDir));
     return vec4(dioAirColour(rayDir, up, sunDir, warning), 1.0 - exp(-tau));
   }
+
+  /**
+   * Distance gate for patched Lambert materials (trees, settlements, walkers)
+   * that cannot cheaply share the terrain's view-zenith limb test. Terrain and
+   * water key haze off the view zenith instead: distance alone still left
+   * the sunlit disk sky-coloured, because from orbit every surface is far.
+   */
+  float dioNearHaze(vec3 world, vec3 eye) {
+    return smoothstep(0.70, 2.20, length(eye - world));
+  }
 `;
 
 const VERTEX_SHADER = /* glsl */ `
@@ -273,6 +281,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     // that column is governed entirely by the ray's closest approach to the
     // centre.
     vec3 d = normalize(vWorld - uCameraPosition);
+    // Rays that strike the planet never reach this shell — the ground shaders
+    // already put the air in front of the surface. Without the test, a BackSide
+    // fragment whose closest approach sits inside the sphere (h ≈ 0) paints
+    // the disk with the whole tangent column.
+    float b = length(cross(uCameraPosition, d));
+    float offPlanet = smoothstep(0.992, 1.004, b);
+    if (offPlanet <= 0.001) discard;
     // Closest approach: the lowest point of the ray, where nearly all of its
     // scattering happens and the only place worth asking about the sun. Clamped
     // to the ray rather than the line — for every fragment this shell actually
@@ -296,7 +311,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Additive against black space is identical to compositing over it, so this
     // is the same operator the terrain uses, not an approximation of it.
     vec3 colour = dioAirColour(d, normalize(graze), uSunDirection, uWarning);
-    gl_FragColor = vec4(colour * cover, 1.0);
+    gl_FragColor = vec4(colour * cover * offPlanet, 1.0);
   }
 `;
 
@@ -405,16 +420,14 @@ export function createAtmosphere(view: View): Atmosphere {
         // Lit from the same direction as everything else, and dimmer on the
         // night side so clouds do not glow over a dark hemisphere.
         float lambert = max(dot(vDir, uSunDirection), 0.0);
-        vec3 colour = mix(vec3(0.42, 0.47, 0.58), vec3(1.0, 0.98, 0.95), lambert);
+        vec3 colour = mix(vec3(0.50, 0.54, 0.60), vec3(0.88, 0.90, 0.92), lambert);
         // Through the same air as the ground beneath them. A cloud bank towards
         // the limb that stayed crisp while the terrain around it drowned in haze
         // would read as a decal on the lens rather than as weather in the world.
         vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
         colour = mix(colour, air.rgb, air.a);
-        // 0.42, down from 0.5: at full opacity the banks read as a milky veil
-        // over the one surface the player has to read (§8 spends the whole
-        // information budget on the world; the clouds must frame it, not fog it).
-        gl_FragColor = vec4(colour, cover * visible * 0.42);
+        // Sparse: clouds frame the planet, they are not its surface.
+        gl_FragColor = vec4(colour, cover * visible * 0.12);
       }
     `,
   });
