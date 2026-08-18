@@ -61,7 +61,7 @@ function serve() {
           res.end(body);
           return;
         } catch {
-          continue;
+          // Try the next candidate.
         }
       }
       res.writeHead(404).end("not found");
