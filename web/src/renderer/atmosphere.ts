@@ -105,7 +105,8 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
  * horizon whose ground and whose sky are different colours — a seam exactly
  * where the effect is supposed to be seamless.
  *
- * Provides `dioAirmass`, `dioAirColour` and `dioAerial`. Callers supply the sun
+ * Provides `dioAirmass`, `dioAirColour`, `dioAerial` and `dioNearHaze`.
+ * Callers supply the sun
  * direction and the tide warning; nothing here reads a uniform of its own, so it
  * can be pasted into a `ShaderMaterial` or into a patched `MeshLambertMaterial`
  * without either having to agree on uniform names beyond those two.
@@ -234,6 +235,19 @@ export const SKY_GLSL = /* glsl */ `
     float rho = exp(-max(length(world) - 1.0, 0.0) / DIO_SCALE_HEIGHT);
     float tau = mix(DIO_HAZE, DIO_HAZE_WARNING, warning) * rho * dioColumn(dot(up, -rayDir));
     return vec4(dioAirColour(rayDir, up, sunDir, warning), 1.0 - exp(-tau));
+  }
+
+  /**
+   * How much of the aerial mix to keep, given how far the surface is from the
+   * eye. The Chapman/graze model is right at the limb and wrong under the
+   * hand: at the 1.35-radius floor the camera is already 32° off nadir, so
+   * the working ground has an airmass of ~4 and comes out a fifth hazed —
+   * which is how a meadow under the cursor turned into the same pale glass
+   * as the horizon. Distance does what DIO_GRAZE cannot: the pit you are
+   * digging stays earth, the limb stays sky.
+   */
+  float dioNearHaze(vec3 world, vec3 eye) {
+    return smoothstep(0.35, 1.45, length(eye - world));
   }
 `;
 
@@ -411,10 +425,10 @@ export function createAtmosphere(view: View): Atmosphere {
         // would read as a decal on the lens rather than as weather in the world.
         vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
         colour = mix(colour, air.rgb, air.a);
-        // 0.42, down from 0.5: at full opacity the banks read as a milky veil
-        // over the one surface the player has to read (§8 spends the whole
-        // information budget on the world; the clouds must frame it, not fog it).
-        gl_FragColor = vec4(colour, cover * visible * 0.42);
+        // 0.20: even 0.42 over a pale sea was a second milky shell, and two
+        // translucent shells stacked into the glass-marble read. Clouds frame
+        // the planet; they must not become its surface.
+        gl_FragColor = vec4(colour, cover * visible * 0.20);
       }
     `,
   });

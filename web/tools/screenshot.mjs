@@ -9,7 +9,7 @@
  * Usage:  node tools/screenshot.mjs [outDir]
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
@@ -44,11 +44,12 @@ function serve() {
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       let rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
-      if (rel === "/" || rel === "") rel = "index.html";
+      rel = rel.replaceAll("\\", "/");
+      if (rel === "/" || rel === "" || rel === ".") rel = "index.html";
       const candidates = [join(WEB_ROOT, "dist", rel), join(WEB_ROOT, "public", rel)];
       for (const path of candidates) {
         if (!path.startsWith(WEB_ROOT)) continue;
-        if (!existsSync(path) || path.endsWith("/")) continue;
+        if (!existsSync(path) || statSync(path).isDirectory()) continue;
         const body = await readFile(path);
         res.writeHead(200, {
           "content-type": MIME[extname(path)] ?? "application/octet-stream",

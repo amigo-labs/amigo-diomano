@@ -525,7 +525,7 @@ async function boot(): Promise<void> {
     renderer.setSize(innerWidth, innerHeight, false);
     // ACES tone mapping and subtle bloom (§7.3 tier 1).
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.15;
+    renderer.toneMappingExposure = 1.02;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     const scene = new THREE.Scene();

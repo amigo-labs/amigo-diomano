@@ -294,12 +294,22 @@ whose other caller passes CSS pixels, counting DPR twice.
 - Atmosphere: a slightly larger back-face sphere with a Fresnel rim. Highest
   impact per line in the whole list, and it is also where the tide telegraph
   lives (see below).
-- Water depth absorption (Beer–Lambert): shallow teal → deep blue, exponential
-  and per-channel, which is the whole reason shallow water is teal.
+- Water depth absorption (Beer–Lambert): dark coastal teal → deep blue,
+  exponential and per-channel. The sea is a body, not a window: alpha starts at
+  0.84, Fresnel is a glint not a mirror. The previous 0.42 / 0.7 pair made the
+  planet read as a glass marble, with the far side showing through.
 - Wet-sand band at the waterline, keyed off altitude relative to the *current*
-  sea level, so it migrates during play.
+  sea level, so it migrates during play. It darkens earth, it does not tint it
+  cyan — that stacked with the water mesh and erased the shoreline.
 - Slope- and height-based texturing: steep → rock, flat → grass, high → snow.
   Avoids UV-mapping a quadsphere entirely.
+- Fertile land is meadow from tick zero. Generation writes fertility and leaves
+  vegetation at 0, so the grass read has to come from the potential, not from
+  trees that have not grown yet. Grown vegetation then deepens it to canopy.
+- Aerial haze is distance-gated (`dioNearHaze`). The Chapman column is right at
+  the limb and too thick under the hand: at the 1.35-radius floor the working
+  ground is already 32° off nadir, and without the gate a meadow under the
+  cursor washed to the same pale glass as the horizon.
 - FXAA. Not optional: instanced trees on a sphere alias badly, and MSAA would
   cost more on integrated graphics for a worse result on exactly that content.
 - Rim light on walkers. Functional: tiny figures must separate from any terrain.

@@ -89,7 +89,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     // the planet, so a treeline that stayed crisp against ground the air had
     // already washed out was the one thing that gave the horizon away as a
     // painted band rather than as distance.
-    hazedLambert(view, 0x4a7a3c),
+    hazedLambert(view, 0x3d8a2e),
     MAX_TREES,
   );
   trees.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -468,7 +468,7 @@ function hazedLambert(view: View, colour: number, extra = ""): THREE.MeshLambert
       `${extra}
        {
          vec4 dioAir = dioAerial(vDioWorld, uCameraPosition, uSunDirection, uWarning);
-         outgoingLight = mix(outgoingLight, dioAir.rgb, dioAir.a);
+         outgoingLight = mix(outgoingLight, dioAir.rgb, dioAir.a * dioNearHaze(vDioWorld, uCameraPosition));
        }
        #include <opaque_fragment>`,
     );

@@ -42,7 +42,7 @@ export function createPost(
   // frame, so a generous bloom does not pick out highlights — it washes the
   // whole image to a pale haze, which is the opposite of the crisp diorama
   // silhouettes §7 asks for.
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.22 : 0.1, 0.4, 0.92);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.14 : 0.08, 0.35, 0.96);
   composer.addPass(bloom);
 
   // `OutputPass` before FXAA, not after. FXAA thresholds on luma, so it needs

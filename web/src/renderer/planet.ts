@@ -129,13 +129,14 @@ const FRAGMENT_SHADER = /* glsl */ `
   ${SKY_GLSL}
 
   // Material ids from world.rs: 0 rock, 1 sand, 2 soil, 3 ash, 4 swamp.
+  // Saturated earth, not the pale greys that ACES + bloom wash to glass.
   vec3 materialColour(float id) {
     float m = id * 255.0;
-    vec3 rock  = vec3(0.42, 0.41, 0.44);
-    vec3 sand  = vec3(0.83, 0.72, 0.48);
-    vec3 soil  = vec3(0.34, 0.40, 0.24);
-    vec3 ash   = vec3(0.24, 0.22, 0.23);
-    vec3 swamp = vec3(0.26, 0.31, 0.25);
+    vec3 rock  = vec3(0.42, 0.36, 0.28);
+    vec3 sand  = vec3(0.68, 0.54, 0.30);
+    vec3 soil  = vec3(0.32, 0.44, 0.14);
+    vec3 ash   = vec3(0.22, 0.20, 0.18);
+    vec3 swamp = vec3(0.16, 0.30, 0.14);
     vec3 c = rock;
     c = mix(c, sand,  step(0.5, m) * (1.0 - step(1.5, m)));
     c = mix(c, soil,  step(1.5, m) * (1.0 - step(2.5, m)));
@@ -153,23 +154,28 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     vec3 albedo = materialColour(vAttrib.r);
 
-    // Fertility enriches and darkens soil; sediment pales it toward silt. Both
-    // are simulation state that reached the renderer for the first time here —
-    // §7.4 asks for all five fields and only three were being written, so ground
-    // that the simulation treats as rich or as silted up looked identical to bare
-    // material. Subtle on purpose: these are properties of the ground, and the
-    // reading the player needs from them is "this valley is different", not a
-    // colour key.
-    albedo = mix(albedo, albedo * vec3(0.80, 0.94, 0.68), vAttrib2.g * 0.55);
-    albedo = mix(albedo, vec3(0.72, 0.66, 0.52), vAttrib2.b * 0.40);
+    // Cheap macro-variation so a face of soil is a hillside, not a plastic fill.
+    float speck = fract(sin(dot(vWorld, vec3(12.9898, 78.233, 45.164))) * 43758.5453);
+    albedo *= 0.90 + speck * 0.18;
 
-    // Vegetation is simulation state, not a shader flourish — this is the same
-    // field that damps water transfer in §4.3.
+    // Fertility is potential; vegetation is what actually grew. Generation
+    // writes fertility and leaves vegetation at 0, so the only way land reads
+    // as earth on tick zero is to paint the potential. Flat, above-water,
+    // fertile ground is meadow; the grown field then deepens it to canopy.
+    float fert = vAttrib2.g;
     float veg = vAttrib.g;
-    albedo = mix(albedo, vec3(0.18, 0.34, 0.16), veg * 0.85);
+    float above = 1.0 - smoothstep(-0.001, 0.002, -vAltitude);
+    float grassMask = fert * above * (1.0 - smoothstep(0.18, 0.62, slope));
+    vec3 meadow = vec3(0.24, 0.54, 0.14);
+    vec3 canopy = vec3(0.10, 0.38, 0.09);
+    albedo = mix(albedo, meadow, grassMask * 0.92);
+    albedo = mix(albedo, canopy, veg * above * 0.95);
+
+    // Sediment pales toward silt — keep it earth-coloured, not cream.
+    albedo = mix(albedo, vec3(0.48, 0.40, 0.24), vAttrib2.b * 0.35);
 
     // Steep ground sheds soil and vegetation and shows the rock beneath.
-    albedo = mix(albedo, vec3(0.38, 0.36, 0.38), smoothstep(0.35, 0.75, slope));
+    albedo = mix(albedo, vec3(0.34, 0.29, 0.24), smoothstep(0.32, 0.72, slope));
 
     // Snow on high flat ground.
     //
@@ -180,42 +186,48 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Starting at 0.032 puts the snowline around 400 height units, which
     // hand-raised peaks and generated mountains both clear.
     float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
-    albedo = mix(albedo, vec3(0.94, 0.96, 1.0), snow);
+    albedo = mix(albedo, vec3(0.90, 0.92, 0.94), snow);
 
     // Wet-sand band at the waterline: darken by distance to the current water
     // height. Costs nothing, and since water level is the core mechanic this
-    // band visibly migrates during play (§7.3).
+    // band visibly migrates during play (§7.3). Keep the hue — a blue multiply
+    // here is what turned every shoreline into the same pale glass as the sea.
     float wet = 1.0 - smoothstep(0.0, 0.010, max(vAltitude, 0.0));
-    albedo *= mix(1.0, 0.55, wet);
+    albedo *= mix(1.0, 0.52, wet);
 
-    // Standing water tints the ground it sits on.
-    albedo = mix(albedo, albedo * vec3(0.60, 0.80, 0.92), clamp(vAttrib.a * 8.0, 0.0, 1.0));
+    // Standing water darkens the ground it sits on. Not a cyan wash: that
+    // stacked with the water mesh and made the whole planet read as one
+    // translucent shell.
+    albedo *= 1.0 - clamp(vAttrib.a * 4.0, 0.0, 1.0) * 0.35;
 
     // Territory takes on the aesthetic of the god who shaped it (pillar 6).
+    // A light tint, not a bleach: 0.65 of cream/ice over green earth is how
+    // the land disappeared into the sky.
     float influence = vAttrib.b * 2.0 - 1.0;
     vec3 mood = mix(uGodB, uGodA, clamp(influence * 0.5 + 0.5, 0.0, 1.0));
-    albedo = mix(albedo, albedo * mood, min(abs(influence) * 1.6, 0.65));
+    albedo = mix(albedo, albedo * mood, min(abs(influence) * 0.7, 0.22));
 
-    // Ocean floor: darken with depth so the sea reads as depth rather than as
-    // a blue sheet laid over a beach.
+    // Ocean floor: darken hard so the sea is a body of water, not a window
+    // onto a sunlit beach on the far side of the sphere.
     float depth = vAttrib.a * 255.0 * 8.0;
-    albedo *= exp(-depth * 0.0016);
+    albedo *= exp(-depth * 0.0045);
+    albedo = mix(albedo, vec3(0.04, 0.06, 0.05), smoothstep(12.0, 90.0, depth));
 
     float lambert = max(dot(n, uSunDirection), 0.0);
     // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2),
     // fading out with the shell as the camera comes in (view.ts, cloudFade) —
     // a shadow whose cloud has dissolved would crawl over the ground alone.
     if (uTier > 1.5) {
-      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.45 * uCloudFade;
+      lambert *= 1.0 - dioClouds(up, uCloudTime) * 0.28 * uCloudFade;
     }
     vec3 viewDir = normalize(uCameraPosition - vWorld);
     // Soft camera-anchored fill so the night side stays readable (§7.2). Small:
     // it is there to keep the dark side legible, not to light the scene.
-    float fill = max(dot(n, viewDir), 0.0) * 0.10;
+    float fill = max(dot(n, viewDir), 0.0) * 0.20;
     // Sky bounce, so shadowed slopes are blue rather than black.
-    float sky = clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0) * 0.10;
+    float sky = clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0) * 0.16;
 
-    vec3 lit = albedo * (lambert * vec3(1.15, 1.05, 0.92) + fill + sky * vec3(0.30, 0.42, 0.68));
+    vec3 lit = albedo * (lambert * vec3(1.10, 1.04, 0.84) + fill + sky * vec3(0.30, 0.48, 0.38));
 
     // Lava, and it is emissive rather than lit: it *is* the light source, so it
     // is written over the shaded result instead of being multiplied by the sun.
@@ -246,7 +258,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     // horizon column *is* dimmer and bluer than one at the player's feet, and
     // that is most of what tells the eye which one is far away.
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
-    lit = mix(lit, air.rgb, air.a);
+    lit = mix(lit, air.rgb, air.a * dioNearHaze(vWorld, uCameraPosition));
 
     gl_FragColor = vec4(lit, 1.0);
   }
