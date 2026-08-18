@@ -43,20 +43,26 @@ function serve() {
   return new Promise((ok) => {
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
-      let rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
-      rel = rel.replaceAll("\\", "/");
-      if (rel === "/" || rel === "" || rel === ".") rel = "index.html";
+      // Pathname is always absolute. join() treats a segment starting with /
+      // as a new root, so "/main.js" would skip WEB_ROOT/dist entirely.
+      let rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/");
+      rel = rel.replace(/^\/+/, "");
+      if (rel === "" || rel === ".") rel = "index.html";
       const candidates = [join(WEB_ROOT, "dist", rel), join(WEB_ROOT, "public", rel)];
-      for (const path of candidates) {
-        if (!path.startsWith(WEB_ROOT)) continue;
-        if (!existsSync(path) || statSync(path).isDirectory()) continue;
-        const body = await readFile(path);
-        res.writeHead(200, {
-          "content-type": MIME[extname(path)] ?? "application/octet-stream",
-          "cache-control": "no-store",
-        });
-        res.end(body);
-        return;
+      for (const file of candidates) {
+        if (!file.startsWith(WEB_ROOT)) continue;
+        try {
+          if (!statSync(file).isFile()) continue;
+          const body = await readFile(file);
+          res.writeHead(200, {
+            "content-type": MIME[extname(file)] ?? "application/octet-stream",
+            "cache-control": "no-store",
+          });
+          res.end(body);
+          return;
+        } catch {
+          continue;
+        }
       }
       res.writeHead(404).end("not found");
     });

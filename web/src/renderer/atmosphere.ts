@@ -91,9 +91,8 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
   float dioClouds(vec3 dir, float t) {
     vec3 p = dir * 4.0 + vec3(t * 0.06, 0.0, t * 0.021);
     float v = dioNoise(p) * 0.55 + dioNoise(p * 2.3) * 0.28 + dioNoise(p * 5.1) * 0.17;
-    // Broken banks, not a veil. 0.55..0.86 still covered most of the sunlit
-    // disk; white at even 0.20 over a dark sea is milk, and that is what made
-    // the day side a painted plastic hemisphere.
+    // Broken banks, not a veil. Cover much above a third hides the surface
+    // the player has to read (§8), and white over a dark sea is milk.
     return smoothstep(0.74, 0.93, v);
   }
 `;
@@ -105,10 +104,9 @@ export const CLOUD_NOISE_GLSL = /* glsl */ `
  * where the effect is supposed to be seamless.
  *
  * Provides `dioAirmass`, `dioAirColour`, `dioAerial` and `dioNearHaze`.
- * Callers supply the sun
- * direction and the tide warning; nothing here reads a uniform of its own, so it
- * can be pasted into a `ShaderMaterial` or into a patched `MeshLambertMaterial`
- * without either having to agree on uniform names beyond those two.
+ * Callers supply the sun direction and the tide warning; nothing here reads a
+ * uniform of its own, so it can be pasted into a `ShaderMaterial` or a patched
+ * `MeshLambertMaterial` without agreeing on uniform names beyond those two.
  */
 export const SKY_GLSL = /* glsl */ `
   /**
@@ -237,13 +235,10 @@ export const SKY_GLSL = /* glsl */ `
   }
 
   /**
-   * How much of the aerial mix to keep, given how far the surface is from the
-   * eye. The Chapman/graze model is right at the limb and wrong under the
-   * hand: at the 1.35-radius floor the camera is already 32° off nadir, so
-   * the working ground has an airmass of ~4 and comes out a fifth hazed —
-   * which is how a meadow under the cursor turned into the same pale glass
-   * as the horizon. Distance does what DIO_GRAZE cannot: the pit you are
-   * digging stays earth, the limb stays sky.
+   * Distance gate for patched Lambert materials (trees, settlements, walkers)
+   * that cannot cheaply share the terrain's view-zenith limb test. Terrain and
+   * water key haze off the view zenith instead: distance alone still left
+   * the sunlit disk sky-coloured, because from orbit every surface is far.
    */
   float dioNearHaze(vec3 world, vec3 eye) {
     return smoothstep(0.70, 2.20, length(eye - world));
@@ -286,11 +281,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     // that column is governed entirely by the ray's closest approach to the
     // centre.
     vec3 d = normalize(vWorld - uCameraPosition);
-    // Rays that strike the planet never reach this shell. The ground shaders
+    // Rays that strike the planet never reach this shell — the ground shaders
     // already put the air in front of the surface. Without the test, a BackSide
-    // fragment whose closest approach sits *inside* the sphere (h ≈ 0, the
-    // whole tangent column) paints the disk with sky — which is the pale
-    // plastic day-side in every screenshot.
+    // fragment whose closest approach sits inside the sphere (h ≈ 0) paints
+    // the disk with the whole tangent column.
     float b = length(cross(uCameraPosition, d));
     float offPlanet = smoothstep(0.992, 1.004, b);
     if (offPlanet <= 0.001) discard;
@@ -432,7 +426,7 @@ export function createAtmosphere(view: View): Atmosphere {
         // would read as a decal on the lens rather than as weather in the world.
         vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
         colour = mix(colour, air.rgb, air.a);
-        // Sparse and thin: clouds frame continents, they do not paint the sea.
+        // Sparse: clouds frame the planet, they are not its surface.
         gl_FragColor = vec4(colour, cover * visible * 0.12);
       }
     `,

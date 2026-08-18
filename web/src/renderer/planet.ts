@@ -129,7 +129,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   ${SKY_GLSL}
 
   // Material ids from world.rs: 0 rock, 1 sand, 2 soil, 3 ash, 4 swamp.
-  // Saturated earth, not the pale greys that ACES + bloom wash to glass.
+  // Saturated earth. Pale greys sit at the same value as the sea after ACES.
   vec3 materialColour(float id) {
     float m = id * 255.0;
     vec3 rock  = vec3(0.42, 0.36, 0.28);
@@ -154,10 +154,8 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     vec3 albedo = materialColour(vAttrib.r);
 
-    // Multi-octave ground grain. A single hash speck is a film of noise on a
-    // plastic fill; three frequencies turn a face of soil into dirt, clumps
-    // and stones. The same field also bumps the normal so the Laplacian-smooth
-    // mesh still lights as hills.
+    // Multi-octave ground grain, and a bump from the same field so the
+    // Laplacian-smooth mesh still lights as hills rather than as a fill.
     float n1 = dioNoise(up * 14.0);
     float n2 = dioNoise(up * 36.0);
     float n3 = dioNoise(up * 90.0);
@@ -170,12 +168,14 @@ const FRAGMENT_SHADER = /* glsl */ `
     n = normalize(n + tangent * (n1 - gx) * 5.5 + bitangent * (n1 - gy) * 5.5);
     slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
 
+    // Fertility is potential; vegetation is what grew. Generation writes the
+    // first and leaves the second at 0, so meadow has to come from fertility
+    // or land is bare until trees appear.
     float fert = vAttrib2.g;
     float veg = vAttrib.g;
     float above = 1.0 - smoothstep(-0.001, 0.002, -vAltitude);
-    // A beach is sand at the waterline, not darkened grass. Without it every
-    // island is a melted green sticker floating in a blue fill — the read
-    // the screenshots actually had.
+    // Sand at the waterline, not darkened grass — otherwise every island is
+    // a green sticker in a blue fill. Migrates with sea level (§7.3).
     float beach = above * (1.0 - smoothstep(0.0004, 0.0075, vAltitude));
     float grassMask = fert * above * (1.0 - beach) * (1.0 - smoothstep(0.16, 0.58, slope));
     vec3 meadow = vec3(0.28, 0.52, 0.14);
@@ -186,6 +186,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     albedo = mix(albedo, vec3(0.48, 0.40, 0.24), vAttrib2.b * 0.30);
     albedo = mix(albedo, vec3(0.36, 0.30, 0.24), smoothstep(0.28, 0.68, slope));
 
+    // Snowline inside the altitude the terrain can reach (amp 720 → 0.0576 R).
     float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
     albedo = mix(albedo, vec3(0.90, 0.92, 0.94), snow);
 
@@ -196,10 +197,12 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Standing water darkens the ground it sits on. Not a cyan wash.
     albedo *= 1.0 - clamp(vAttrib.a * 4.0, 0.0, 1.0) * 0.35;
 
+    // Territory tint, not a bleach — a heavy mood mix is the same colour as haze.
     float influence = vAttrib.b * 2.0 - 1.0;
     vec3 mood = mix(uGodB, uGodA, clamp(influence * 0.5 + 0.5, 0.0, 1.0));
     albedo = mix(albedo, albedo * mood, min(abs(influence) * 0.55, 0.16));
 
+    // Ocean floor: dark, so the sea is a body rather than a window.
     float depth = vAttrib.a * 255.0 * 8.0;
     albedo *= exp(-depth * 0.0045);
     albedo = mix(albedo, vec3(0.04, 0.06, 0.05), smoothstep(12.0, 90.0, depth));
@@ -248,9 +251,8 @@ const FRAGMENT_SHADER = /* glsl */ `
     // horizon column *is* dimmer and bluer than one at the player's feet, and
     // that is most of what tells the eye which one is far away.
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
-    // Limb only. A full aerial mix (even gated by distance) painted the
-    // sunlit disk sky-blue — confirmed by zeroing the mix and watching
-    // continents, beaches and a dark sea appear. Overhead ground stays earth.
+    // Limb only. Overhead, a full Chapman mix is sky-coloured, so the working
+    // ground disappears into the same blue as the horizon.
     float limb = 1.0 - smoothstep(0.18, 0.58, max(dot(up, viewDir), 0.0));
     lit = mix(lit, air.rgb, air.a * limb * 0.18);
 

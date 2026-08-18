@@ -103,9 +103,8 @@ const FRAGMENT_SHADER = /* glsl */ `
       n = normalize(n + (tangent * (a - 0.5) * 0.22 + bitangent * (b - 0.5) * 0.12));
     }
 
-    // Beer-Lambert: shallows must read as turquoise against a navy open sea.
-    // Both ends dark was a single painted fill from orbit — the screenshot
-    // failure. The transition is steep so a coastal shelf is a visible ring.
+    // Beer-Lambert: turquoise shelf against a navy open sea. Both ends the
+    // same value is a painted fill from orbit; the transition has to be steep.
     float depth = vDepth * 255.0 * 8.0;
     vec3 extinction = vec3(0.055, 0.022, 0.012);
     vec3 transmit = exp(-extinction * depth * 0.55);
@@ -141,8 +140,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     // layers by the same fraction and then blending them is the same result as
     // fogging the blend, without the sea having to know what is under it.
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
-    // Half the haze the land takes: water is already sky-coloured, so a full
-    // mix turns the sea into the same pale sheet as the horizon.
+    // Same limb gate as the terrain, weaker: water is already sky-coloured.
     float limb = 1.0 - smoothstep(0.18, 0.58, max(dot(up, viewDir), 0.0));
     colour = mix(colour, air.rgb, air.a * limb * 0.10);
 

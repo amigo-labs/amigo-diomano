@@ -294,10 +294,9 @@ whose other caller passes CSS pixels, counting DPR twice.
 - Atmosphere: a slightly larger back-face sphere with a Fresnel rim. Highest
   impact per line in the whole list, and it is also where the tide telegraph
   lives (see below).
-- Water depth absorption (Beer–Lambert): dark coastal teal → deep blue,
-  exponential and per-channel. The sea is a body, not a window: alpha starts at
-  0.84, Fresnel is a glint not a mirror. The previous 0.42 / 0.7 pair made the
-  planet read as a glass marble, with the far side showing through.
+- Water depth absorption (Beer–Lambert): coastal teal → deep navy, exponential
+  and per-channel. The sea is a body, not a window: alpha starts at 0.92,
+  Fresnel is a glint. The previous 0.42 / 0.7 pair let the far side show through.
 - Beach at the waterline, keyed off altitude relative to the *current* sea
   level, so it migrates during play. Sand, not darkened grass: without a
   beach every island is a melted green sticker in a blue fill.
@@ -306,10 +305,9 @@ whose other caller passes CSS pixels, counting DPR twice.
 - Fertile land is meadow from tick zero. Generation writes fertility and leaves
   vegetation at 0, so the grass read has to come from the potential, not from
   trees that have not grown yet. Grown vegetation then deepens it to canopy.
-- Aerial haze is **limb-only**. A full Chapman mix, even distance-gated, painted
-  the entire sunlit disk sky-blue — confirmed by zeroing it: continents, beaches
-  and a dark sea appeared underneath. Haze now keys off `dot(up, viewDir)`, so
-  overhead ground stays earth and only the horizon blends into the sky ring.
+- Aerial haze is **limb-only**, keyed off `dot(up, viewDir)`. A full Chapman
+  mix, even distance-gated, is sky-coloured across the sunlit disk, so overhead
+  ground stayed unreadable. The horizon still blends into the sky ring.
 - FXAA. Not optional: instanced trees on a sphere alias badly, and MSAA would
   cost more on integrated graphics for a worse result on exactly that content.
 - Rim light on walkers. Functional: tiny figures must separate from any terrain.

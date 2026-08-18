@@ -32,9 +32,8 @@ export function createPost(
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
 
-  // Tight and high-threshold: the atmosphere rim sits near 1.0 and must
-  // not bloom, or the whole sunlit disk washes to plastic. Lava at 1.75
-  // still clears 1.05.
+  // Threshold above the atmosphere rim (~1.0) so the sky does not bloom
+  // across the disk. Lava peaks at 1.75 and still clears it.
   const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.12 : 0.06, 0.18, 1.05);
   composer.addPass(bloom);
 
