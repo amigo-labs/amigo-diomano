@@ -974,19 +974,52 @@ impl World {
     fn generate_terrain(&mut self) {
         let seed = self.cfg.seed;
         let amp: i32 = 720;
+        // Measured against the widened distribution (see `widen`), not carried
+        // over from the old stack: `terrain_profiles_produce_playable_land`
+        // holds the resulting land fractions. Archipelago ~24-42% land across
+        // seeds, pangaea ~57-78%, volcano in between.
         let bias: i32 = match self.cfg.terrain {
             TERRAIN_PANGAEA => -40,
-            TERRAIN_VOLCANO => 60,
-            _ => 150, // archipelago: most of the surface starts under water
+            TERRAIN_VOLCANO => 210,
+            _ => 350, // archipelago: most of the surface starts under water
         };
+
+        // Domain warp amplitude, ~0.3 of the dominant octave's 2048 spacing.
+        // Value noise on an axis-aligned lattice has square isolines; sampling
+        // the height field through a low-frequency warp of the cube point bends
+        // them into natural curves. The warp field is itself a continuous
+        // function of the 3D cube point, so the result stays seamless.
+        const WARP: i32 = 600;
 
         for face in 0..6usize {
             for y in 0..N {
                 for x in 0..N {
                     let (px, py, pz) = cube_point(face, x as i32, y as i32);
-                    let h = fbm(px, py, pz, seed);
-                    let centred = h - 32768;
-                    let height = (centred * amp / 32768) - bias;
+                    let wx = (value_noise(px + 5741, py + 2099, pz - 4451, 11, seed ^ 0x7A17)
+                        - 32768)
+                        * WARP
+                        / 32768;
+                    let wy = (value_noise(py - 3299, pz + 5443, px + 1877, 11, seed ^ 0x3B21)
+                        - 32768)
+                        * WARP
+                        / 32768;
+                    let wz = (value_noise(pz + 4519, px - 2687, py + 3947, 11, seed ^ 0x51C3)
+                        - 32768)
+                        * WARP
+                        / 32768;
+                    let h = fbm(px + wx, py + wy, pz + wz, seed);
+                    let centred = widen(h) - 32768;
+                    let raw = centred * amp / 32768;
+                    // The bias moves the sea level, then both sides stretch
+                    // back to the full ±amp span. Subtracting the bias outright
+                    // (the old form) also lowered every peak, which is how the
+                    // rock threshold below and the renderer's snowline ended up
+                    // unreachable on the wetter profiles.
+                    let height = if raw > bias {
+                        (raw - bias) * amp / (amp - bias)
+                    } else {
+                        (raw - bias) * amp / (amp + bias)
+                    };
                     let c = idx(face, x, y);
                     self.height[c] =
                         height.clamp(i32::from(HEIGHT_MIN), i32::from(HEIGHT_MAX)) as i16;
@@ -1496,13 +1529,48 @@ fn value_noise(px: i32, py: i32, pz: i32, shift: u32, seed: u32) -> i32 {
     lerp16(c0, c1, fz)
 }
 
-/// Four octaves of value noise. Returns `0..=65535`.
+/// Fold a `0..=65535` noise value into a ridge: creases at the lattice
+/// mid-surfaces, so one octave contributes connected mountain chains instead
+/// of round bumps. Mean-preserving (a uniform input maps to a triangular
+/// distribution around the same midpoint).
+const fn ridge(n: i32) -> i32 {
+    65535 - (2 * n - 65535).abs()
+}
+
+/// Five octaves of value noise. Returns `0..=65535`.
+///
+/// Each octave samples at its own constant offset and axis swizzle. The
+/// offsets are odd and far from any multiple of that octave's spacing, so the
+/// cube-face planes (`±CUBE`, `0`) never coincide with a lattice plane — with
+/// aligned lattices every face plane sat exactly on a lattice plane of every
+/// octave, and the smoothstep's zero derivative there drew flat, dead-straight
+/// bands (and coastlines) along all twelve cube edges and the face midlines.
+/// The swizzles are exact integer isometries, so continuity across seams is
+/// untouched, but the octaves' lattices no longer share axis planes and their
+/// flats never stack.
+///
+/// Weights: the shift-12 octave spans the whole cube half-extent (~2 lattice
+/// cells per axis over the entire planet), so as the dominant octave it made
+/// every map two smoothstep blobs per face. Demoted to a continental tilt;
+/// shift 11 (4 cells per axis — actual continents) leads, shift 10 is ridged
+/// for mountain chains, and shift 8 adds fine texture the old stack lacked.
 fn fbm(px: i32, py: i32, pz: i32, seed: u32) -> i32 {
-    let a = value_noise(px, py, pz, 12, seed);
-    let b = value_noise(px, py, pz, 11, seed ^ 0x1111);
-    let c = value_noise(px, py, pz, 10, seed ^ 0x2222);
-    let d = value_noise(px, py, pz, 9, seed ^ 0x3333);
-    (a * 8 + b * 4 + c * 2 + d) / 15
+    let a = value_noise(px + 1657, py - 2413, pz + 3181, 12, seed);
+    let b = value_noise(py + 911, pz - 1543, px + 2729, 11, seed ^ 0x1111);
+    let c = ridge(value_noise(-pz + 449, px + 1993, py - 3361, 10, seed ^ 0x2222));
+    let d = value_noise(px - 613, py + 1279, pz - 2039, 9, seed ^ 0x3333);
+    let e = value_noise(-py + 337, pz + 761, px + 1201, 8, seed ^ 0x4444);
+    (a * 6 + b * 8 + c * 4 + d * 2 + e) / 21
+}
+
+/// Widen `fbm`'s compressed midrange: the weighted octave average clusters
+/// tightly around the midpoint, so the nominal amplitude was almost never
+/// reached — the rock threshold and the renderer's snowline effectively never
+/// fired. Mapping `16384..=49152` onto the full range through the existing
+/// smoothstep triples the slope at the midpoint and saturates smoothly at the
+/// tails. Input and output are both `0..=65536`-ish; `smooth` clamps.
+const fn widen(h: i32) -> i32 {
+    smooth((h - 16384) * 2)
 }
 
 #[cfg(test)]
@@ -1638,6 +1706,63 @@ mod tests {
             "terrain steps across seams (mean {seam_mean}, max {seam_max}) far exceed \
              the in-face mean {inner_mean}: the generator is not seamless"
         );
+    }
+
+    #[test]
+    fn terrain_profiles_produce_playable_land() {
+        // Guard bands on what generation actually produces, per profile. There
+        // was no such census before, so a noise change could silently drown a
+        // profile or flatten every mountain — both happened in review of the
+        // original stack (rock threshold and snowline were unreachable). The
+        // bands are deliberately generous: they catch a broken distribution,
+        // not a flavour change.
+        for &(terrain, land_lo, land_hi) in &[
+            (TERRAIN_ARCHIPELAGO, 10i64, 45i64),
+            (TERRAIN_PANGAEA, 45, 85),
+            (TERRAIN_VOLCANO, 25, 70),
+        ] {
+            for &seed in &[0x5EEDu32, 1, 7, 99] {
+                let mut w = World::boxed();
+                w.init(&MapConfig { seed, terrain, ..MapConfig::DEFAULT });
+
+                let mut land: i64 = 0;
+                let mut rock: i64 = 0;
+                let mut max_h: i16 = i16::MIN;
+                let mut min_h: i16 = i16::MAX;
+                for face in 0..6usize {
+                    for y in 0..N {
+                        for x in 0..N {
+                            let c = idx(face, x, y);
+                            let h = w.height[c];
+                            land += i64::from(h > 0);
+                            rock += i64::from(w.material[c] == MAT_ROCK);
+                            max_h = max_h.max(h);
+                            min_h = min_h.min(h);
+                        }
+                    }
+                }
+                let pct = land * 100 / (LIVE_CELLS as i64);
+                assert!(
+                    (land_lo..=land_hi).contains(&pct),
+                    "terrain {terrain} seed {seed:#x}: {pct}% land, outside {land_lo}..={land_hi}%"
+                );
+                // Mountains must exist: the rock threshold (380) and the
+                // renderer snowline (~400) have to be reachable, not nominal.
+                assert!(
+                    max_h > 500,
+                    "terrain {terrain} seed {seed:#x}: max height {max_h} — no real mountains"
+                );
+                assert!(
+                    rock > 100,
+                    "terrain {terrain} seed {seed:#x}: only {rock} rock cells (corridor aside, \
+                     generation itself should produce rocky highland)"
+                );
+                assert!(
+                    min_h < -300,
+                    "terrain {terrain} seed {seed:#x}: min height {min_h} — no real ocean floor"
+                );
+            }
+        }
     }
 
     #[test]

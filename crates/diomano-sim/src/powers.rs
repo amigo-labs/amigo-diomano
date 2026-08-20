@@ -20,11 +20,12 @@ use crate::world::{
 
 /// Highest `sea_base` the flood verb can reach: two terraces above the
 /// starting sea. Enough to drown coastal flats on both sides — real strategic
-/// pressure — while staying below `settlements::CAUSEWAY_HEIGHT`, so flooding
-/// can never *permanently* sever the contact corridor: a road only the tide
-/// may close, and only temporarily. (At four terraces, two casts amputated
-/// the game's one artery for good — traced, both armies parked for the rest
-/// of the match.)
+/// pressure — while staying below the causeway band's lowest dry cell
+/// (`settlements::CAUSEWAY_CREST_MIN - 2`), so flooding can never
+/// *permanently* sever the contact corridor: a road only the tide may close,
+/// and only temporarily. (At four terraces, two casts amputated the game's
+/// one artery for good — traced, both armies parked for the rest of the
+/// match.)
 pub const FLOOD_CAP: i16 = 2 * TERRACE;
 
 /// Apply one command.

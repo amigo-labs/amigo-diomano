@@ -71,10 +71,15 @@ export interface Atmosphere {
  * subtle enough to look like a lighting bug rather than a copy-paste one.
  */
 export const CLOUD_NOISE_GLSL = /* glsl */ `
+  // Not the classic product hash: fract(x*y*z*(x+y+z)) is symmetric under any
+  // permutation of the components — the noise field mirrored across the x=y,
+  // y=z and x=z planes — and it collapses to ~0 whenever one component lands
+  // near an integer, which drew regularly spaced dead bands through the grain,
+  // the bump and the clouds. This one (Hoskins-style) has neither defect.
   float dioHash(vec3 p) {
-    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
-    p *= 17.0;
-    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
   }
   float dioNoise(vec3 x) {
     vec3 i = floor(x);
@@ -284,9 +289,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Rays that strike the planet never reach this shell — the ground shaders
     // already put the air in front of the surface. Without the test, a BackSide
     // fragment whose closest approach sits inside the sphere (h ≈ 0) paints
-    // the disk with the whole tangent column.
+    // the disk with the whole tangent column. The feather starts at 0.972
+    // rather than hard against the limb: the outer ~3% of the disc gets a thin
+    // wedge of shell fog over it, so ground fades *into* the sky band instead
+    // of meeting it at a step — while the other 94% of the disc still gets no
+    // shell contribution at all, which is the invariant this test exists for.
     float b = length(cross(uCameraPosition, d));
-    float offPlanet = smoothstep(0.992, 1.004, b);
+    float offPlanet = smoothstep(0.972, 1.002, b);
     if (offPlanet <= 0.001) discard;
     // Closest approach: the lowest point of the ray, where nearly all of its
     // scattering happens and the only place worth asking about the sun. Clamped
@@ -427,7 +436,7 @@ export function createAtmosphere(view: View): Atmosphere {
         vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
         colour = mix(colour, air.rgb, air.a);
         // Sparse: clouds frame the planet, they are not its surface.
-        gl_FragColor = vec4(colour, cover * visible * 0.12);
+        gl_FragColor = vec4(colour, cover * visible * 0.16);
       }
     `,
   });

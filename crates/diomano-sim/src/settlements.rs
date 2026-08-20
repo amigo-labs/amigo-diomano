@@ -304,20 +304,36 @@ fn spawn_population(w: &mut World) {
 /// opponent script read the same cells instead of keeping copies.
 pub const STARTS: [(usize, usize, usize); PLAYERS] = [(4, N / 2, N / 2), (5, N / 2, N / 2)];
 
-/// Causeway spine height: two and a half terraces (TERRACE = 16).
+/// Causeway crest band: every dry carved cell lands in
+/// `[CAUSEWAY_CREST_MIN - 2, CAUSEWAY_CREST_MAX]` = `[34, 45]`.
 ///
-/// Three constraints pin this number. Above the calm sea, so the road is
-/// normally open. Above `powers::FLOOD_CAP` (two terraces), so no amount of
-/// flooding closes it *permanently* — traced: with the road below the cap,
-/// two flood casts amputated the game's one artery and every walker on both
-/// sides parked at home for the rest of the match. And below every wave peak
-/// (the first is 48), so each tide impact still floods the road and each
-/// recovery hands it back — the contest is temporary by design, §5.5.
+/// Three constraints pin the band, the same three that used to pin the single
+/// height. Above the calm sea, so the road is normally open. The band floor
+/// (34, crest minimum minus the widest lateral falloff) stays above
+/// `powers::FLOOD_CAP` (two terraces = 32), so no amount of flooding closes
+/// the road *permanently* — traced: with the road below the cap, two flood
+/// casts amputated the game's one artery and every walker on both sides
+/// parked at home for the rest of the match. And the band ceiling (45) stays
+/// below every wave peak (the first is 48), so each tide impact still floods
+/// the road and each recovery hands it back — the contest is temporary by
+/// design, §5.5. Inside those walls the crest wanders, because a ridge at one
+/// exact height for half the planet's circumference reads as a wall, not as
+/// geography.
+pub const CAUSEWAY_CREST_MIN: i16 = 36;
+pub const CAUSEWAY_CREST_MAX: i16 = 45;
+
+/// The band's midpoint — what the docs and the flood arithmetic reference.
 pub const CAUSEWAY_HEIGHT: i16 = 2 * crate::world::TERRACE + crate::world::TERRACE / 2;
 
-/// Flanks sit one unit lower: still passable, but no 3x3 equal-height plateau
-/// ever forms on the causeway, so nobody founds settlements on the road.
-pub const CAUSEWAY_FLANK_HEIGHT: i16 = CAUSEWAY_HEIGHT - 1;
+/// Salt for the causeway's deterministic jitter. The heights may use the world
+/// seed (each map gets its own ridge); only the *path* must stay a pure
+/// function of the walk index, and it does — see `corridor_cell`.
+const CAUSEWAY_SALT: u32 = 0xCA05_E3A7;
+
+/// Submarine apron targets by ring beyond the dry band: a stepped ramp, all
+/// below the calm sea (0), so the flanks read as a ridge rising out of the
+/// sea floor instead of a sheer wall — and never as new passable land.
+const CAUSEWAY_APRON: [i16; 3] = [-8, -64, -160];
 
 /// Great-circle steps from one spawn to its antipode: half of the 4N loop.
 pub const CORRIDOR_STEPS: usize = 2 * N;
@@ -326,20 +342,22 @@ pub const CORRIDOR_STEPS: usize = 2 * N;
 /// circle from `STARTS[0]` heading north for `CORRIDOR_STEPS` cells, then an
 /// L-join to `STARTS[1]`, so the endpoint is exact whatever the seam flips
 /// did to the walk. Pure in its path — it reads no world state — which is what
-/// lets `corridor_cell` replay it for scripts.
-fn walk_corridor(mut visit: impl FnMut(usize, i32, i32)) {
+/// lets `corridor_cell` replay it for scripts. The visitor also receives the
+/// walk's current heading (in the local face frame), which is what lets the
+/// carver step sideways through seams; path-only callers ignore it.
+fn walk_corridor(mut visit: impl FnMut(usize, i32, i32, usize)) {
     let (start_face, sx, sy) = STARTS[0];
     let (target_face, tx, ty) = STARTS[1];
     let (mut face, mut x, mut y) = (start_face, sx as i32, sy as i32);
     let mut dir = crate::seams::DIR_N;
-    visit(face, x, y);
+    visit(face, x, y, dir);
     for _ in 0..CORRIDOR_STEPS {
         let (nf, nx, ny, nd) = crate::seams::step(face, x, y, dir);
         face = nf;
         x = nx;
         y = ny;
         dir = nd;
-        visit(face, x, y);
+        visit(face, x, y, dir);
     }
     if face != target_face {
         // Unreachable on the shipped STARTS: the walk is the great circle
@@ -349,12 +367,14 @@ fn walk_corridor(mut visit: impl FnMut(usize, i32, i32)) {
     }
     let (tx, ty) = (tx as i32, ty as i32);
     while x != tx {
+        let d = if tx > x { crate::seams::DIR_E } else { crate::seams::DIR_W };
         x += (tx - x).signum();
-        visit(face, x, y);
+        visit(face, x, y, d);
     }
     while y != ty {
+        let d = if ty > y { crate::seams::DIR_N } else { crate::seams::DIR_S };
         y += (ty - y).signum();
-        visit(face, x, y);
+        visit(face, x, y, d);
     }
 }
 
@@ -365,7 +385,7 @@ fn walk_corridor(mut visit: impl FnMut(usize, i32, i32)) {
 pub fn corridor_cell(i: usize) -> (u8, u8, u8) {
     let mut k = 0usize;
     let mut out = (STARTS[0].0 as u8, STARTS[0].1 as u8, STARTS[0].2 as u8);
-    walk_corridor(|face, x, y| {
+    walk_corridor(|face, x, y, _| {
         if k <= i {
             out = (face as u8, x as u8, y as u8);
         }
@@ -376,11 +396,15 @@ pub fn corridor_cell(i: usize) -> (u8, u8, u8) {
 
 /// Raise one corridor cell to at least `h` and make it dry, bare rock.
 ///
-/// Existing land above `h` — including the spawn plateaus at 320 — is left
-/// alone: the corridor only ever adds passage, it never digs. `MAT_ROCK` is
-/// deliberate twice over. Physically: rock is the one material that neither
-/// erodes (§4.4 — "the absence is the rule") nor obeys the angle of repose, and
-/// a sand ridge 400+ units above the sea floor sheds `(diff - 24) / 4` per tick
+/// Existing land above `h` — including the spawn plateaus at 320 — keeps its
+/// height: the corridor only ever adds passage, it never digs. Its *material*
+/// becomes rock regardless, because the road runs through whatever the
+/// generator put there, and a natural sand bank on the spine is a time bomb:
+/// traced on the widened terrain, one such bank eroded below the sea inside
+/// two tide cycles and cut the game's one artery. `MAT_ROCK` is deliberate
+/// twice over. Physically: rock is the one material that neither erodes
+/// (§4.4 — "the absence is the rule") nor obeys the angle of repose, and a
+/// sand ridge 400+ units above the sea floor sheds `(diff - 24) / 4` per tick
 /// per neighbour — a sand causeway dissolves within the first few hundred
 /// ticks, measured. Strategically: rock is habitable, so the road is not just
 /// passage but contestable, *scoring* ground — holding the causeway pays,
@@ -393,11 +417,34 @@ fn carve_cell(w: &mut World, face: usize, x: i32, y: i32, h: i16) {
         w.sediment[c] = 0;
         w.vegetation[c] = 0;
         w.fertility[c] = 0;
+    } else if w.material[c] == crate::world::MAT_SAND || w.material[c] == crate::world::MAT_ASH {
+        // Natural land already above the band keeps its height, but granular
+        // ground on the road is pinned to rock: it obeys the angle of repose,
+        // and it erodes out from under the road otherwise. Soil stays soil —
+        // it does not move, and the spawn plateaus are deliberately soil.
+        w.material[c] = crate::world::MAT_ROCK;
+        w.sediment[c] = 0;
     }
     // Carved cells all sit above the calm sea; whatever the terrain fill put
     // here is gone. The tide will flood the road again — that is the game.
     w.water[c] = 0;
     w.lava[c] = 0;
+}
+
+/// Raise the sea floor beside the road to `h` (below the calm sea) and pin it
+/// as rock. Unlike `carve_cell` this never dries anything: the cell stays
+/// ocean, refilled to sea level, so the apron is a submarine ridge the walkers
+/// cannot use — pure geography, there so the road climbs out of the deep in
+/// steps instead of standing on a sheer half-kilometre wall.
+fn raise_seabed(w: &mut World, face: usize, x: i32, y: i32, h: i16) {
+    let c = idx(face, x as usize, y as usize);
+    if w.height[c] < h {
+        w.height[c] = h;
+        w.material[c] = crate::world::MAT_ROCK;
+        w.sediment[c] = 0;
+        let depth = i32::from(w.sea_level) - i32::from(h);
+        w.water[c] = depth.max(0).min(i32::from(i16::MAX)) as i16;
+    }
 }
 
 /// The contested causeway between the two spawns (HANDOFF §1 pillar 5).
@@ -409,13 +456,69 @@ fn carve_cell(w: &mut World, face: usize, x: i32, y: i32, h: i16) {
 /// contact inevitable but permanently contested — either god can cut it,
 /// fortify it, or fight over it, and "every causeway you build also serves
 /// your opponent" (§5.5) becomes literal geography.
+///
+/// The *shape* is deliberately not a wall. The spine path is fixed (see
+/// `corridor_cell`), but on it a crest wanders laterally by one cell, its
+/// height random-walks inside the `[CAUSEWAY_CREST_MIN, CAUSEWAY_CREST_MAX]`
+/// band, occasional stretches widen into islets, and beyond the dry band a
+/// stepped rock apron rises from the sea floor. All jitter derives from
+/// `hash3` of the walk index and the world seed — deterministic, and pure of
+/// world state, so the walk order alone fixes every cell.
+///
+/// Two properties hold by construction, for any seed. Passability: the spine
+/// cell (`k = 0`) is at lateral distance `|m| <= 1` from the crest, so it is
+/// carved to at least `base - 1 >= CAUSEWAY_CREST_MIN - 1 > FLOOD_CAP`, and
+/// the spine is 4-connected — `spawns_are_connected_at_tick_zero` stays a
+/// consequence, not a hope. No build site: lateral heights fall off strictly
+/// unimodally from the crest (`base, base-1, base-2`), so no three
+/// equal-height cells ever sit in a row across the band, and no 3x3
+/// equal-height plateau forms on the road for anyone to found on.
 fn carve_contact_corridor(w: &mut World) {
-    walk_corridor(|face, x, y| {
-        carve_cell(w, face, x, y, CAUSEWAY_HEIGHT);
-        for dir in 0..4usize {
-            let (nf, nx, ny, _) = crate::seams::step(face, x, y, dir);
-            carve_cell(w, nf, nx, ny, CAUSEWAY_FLANK_HEIGHT);
+    let seed = w.cfg.seed ^ CAUSEWAY_SALT;
+    let mut k: i32 = 0;
+    // Lazy random walks: the crest offset moves at most one cell every four
+    // steps, the base height one unit every other step — arcs, not noise.
+    let mut crest: i32 = 0;
+    let mut base: i32 = i32::from(CAUSEWAY_HEIGHT);
+    walk_corridor(|face, x, y, dir| {
+        if k % 4 == 0 {
+            let r = (crate::hash::hash3(k, 1, 0, seed) % 3) as i32;
+            crest = (crest + r - 1).clamp(-1, 1);
         }
+        if k % 2 == 0 {
+            let r = (crate::hash::hash3(k, 2, 0, seed) % 3) as i32;
+            base =
+                (base + r - 1).clamp(i32::from(CAUSEWAY_CREST_MIN), i32::from(CAUSEWAY_CREST_MAX));
+        }
+        // Occasional islets: stretches of 6 spine cells gain an extra ring.
+        let extra = i32::from(crate::hash::hash3(k / 6, 3, 0, seed) & 3 == 0);
+        let width = 1 + extra;
+
+        let carve = |w: &mut World, f: usize, cx: i32, cy: i32, lat: i32| {
+            let bd = (lat - crest).abs();
+            if bd <= width {
+                carve_cell(w, f, cx, cy, (base - bd) as i16);
+            } else if bd <= width + 3 {
+                raise_seabed(w, f, cx, cy, CAUSEWAY_APRON[(bd - width - 1) as usize]);
+            }
+        };
+        carve(w, face, x, y, 0);
+        // Step sideways from the spine, seam-aware, far enough to cover the
+        // widest dry band plus the three apron rings on each side.
+        for side in [1usize, 3] {
+            let (mut f, mut cx, mut cy) = (face, x, y);
+            let mut d = (dir + side) % 4;
+            for n in 1..=(width + 4) {
+                let (nf, nx, ny, nd) = crate::seams::step(f, cx, cy, d);
+                f = nf;
+                cx = nx;
+                cy = ny;
+                d = nd;
+                let lat = if side == 1 { n } else { -n };
+                carve(w, f, cx, cy, lat);
+            }
+        }
+        k += 1;
     });
 }
 
@@ -740,17 +843,29 @@ mod tests {
     fn the_causeway_floods_at_wave_peak_and_reopens() {
         let mut w = World::boxed();
         w.init(&MapConfig::DEFAULT);
-        // Mid side-face, guaranteed to be carved ocean rather than spawn
-        // plateau: a quarter of the way along the corridor.
-        let (face, x, y) = corridor_cell(N);
-        let c = idx(face as usize, x as usize, y as usize);
-        assert!(w.passable(c), "the causeway is not passable at calm sea");
 
         let peak = crate::tide::wave_strength(&w, 0);
+        // The whole crest band sits under every wave peak and its lowest dry
+        // cell stays above the flood cap — the two walls of the design.
         assert!(
-            i32::from(CAUSEWAY_HEIGHT) < i32::from(w.sea_base) + i32::from(peak),
-            "the first wave peak does not clear the causeway"
+            i32::from(CAUSEWAY_CREST_MAX) < i32::from(w.sea_base) + i32::from(peak),
+            "the first wave peak does not clear the causeway band"
         );
+        assert!(
+            i32::from(CAUSEWAY_CREST_MIN) - 2 > i32::from(crate::powers::FLOOD_CAP),
+            "the causeway band floor is floodable shut"
+        );
+
+        // Probe a carved-ocean spine cell (band height, not natural land): a
+        // quarter of the way along, scanning forward past any natural ridge.
+        let c = (N..CORRIDOR_STEPS)
+            .map(|i| {
+                let (face, x, y) = corridor_cell(i);
+                idx(face as usize, x as usize, y as usize)
+            })
+            .find(|&c| w.height[c] <= CAUSEWAY_CREST_MAX)
+            .expect("no carved-ocean cell in the corridor's back half");
+        assert!(w.passable(c), "the causeway is not passable at calm sea");
         w.sea_level = w.sea_base + peak;
         assert!(!w.passable(c), "the causeway survives a wave peak");
         w.sea_level = w.sea_base;
@@ -766,16 +881,45 @@ mod tests {
             let (face, x, y) = corridor_cell(i);
             let c = idx(face as usize, x as usize, y as usize);
             assert!(w.passable(c), "corridor cell {i} is not passable");
-            if w.height[c] == CAUSEWAY_HEIGHT {
+            if (CAUSEWAY_CREST_MIN - 2..=CAUSEWAY_CREST_MAX).contains(&w.height[c]) {
                 carved_ocean += 1;
-                // The flank offset exists so no 3x3 equal-height plateau ever
-                // forms on the road: contestable ground, never a build site.
+                // The unimodal lateral falloff exists so no 3x3 equal-height
+                // plateau ever forms on the road: contestable ground, never a
+                // build site.
                 assert!(w.plateau[c] < 3, "corridor cell {i} is a build site");
             }
         }
         // On the archipelago most of the road really is reclaimed ocean; if
         // nothing was carved the corridor did not do its job.
         assert!(carved_ocean > CORRIDOR_STEPS / 2, "the causeway carved almost nothing");
+    }
+
+    #[test]
+    fn the_causeway_band_never_founds_a_settlement() {
+        // The passable/unsettleable test walks the spine; this one covers the
+        // whole carved band, on several seeds, since the crest jitter is
+        // seed-dependent. Any dry band cell that detects as a 3x3 plateau
+        // would hand a player a build site in the middle of the one road.
+        for seed in [0x5EEDu32, 1, 7, 99] {
+            let mut w = World::boxed();
+            w.init(&MapConfig { seed, ..MapConfig::DEFAULT });
+            for face in 0..6usize {
+                for y in 0..N {
+                    for x in 0..N {
+                        let c = idx(face, x, y);
+                        if (CAUSEWAY_CREST_MIN - 2..=CAUSEWAY_CREST_MAX).contains(&w.height[c])
+                            && w.material[c] == crate::world::MAT_ROCK
+                            && w.water[c] == 0
+                        {
+                            assert!(
+                                w.plateau[c] < 3,
+                                "seed {seed:#x}: band cell f{face} ({x},{y}) is a build site"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The road has to survive the physics it is parked in: granular movement

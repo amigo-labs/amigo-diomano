@@ -295,10 +295,18 @@ fn tick_order_is_the_order_the_spec_lists() {
         w.tick(&[]);
         if w.tide.offset > 0 {
             // Sea level and the water field must agree within the same tick.
+            // Probe a rock cell: granular material can erode *after* the water
+            // pass within the same tick, which shaves a few units off
+            // `height + water` without any tide/water misordering — a tide
+            // running after water would leave an offset-sized gap, and rock's
+            // height no pass can move, so on rock the equality is exact.
             let c = (0..6)
                 .flat_map(|f| (0..N).flat_map(move |y| (0..N).map(move |x| (f, x, y))))
                 .map(|(f, x, y)| crate::world::idx(f, x, y))
-                .find(|&c| i32::from(w.height[c]) < i32::from(w.sea_level));
+                .find(|&c| {
+                    i32::from(w.height[c]) < i32::from(w.sea_level)
+                        && w.material[c] == crate::world::MAT_ROCK
+                });
             if let Some(c) = c {
                 assert!(
                     i32::from(w.height[c]) + i32::from(w.water[c]) >= i32::from(w.sea_level),

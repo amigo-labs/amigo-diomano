@@ -55,9 +55,11 @@ const ZOOM_SMOOTHING = 0.009;
  *
  * The limb sits `asin(R / d)` from the nadir direction — 47.8° at 1.35 R — so
  * tilting ~32° puts it just inside the top of a 45° frame with the working area
- * still below the centre line.
+ * still below the centre line. 0.5585 rad *is* those 32 degrees: it used to be
+ * 0.42 (24°), which left the horizon lower in frame than this comment — and the
+ * `DIO_GRAZE` tuning in atmosphere.ts, which assumes the same 32° — claimed.
  */
-const MAX_TILT = 0.42;
+const MAX_TILT = 0.5585;
 
 export interface OrbitCamera {
   readonly camera: THREE.PerspectiveCamera;

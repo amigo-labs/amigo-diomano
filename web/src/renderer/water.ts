@@ -140,9 +140,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // layers by the same fraction and then blending them is the same result as
     // fogging the blend, without the sea having to know what is under it.
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
-    // Same limb gate as the terrain, weaker: water is already sky-coloured.
-    float limb = 1.0 - smoothstep(0.18, 0.58, max(dot(up, viewDir), 0.0));
-    colour = mix(colour, air.rgb, air.a * limb * 0.10);
+    // Same limb gate as the terrain, weaker: water is already sky-coloured
+    // through its Fresnel term, so it needs less help to meet the horizon at
+    // the same colour as the land beside it.
+    float limb = 1.0 - smoothstep(0.12, 0.62, max(dot(up, viewDir), 0.0));
+    colour = mix(colour, air.rgb, air.a * limb * 0.50);
 
     float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995);
     gl_FragColor = vec4(colour, alpha);

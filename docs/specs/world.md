@@ -192,8 +192,43 @@ is only sound while that holds.
 
 Seamless by construction: the noise is sampled at the cell's position **on the
 cube, in 3D**. Adjacent cells across a face boundary are adjacent in 3D too, so
-no per-face fixup exists to get wrong. Four octaves of integer value noise with
+no per-face fixup exists to get wrong. Five octaves of integer value noise with
 trilinear interpolation and integer smoothstep; no floats anywhere.
+
+The stack has some shape to it, all of it there because the plain four-octave
+average produced walls and blobs:
+
+- **Per-octave offsets and axis swizzles.** With aligned lattices, every
+  cube-face plane sat exactly on a lattice plane of every octave, and the
+  smoothstep's zero derivative there drew straight, flat bands — and straight
+  coastlines — along all twelve cube edges. Each octave now samples at its own
+  odd offset and axis permutation; both are exact integer isometries, so seam
+  continuity is untouched.
+- **Re-weighted octaves.** The old dominant octave's lattice spacing was the
+  whole cube half-extent (~2 cells per axis over the entire planet), which made
+  every map two smoothstep blobs per face. It is demoted to a continental
+  tilt; the half-spacing octave leads, and a new fine octave adds the texture
+  the old stack lacked.
+- **One ridged octave** (`ridge(n) = 65535 - |2n - 65535|`): connected
+  mountain chains instead of round bumps.
+- **Domain warp** (amplitude 600, ~0.3 of the dominant spacing): value noise
+  has square isolines; sampling the height through a low-frequency warp of the
+  cube point bends them into natural curves. The warp field is itself a
+  continuous function of the 3D cube point, so nothing about it can introduce a
+  seam.
+- **Midrange widening** (`widen(h) = smooth((h - 16384) * 2)`): the weighted
+  octave average clusters around the midpoint, so the nominal ±720 amplitude
+  was almost never reached and the rock threshold (380) and the renderer's
+  snowline never fired. The smoothstep remap triples the slope at the midpoint
+  and saturates smoothly.
+- **Bias as a sea-level shift, not a subtraction.** Each terrain profile's bias
+  moves where the sea sits in the distribution, then both sides are stretched
+  back to the full ±720 span — subtracting it outright also lowered every peak,
+  which is how the wetter profiles lost their mountains. Biases are measured
+  against the widened distribution (archipelago 350, pangaea -40, volcano 210)
+  and pinned by `world::tests::terrain_profiles_produce_playable_land`:
+  land fraction per profile, rock cells, real peaks, real ocean floor, across
+  four seeds each.
 
 `world::tests::terrain_is_continuous_across_every_seam` asserts that the mean
 height step across a seam is within 3x the mean step inside a face.

@@ -125,8 +125,33 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uTier;
   uniform float uWarning;
 
+  // CC0 surface textures (docs/ASSETS.md). uTexMix is 0 until every map has
+  // arrived, so the purely procedural shading below is the fallback, not a
+  // black flash — the front door covers the load in practice.
+  uniform sampler2D uTexRock;
+  uniform sampler2D uTexGrass;
+  uniform sampler2D uTexSand;
+  uniform sampler2D uTexDirt;
+  uniform sampler2D uTexSnow;
+  uniform float uTexMix;
+
   ${CLOUD_NOISE_GLSL}
   ${SKY_GLSL}
+
+  // Triplanar sample: the quadsphere has no UV atlas (slope/height texturing
+  // exists precisely to avoid one), so textures are projected along the three
+  // world axes and blended by the geometric normal. The sharp weight power
+  // keeps the blend zones narrow enough that the projections never read as
+  // ghosting.
+  vec3 dioTriplanar(sampler2D t, vec3 p, vec3 nrm, float scale) {
+    vec3 w = abs(nrm);
+    w = w * w;
+    w = w * w;
+    w /= (w.x + w.y + w.z);
+    return texture2D(t, p.yz * scale).rgb * w.x
+         + texture2D(t, p.xz * scale).rgb * w.y
+         + texture2D(t, p.xy * scale).rgb * w.z;
+  }
 
   // Material ids from world.rs: 0 rock, 1 sand, 2 soil, 3 ash, 4 swamp.
   // Saturated earth. Pale greys sit at the same value as the sea after ACES.
@@ -154,19 +179,81 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     vec3 albedo = materialColour(vAttrib.r);
 
+    // Texture structure, keyed by the same material id and applied as a
+    // modulation of the palette rather than a replacement for it — the colour
+    // script (saturated earth, §7.3's ACES note) stays authored, the textures
+    // supply what noise octaves cannot: photographic micro-structure. Sampled
+    // against the geometric normal, before the bump perturbs it.
+    vec3 tRock = vec3(0.48);
+    vec3 tSand = vec3(0.55);
+    vec3 tGrass = vec3(0.45);
+    vec3 tSnow = vec3(0.9);
+    if (uTexMix > 0.001) {
+      tRock = dioTriplanar(uTexRock, vWorld, n, 16.0);
+      tSand = dioTriplanar(uTexSand, vWorld, n, 26.0);
+      tGrass = dioTriplanar(uTexGrass, vWorld, n, 22.0);
+      tSnow = dioTriplanar(uTexSnow, vWorld, n, 18.0);
+      vec3 tDirt = dioTriplanar(uTexDirt, vWorld, n, 20.0);
+      float mId = vAttrib.r * 255.0;
+      float isR = 1.0 - step(0.5, mId);
+      float isS = step(0.5, mId) * (1.0 - step(1.5, mId));
+      vec3 t = tRock * isR + tSand * isS + tDirt * (1.0 - isR - isS);
+      albedo *= mix(vec3(1.0), t * 2.1, uTexMix);
+    }
+
     // Multi-octave ground grain, and a bump from the same field so the
     // Laplacian-smooth mesh still lights as hills rather than as a fill.
     float n1 = dioNoise(up * 14.0);
     float n2 = dioNoise(up * 36.0);
     float n3 = dioNoise(up * 90.0);
     float grain = n1 * 0.50 + n2 * 0.32 + n3 * 0.18;
-    albedo *= 0.82 + grain * 0.36;
-    vec3 tangent = normalize(cross(up, vec3(0.0, 1.0, 0.0) + 0.002));
+
+    // The finest octave above is ~3 cells wide, so up close the ground was a
+    // smooth fill — most of what read as plastic. Two micro octaves fade in
+    // with proximity (and only cost anything when the branch is taken); the
+    // fade keeps them from shimmering at orbit distance, where a texel would
+    // cover many noise cells.
+    float eyeDist = distance(uCameraPosition, vWorld);
+    float detail = 1.0 - smoothstep(0.45, 1.30, eyeDist);
+    float mid = dioNoise(up * 230.0);
+    float mc = 0.5;
+    float micro = 0.5;
+    if (detail > 0.001) {
+      mc = dioNoise(up * 620.0);
+      micro = mc * 0.6 + dioNoise(up * 1500.0) * 0.4;
+    }
+
+    albedo *= 0.82 + grain * 0.34 + (mid - 0.5) * 0.16;
+    albedo *= 1.0 + (micro - 0.5) * 0.34 * detail;
+    // Large-scale warm/cool drift, so no two regions of a continent are quite
+    // the same colour — uniform albedo over a smooth mesh is the other half of
+    // the plastic look.
+    float province = dioNoise(up * 4.5);
+    albedo *= mix(vec3(0.95, 0.98, 1.04), vec3(1.06, 1.01, 0.95), province);
+    // Reference axis picked per branch so the tangent frame never degenerates:
+    // built from a fixed world-Y reference it collapsed at the poles into a
+    // visible whorl. The switch happens at ~82 degrees latitude, where both
+    // frames are still well-conditioned. Not derivatives (dFdx frames vary the
+    // bump strength with zoom).
+    vec3 axis = abs(up.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, axis));
     vec3 bitangent = cross(up, tangent);
     float gx = dioNoise(normalize(up + tangent * 0.010) * 14.0);
     float gy = dioNoise(normalize(up + bitangent * 0.010) * 14.0);
-    n = normalize(n + tangent * (n1 - gx) * 5.5 + bitangent * (n1 - gy) * 5.5);
-    slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
+    // 3.5 is a bump height of 0.035 over the 0.010 sample step — the bare 5.5
+    // before was an unnormalised finite difference, strong enough to invent
+    // relief the geometry does not have. And the bump stays out of slope:
+    // it re-lights the grain, it does not repaint the rock, grass and snow
+    // masks below, which key on the geometric slope alone.
+    vec3 bumped = n + tangent * (n1 - gx) * 3.5 + bitangent * (n1 - gy) * 3.5;
+    // Micro relief where the micro albedo already is: ground up close lights
+    // as granular material, not as a painted smooth surface.
+    if (detail > 0.001) {
+      float mx = dioNoise(normalize(up + tangent * 0.0018) * 620.0);
+      float my = dioNoise(normalize(up + bitangent * 0.0018) * 620.0);
+      bumped += (tangent * (mc - mx) + bitangent * (mc - my)) * 1.8 * detail;
+    }
+    n = normalize(bumped);
 
     // Fertility is potential; vegetation is what grew. Generation writes the
     // first and leaves the second at 0, so meadow has to come from fertility
@@ -181,18 +268,41 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 meadow = vec3(0.28, 0.52, 0.14);
     vec3 dryGrass = vec3(0.42, 0.46, 0.16);
     vec3 canopy = vec3(0.11, 0.36, 0.09);
-    albedo = mix(albedo, mix(dryGrass, meadow, fert), grassMask * 0.90);
+    // Meadow comes in patches, not as a uniform tint keyed on fertility alone:
+    // real grassland is mottled where the ground holds water, and the mottling
+    // is what stops a green area reading as a decal.
+    float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 52.0) * 0.65 + fert * 0.35);
+    // Grass keeps its authored hue and takes only the texture's *luminance*
+    // as structure: green photo times green palette oversaturates.
+    float gLum = dot(tGrass, vec3(0.299, 0.587, 0.114));
+    vec3 grassCol = mix(dryGrass, meadow, meadowPatch) * mix(1.0, gLum * 2.3, uTexMix);
+    albedo = mix(albedo, grassCol, grassMask * 0.90);
     albedo = mix(albedo, canopy, veg * above * (1.0 - beach) * 0.95);
     albedo = mix(albedo, vec3(0.48, 0.40, 0.24), vAttrib2.b * 0.30);
-    albedo = mix(albedo, vec3(0.36, 0.30, 0.24), smoothstep(0.28, 0.68, slope));
+    // Steep ground reads as bedded rock: the strata sample moves with altitude
+    // so the banding follows the contour lines, broken up laterally by the
+    // same noise everything else uses. One flat rock colour was a third of
+    // the plastic look on every cliff.
+    float strata = dioNoise(up * 30.0 + vAltitude * vec3(120.0, 300.0, 190.0));
+    float rockBand = smoothstep(0.28, 0.68, slope);
+    vec3 cliff = mix(vec3(0.30, 0.25, 0.20), vec3(0.47, 0.41, 0.33), strata);
+    cliff *= mix(vec3(1.0), tRock * 2.1, uTexMix);
+    albedo = mix(albedo, cliff, rockBand);
 
     // Snowline inside the altitude the terrain can reach (amp 720 → 0.0576 R).
+    // Snow is not one white: hollows go cold blue-grey, exposed crust goes
+    // bright, and the micro grain gives it sparkle-scale structure up close.
     float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
-    albedo = mix(albedo, vec3(0.90, 0.92, 0.94), snow);
+    vec3 snowCol =
+      mix(vec3(0.62, 0.70, 0.84), vec3(0.93, 0.95, 0.98), clamp(0.25 + grain * 0.7 + (micro - 0.5) * 0.5 * detail, 0.0, 1.0));
+    snowCol *= mix(1.0, dot(tSnow, vec3(0.299, 0.587, 0.114)) * 1.35, uTexMix);
+    albedo = mix(albedo, snowCol, snow);
 
     vec3 beachSand = vec3(0.78, 0.64, 0.38);
     vec3 wetSand = vec3(0.52, 0.40, 0.24);
-    albedo = mix(albedo, mix(beachSand, wetSand, 1.0 - smoothstep(0.0, 0.003, vAltitude)), beach);
+    vec3 beachCol = mix(beachSand, wetSand, 1.0 - smoothstep(0.0, 0.003, vAltitude));
+    beachCol *= mix(1.0, dot(tSand, vec3(0.299, 0.587, 0.114)) * 1.9, uTexMix);
+    albedo = mix(albedo, beachCol, beach);
 
     // Standing water darkens the ground it sits on. Not a cyan wash.
     albedo *= 1.0 - clamp(vAttrib.a * 4.0, 0.0, 1.0) * 0.35;
@@ -216,11 +326,25 @@ const FRAGMENT_SHADER = /* glsl */ `
     }
     vec3 viewDir = normalize(uCameraPosition - vWorld);
     // Soft camera-anchored fill so the night side stays readable (§7.2). Small:
-    // it is there to keep the dark side legible, not to light the scene.
-    float fill = max(dot(n, viewDir), 0.0) * 0.18;
-    float sky = clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0) * 0.14;
+    // it is there to keep the dark side legible, not to light the scene — and
+    // kept below where it was, because a view-anchored term over matte ground
+    // is precisely the sheen of plastic. The sky bounce picks up the slack.
+    float fill = max(dot(n, viewDir), 0.0) * 0.13;
+    float sky = clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0) * 0.17;
 
     vec3 lit = albedo * (lambert * vec3(1.16, 1.08, 0.86) + fill + sky * vec3(0.34, 0.46, 0.32));
+
+    // Specular only where the material earns it — snow crust and the wet band
+    // at the waterline. Land is otherwise matte; a uniform highlight on soil
+    // and grass is the other precise signature of plastic, which is why there
+    // is deliberately none.
+    float wet = beach * (1.0 - smoothstep(0.0, 0.003, vAltitude));
+    float glossMask = snow * 0.30 + wet * 0.35;
+    if (glossMask > 0.001) {
+      vec3 h = normalize(uSunDirection + viewDir);
+      float spec = pow(max(dot(n, h), 0.0), 56.0) * lambert;
+      lit += spec * glossMask * vec3(1.10, 1.06, 0.98);
+    }
 
     // Lava, and it is emissive rather than lit: it *is* the light source, so it
     // is written over the shaded result instead of being multiplied by the sun.
@@ -251,10 +375,17 @@ const FRAGMENT_SHADER = /* glsl */ `
     // horizon column *is* dimmer and bluer than one at the player's feet, and
     // that is most of what tells the eye which one is far away.
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
-    // Limb only. Overhead, a full Chapman mix is sky-coloured, so the working
-    // ground disappears into the same blue as the horizon.
-    float limb = 1.0 - smoothstep(0.18, 0.58, max(dot(up, viewDir), 0.0));
-    lit = mix(lit, air.rgb, air.a * limb * 0.18);
+    // Limb-gated, and the gate is the whole invariant: overhead a full Chapman
+    // mix is sky-coloured, so the working ground would disappear into the same
+    // blue as the horizon. With the 32-degree tilt the ground under the cursor
+    // sits at dot(up, viewDir) >= 0.70 even at the closest approach, so an
+    // upper edge of 0.62 keeps the working area at exactly zero haze by
+    // construction — which is what frees the gain at the limb to be a real
+    // drown-into-air gradient (~0.6 at the tangent) instead of the 0.18 cap
+    // that left the ground running crisp to the edge and the planet reading
+    // as a disc.
+    float limb = 1.0 - smoothstep(0.12, 0.62, max(dot(up, viewDir), 0.0));
+    lit = mix(lit, air.rgb, air.a * limb * 0.75);
 
     gl_FragColor = vec4(lit, 1.0);
   }
@@ -262,6 +393,36 @@ const FRAGMENT_SHADER = /* glsl */ `
 
 export function createPlanet(sim: Sim, view: View): Planet {
   const group = new THREE.Group();
+
+  // CC0 surface textures (docs/ASSETS.md), loaded behind the title card. The
+  // shader multiplies them over the authored palette only once uTexMix flips
+  // to 1, so a slow connection sees the procedural shading, never black — a
+  // half-loaded set would tile some materials and not others, which is why
+  // the flip waits for all five.
+  const texMix = { value: 0 };
+  const loader = new THREE.TextureLoader();
+  let texPending = 5;
+  const loadTex = (file: string): THREE.Texture => {
+    const t = loader.load(
+      `tex/${file}`,
+      () => {
+        texPending -= 1;
+        if (texPending === 0) texMix.value = 1;
+      },
+      undefined,
+      () => {
+        // Staying at uTexMix = 0 is the correct outcome — an unloaded texture
+        // samples black, so flipping with one map missing would paint that
+        // material black — but it must not be a *silent* outcome, or a 404
+        // here is undebuggable in the field.
+        console.warn(`planet: texture tex/${file} failed to load; staying on procedural shading`);
+      },
+    );
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
 
   const material = new THREE.ShaderMaterial({
     vertexShader: VERTEX_SHADER,
@@ -278,6 +439,12 @@ export function createPlanet(sim: Sim, view: View): Planet {
       uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
       uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
       uTier: { value: 2 },
+      uTexRock: { value: loadTex("rock.webp") },
+      uTexGrass: { value: loadTex("grass.webp") },
+      uTexSand: { value: loadTex("sand.webp") },
+      uTexDirt: { value: loadTex("dirt.webp") },
+      uTexSnow: { value: loadTex("snow.webp") },
+      uTexMix: texMix,
     },
   });
 
