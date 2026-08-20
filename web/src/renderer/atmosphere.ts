@@ -71,10 +71,15 @@ export interface Atmosphere {
  * subtle enough to look like a lighting bug rather than a copy-paste one.
  */
 export const CLOUD_NOISE_GLSL = /* glsl */ `
+  // Not the classic product hash: fract(x*y*z*(x+y+z)) is symmetric under any
+  // permutation of the components — the noise field mirrored across the x=y,
+  // y=z and x=z planes — and it collapses to ~0 whenever one component lands
+  // near an integer, which drew regularly spaced dead bands through the grain,
+  // the bump and the clouds. This one (Hoskins-style) has neither defect.
   float dioHash(vec3 p) {
-    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
-    p *= 17.0;
-    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+    p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+    p += dot(p, p.yxz + 33.33);
+    return fract((p.x + p.y) * p.z);
   }
   float dioNoise(vec3 x) {
     vec3 i = floor(x);

@@ -160,7 +160,29 @@ const FRAGMENT_SHADER = /* glsl */ `
     float n2 = dioNoise(up * 36.0);
     float n3 = dioNoise(up * 90.0);
     float grain = n1 * 0.50 + n2 * 0.32 + n3 * 0.18;
-    albedo *= 0.82 + grain * 0.36;
+
+    // The finest octave above is ~3 cells wide, so up close the ground was a
+    // smooth fill — most of what read as plastic. Two micro octaves fade in
+    // with proximity (and only cost anything when the branch is taken); the
+    // fade keeps them from shimmering at orbit distance, where a texel would
+    // cover many noise cells.
+    float eyeDist = distance(uCameraPosition, vWorld);
+    float detail = 1.0 - smoothstep(0.45, 1.30, eyeDist);
+    float mid = dioNoise(up * 230.0);
+    float mc = 0.5;
+    float micro = 0.5;
+    if (detail > 0.001) {
+      mc = dioNoise(up * 620.0);
+      micro = mc * 0.6 + dioNoise(up * 1500.0) * 0.4;
+    }
+
+    albedo *= 0.82 + grain * 0.34 + (mid - 0.5) * 0.16;
+    albedo *= 1.0 + (micro - 0.5) * 0.34 * detail;
+    // Large-scale warm/cool drift, so no two regions of a continent are quite
+    // the same colour — uniform albedo over a smooth mesh is the other half of
+    // the plastic look.
+    float province = dioNoise(up * 4.5);
+    albedo *= mix(vec3(0.95, 0.98, 1.04), vec3(1.06, 1.01, 0.95), province);
     // Reference axis picked per branch so the tangent frame never degenerates:
     // built from a fixed world-Y reference it collapsed at the poles into a
     // visible whorl. The switch happens at ~82 degrees latitude, where both
@@ -176,7 +198,15 @@ const FRAGMENT_SHADER = /* glsl */ `
     // relief the geometry does not have. And the bump stays out of slope:
     // it re-lights the grain, it does not repaint the rock, grass and snow
     // masks below, which key on the geometric slope alone.
-    n = normalize(n + tangent * (n1 - gx) * 3.5 + bitangent * (n1 - gy) * 3.5);
+    vec3 bumped = n + tangent * (n1 - gx) * 3.5 + bitangent * (n1 - gy) * 3.5;
+    // Micro relief where the micro albedo already is: ground up close lights
+    // as granular material, not as a painted smooth surface.
+    if (detail > 0.001) {
+      float mx = dioNoise(normalize(up + tangent * 0.0018) * 620.0);
+      float my = dioNoise(normalize(up + bitangent * 0.0018) * 620.0);
+      bumped += (tangent * (mc - mx) + bitangent * (mc - my)) * 1.8 * detail;
+    }
+    n = normalize(bumped);
 
     // Fertility is potential; vegetation is what grew. Generation writes the
     // first and leaves the second at 0, so meadow has to come from fertility
@@ -191,14 +221,28 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 meadow = vec3(0.28, 0.52, 0.14);
     vec3 dryGrass = vec3(0.42, 0.46, 0.16);
     vec3 canopy = vec3(0.11, 0.36, 0.09);
-    albedo = mix(albedo, mix(dryGrass, meadow, fert), grassMask * 0.90);
+    // Meadow comes in patches, not as a uniform tint keyed on fertility alone:
+    // real grassland is mottled where the ground holds water, and the mottling
+    // is what stops a green area reading as a decal.
+    float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 52.0) * 0.65 + fert * 0.35);
+    albedo = mix(albedo, mix(dryGrass, meadow, meadowPatch), grassMask * 0.90);
     albedo = mix(albedo, canopy, veg * above * (1.0 - beach) * 0.95);
     albedo = mix(albedo, vec3(0.48, 0.40, 0.24), vAttrib2.b * 0.30);
-    albedo = mix(albedo, vec3(0.36, 0.30, 0.24), smoothstep(0.28, 0.68, slope));
+    // Steep ground reads as bedded rock: the strata sample moves with altitude
+    // so the banding follows the contour lines, broken up laterally by the
+    // same noise everything else uses. One flat rock colour was a third of
+    // the plastic look on every cliff.
+    float strata = dioNoise(up * 30.0 + vAltitude * vec3(120.0, 300.0, 190.0));
+    float rockBand = smoothstep(0.28, 0.68, slope);
+    albedo = mix(albedo, mix(vec3(0.30, 0.25, 0.20), vec3(0.47, 0.41, 0.33), strata), rockBand);
 
     // Snowline inside the altitude the terrain can reach (amp 720 → 0.0576 R).
+    // Snow is not one white: hollows go cold blue-grey, exposed crust goes
+    // bright, and the micro grain gives it sparkle-scale structure up close.
     float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
-    albedo = mix(albedo, vec3(0.90, 0.92, 0.94), snow);
+    vec3 snowCol =
+      mix(vec3(0.62, 0.70, 0.84), vec3(0.93, 0.95, 0.98), clamp(0.25 + grain * 0.7 + (micro - 0.5) * 0.5 * detail, 0.0, 1.0));
+    albedo = mix(albedo, snowCol, snow);
 
     vec3 beachSand = vec3(0.78, 0.64, 0.38);
     vec3 wetSand = vec3(0.52, 0.40, 0.24);
@@ -226,11 +270,25 @@ const FRAGMENT_SHADER = /* glsl */ `
     }
     vec3 viewDir = normalize(uCameraPosition - vWorld);
     // Soft camera-anchored fill so the night side stays readable (§7.2). Small:
-    // it is there to keep the dark side legible, not to light the scene.
-    float fill = max(dot(n, viewDir), 0.0) * 0.18;
-    float sky = clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0) * 0.14;
+    // it is there to keep the dark side legible, not to light the scene — and
+    // kept below where it was, because a view-anchored term over matte ground
+    // is precisely the sheen of plastic. The sky bounce picks up the slack.
+    float fill = max(dot(n, viewDir), 0.0) * 0.13;
+    float sky = clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0) * 0.17;
 
     vec3 lit = albedo * (lambert * vec3(1.16, 1.08, 0.86) + fill + sky * vec3(0.34, 0.46, 0.32));
+
+    // Specular only where the material earns it — snow crust and the wet band
+    // at the waterline. Land is otherwise matte; a uniform highlight on soil
+    // and grass is the other precise signature of plastic, which is why there
+    // is deliberately none.
+    float wet = beach * (1.0 - smoothstep(0.0, 0.003, vAltitude));
+    float glossMask = snow * 0.30 + wet * 0.35;
+    if (glossMask > 0.001) {
+      vec3 h = normalize(uSunDirection + viewDir);
+      float spec = pow(max(dot(n, h), 0.0), 56.0) * lambert;
+      lit += spec * glossMask * vec3(1.10, 1.06, 0.98);
+    }
 
     // Lava, and it is emissive rather than lit: it *is* the light source, so it
     // is written over the shaded result instead of being multiplied by the sun.
