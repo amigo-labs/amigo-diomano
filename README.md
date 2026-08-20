@@ -67,5 +67,7 @@ never published, so every `[START]` has to be playtested rather than sourced.
 
 ## Licence
 
-MIT. Everything is procedural — shaders, geometry, audio — so there is no
-third-party asset exposure.
+MIT. Shaders, geometry and audio are procedural; the only third-party assets
+are five CC0 surface textures from ambientCG (public domain, no attribution
+required) — provenance in `docs/ASSETS.md`, per HANDOFF §7.5's "CC0 only"
+clause.
