@@ -107,12 +107,16 @@ export function createView(): View {
       // camera is ever parented to something.
       cameraPosition.value.setFromMatrixPosition(camera.matrixWorld);
       cameraDistance.value = cameraPosition.value.length();
-      // Full cover from 2.15 radii out, fully dissolved by 1.55 — the close
-      // half of the zoom range works under a clear sky. BASE_RADIUS is 1, so
-      // the distance already is in radii. Smoothstep, computed once here
-      // rather than per-fragment in two shaders.
+      // Full cover from 2.15 radii out, thinned to a quarter by 1.55 — the
+      // close half of the zoom range works under a nearly clear sky, but the
+      // clouds never dissolve entirely: the shell at 1.065 R is the one layer
+      // that parallaxes against the ground while orbiting, the most direct
+      // it-is-a-sphere cue the renderer has, and at a floor of 0.25 x 0.16
+      // alpha (~4% cover) it cannot hide terrain. BASE_RADIUS is 1, so the
+      // distance already is in radii. Smoothstep, computed once here rather
+      // than per-fragment in two shaders; the ground shadows share the value.
       const t = Math.min(Math.max((cameraDistance.value - 1.55) / (2.15 - 1.55), 0), 1);
-      cloudFade.value = t * t * (3 - 2 * t);
+      cloudFade.value = 0.25 + 0.75 * (t * t * (3 - 2 * t));
       const angle = (tick / DAY_TICKS) * Math.PI * 2;
       sunDirection.value.set(Math.cos(angle), 0.42, Math.sin(angle)).normalize();
       // Simulation time, so clouds move at a rate a player can relate to the

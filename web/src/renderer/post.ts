@@ -32,9 +32,12 @@ export function createPost(
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
 
-  // Threshold above the atmosphere rim (~1.0) so the sky does not bloom
-  // across the disk. Lava peaks at 1.75 and still clears it.
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.12 : 0.06, 0.18, 1.05);
+  // Threshold at 1.0: the atmosphere rim peaks at cover x colour <= ~0.9 even
+  // under warning red, so the sky still never blooms across the disk, while
+  // lava's 1.75 core clears it with margin. The wider radius is for lava and
+  // the night lights — the limb's own halo is the shell's exponential falloff,
+  // not bloom, so do not chase it by lowering this threshold.
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), tier >= 2 ? 0.12 : 0.06, 0.28, 1.0);
   composer.addPass(bloom);
 
   // `OutputPass` before FXAA, not after. FXAA thresholds on luma, so it needs

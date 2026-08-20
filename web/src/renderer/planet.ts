@@ -161,12 +161,22 @@ const FRAGMENT_SHADER = /* glsl */ `
     float n3 = dioNoise(up * 90.0);
     float grain = n1 * 0.50 + n2 * 0.32 + n3 * 0.18;
     albedo *= 0.82 + grain * 0.36;
-    vec3 tangent = normalize(cross(up, vec3(0.0, 1.0, 0.0) + 0.002));
+    // Reference axis picked per branch so the tangent frame never degenerates:
+    // built from a fixed world-Y reference it collapsed at the poles into a
+    // visible whorl. The switch happens at ~82 degrees latitude, where both
+    // frames are still well-conditioned. Not derivatives (dFdx frames vary the
+    // bump strength with zoom).
+    vec3 axis = abs(up.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, axis));
     vec3 bitangent = cross(up, tangent);
     float gx = dioNoise(normalize(up + tangent * 0.010) * 14.0);
     float gy = dioNoise(normalize(up + bitangent * 0.010) * 14.0);
-    n = normalize(n + tangent * (n1 - gx) * 5.5 + bitangent * (n1 - gy) * 5.5);
-    slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
+    // 3.5 is a bump height of 0.035 over the 0.010 sample step — the bare 5.5
+    // before was an unnormalised finite difference, strong enough to invent
+    // relief the geometry does not have. And the bump stays out of slope:
+    // it re-lights the grain, it does not repaint the rock, grass and snow
+    // masks below, which key on the geometric slope alone.
+    n = normalize(n + tangent * (n1 - gx) * 3.5 + bitangent * (n1 - gy) * 3.5);
 
     // Fertility is potential; vegetation is what grew. Generation writes the
     // first and leaves the second at 0, so meadow has to come from fertility
@@ -251,10 +261,17 @@ const FRAGMENT_SHADER = /* glsl */ `
     // horizon column *is* dimmer and bluer than one at the player's feet, and
     // that is most of what tells the eye which one is far away.
     vec4 air = dioAerial(vWorld, uCameraPosition, uSunDirection, uWarning);
-    // Limb only. Overhead, a full Chapman mix is sky-coloured, so the working
-    // ground disappears into the same blue as the horizon.
-    float limb = 1.0 - smoothstep(0.18, 0.58, max(dot(up, viewDir), 0.0));
-    lit = mix(lit, air.rgb, air.a * limb * 0.18);
+    // Limb-gated, and the gate is the whole invariant: overhead a full Chapman
+    // mix is sky-coloured, so the working ground would disappear into the same
+    // blue as the horizon. With the 32-degree tilt the ground under the cursor
+    // sits at dot(up, viewDir) >= 0.70 even at the closest approach, so an
+    // upper edge of 0.62 keeps the working area at exactly zero haze by
+    // construction — which is what frees the gain at the limb to be a real
+    // drown-into-air gradient (~0.6 at the tangent) instead of the 0.18 cap
+    // that left the ground running crisp to the edge and the planet reading
+    // as a disc.
+    float limb = 1.0 - smoothstep(0.12, 0.62, max(dot(up, viewDir), 0.0));
+    lit = mix(lit, air.rgb, air.a * limb * 0.75);
 
     gl_FragColor = vec4(lit, 1.0);
   }
