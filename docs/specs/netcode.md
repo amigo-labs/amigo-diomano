@@ -116,9 +116,12 @@ players on opposite faces, diomano has no naval movement, and on mostly-ocean
 terrain there was no land route between the two homes — the flow-field BFS never
 reached the far side, and both armies sat on their spawns for entire matches.
 What closed it is the **contact corridor** (`settlements::carve_contact_corridor`):
-a low rock causeway carved between the spawns at init, above the calm sea and
-below every wave peak, so it exists on every terrain and seed, floods at every
-tide impact and reopens at every recovery. The corpus script rallies both magnets
+a low rock causeway carved between the spawns at init — its crest wanders
+inside the `[CAUSEWAY_CREST_MIN, CAUSEWAY_CREST_MAX]` band (36–45), above the
+calm sea and the flood cap, below every wave peak — so it exists on every
+terrain and seed, floods at every tide impact and reopens at every recovery.
+The jitter is cosmetic geography (a ridge, not a wall); the spine path itself
+is untouched and `corridor_cell` is still a pure function of the walk index. The corpus script rallies both magnets
 on `corridor_cell(CORRIDOR_STEPS / 2)` in six-cycle windows — the window length
 matters, because walkers cross at ONE/16 cells per tick and a rally that rotates
 faster than an army can march is a yo-yo nobody ever reaches.
