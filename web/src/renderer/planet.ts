@@ -403,10 +403,23 @@ export function createPlanet(sim: Sim, view: View): Planet {
   const loader = new THREE.TextureLoader();
   let texPending = 5;
   const loadTex = (file: string): THREE.Texture => {
-    const t = loader.load(`tex/${file}`, () => {
-      texPending -= 1;
-      if (texPending === 0) texMix.value = 1;
-    });
+    const t = loader.load(
+      `tex/${file}`,
+      () => {
+        texPending -= 1;
+        if (texPending === 0) texMix.value = 1;
+      },
+      undefined,
+      () => {
+        // Staying at uTexMix = 0 is the correct outcome — an unloaded texture
+        // samples black, so flipping with one map missing would paint that
+        // material black — but it must not be a *silent* outcome, or a 404
+        // here is undebuggable in the field.
+        console.warn(
+          `planet: texture tex/${file} failed to load; ` + "staying on procedural shading",
+        );
+      },
+    );
     t.wrapS = THREE.RepeatWrapping;
     t.wrapT = THREE.RepeatWrapping;
     t.colorSpace = THREE.SRGBColorSpace;
