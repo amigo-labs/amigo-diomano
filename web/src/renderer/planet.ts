@@ -415,9 +415,7 @@ export function createPlanet(sim: Sim, view: View): Planet {
         // samples black, so flipping with one map missing would paint that
         // material black — but it must not be a *silent* outcome, or a 404
         // here is undebuggable in the field.
-        console.warn(
-          `planet: texture tex/${file} failed to load; ` + "staying on procedural shading",
-        );
+        console.warn(`planet: texture tex/${file} failed to load; staying on procedural shading`);
       },
     );
     t.wrapS = THREE.RepeatWrapping;
