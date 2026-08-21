@@ -289,13 +289,21 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Rays that strike the planet never reach this shell — the ground shaders
     // already put the air in front of the surface. Without the test, a BackSide
     // fragment whose closest approach sits inside the sphere (h ≈ 0) paints
-    // the disk with the whole tangent column. The feather starts at 0.972
-    // rather than hard against the limb: the outer ~3% of the disc gets a thin
-    // wedge of shell fog over it, so ground fades *into* the sky band instead
-    // of meeting it at a step — while the other 94% of the disc still gets no
-    // shell contribution at all, which is the invariant this test exists for.
+    // the disk with the whole tangent column.
+    //
+    // The feather stops *at* the limb rather than reaching 0.972 inside it. It
+    // was widened to hide a step at the silhouette, but there is no step to
+    // hide: tau below is written so it agrees with the ground shaders at h = 0
+    // by construction, which is the whole reason dioColumn is shared rather
+    // than copied. What the wide feather actually did was add the *full*
+    // tangent column, scaled only by offPlanet, on top of ground that had
+    // already hazed itself by the same amount — double-counted air. And it is
+    // not the "thin 3% wedge" the old comment claimed: b is an impact
+    // parameter, so a fixed band in b covers more and more screen as the camera
+    // descends and the limb flattens out, which is how it ended up as a bright
+    // band lying across the near sea.
     float b = length(cross(uCameraPosition, d));
-    float offPlanet = smoothstep(0.972, 1.002, b);
+    float offPlanet = smoothstep(0.9975, 1.002, b);
     if (offPlanet <= 0.001) discard;
     // Closest approach: the lowest point of the ray, where nearly all of its
     // scattering happens and the only place worth asking about the sun. Clamped

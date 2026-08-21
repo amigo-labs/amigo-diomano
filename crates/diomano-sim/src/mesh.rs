@@ -200,6 +200,23 @@ impl Mesh {
     }
 
     /// Fill the shared index buffer. Topology never changes, so this runs once.
+    ///
+    /// # Winding
+    ///
+    /// Counter-clockwise seen from *outside* the planet, which is what GL's
+    /// `frontFace(CCW)` and three's default `side: FrontSide` mean by
+    /// front-facing. `i` steps along `FACE_RIGHT` and `j` along `FACE_UP`, and
+    /// `build_seam_table` asserts `right x up == normal` in const eval, so
+    /// `a, b, c` gives `right x up`, i.e. outward, on all six faces.
+    ///
+    /// Emitting `a, c, b` instead — as this did until the winding test below was
+    /// written — is `up x right`, i.e. inward, and it is not a subtle defect:
+    /// with back faces culled the near hemisphere disappears and the *inner*
+    /// surface of the far one is drawn in its place. The silhouette stays a disc
+    /// of the right size and the normal attribute is forced outward
+    /// independently (`build_normals`), so it lit plausibly and read as a
+    /// see-through planet rather than as a broken mesh. See
+    /// `docs/specs/rendering.md`.
     pub fn build_indices(&mut self) {
         let mut k = 0usize;
         for j in 0..VERTS_PER_EDGE - 1 {
@@ -209,11 +226,11 @@ impl Mesh {
                 let c = a + VERTS_PER_EDGE as u16;
                 let d = c + 1;
                 self.indices[k] = a;
-                self.indices[k + 1] = c;
-                self.indices[k + 2] = b;
+                self.indices[k + 1] = b;
+                self.indices[k + 2] = c;
                 self.indices[k + 3] = b;
-                self.indices[k + 4] = c;
-                self.indices[k + 5] = d;
+                self.indices[k + 4] = d;
+                self.indices[k + 5] = c;
                 k += 6;
             }
         }
@@ -459,11 +476,22 @@ impl Mesh {
                 } else {
                     n = normalize(corner(self, gi, gj));
                 }
-                // Faces wind so that the outward normal points away from the
-                // planet centre; flip if the cross product came out inward. Read
-                // from `corners`, not `positions`: identical here, but it keeps
-                // every input to a normal on the same grid, so the two chunks
-                // sharing a border cannot diverge through this branch either.
+                // `du x dv` is `right x up`, which `build_seam_table` asserts is
+                // the outward normal, so this branch does not fire on any terrain
+                // the generator can produce: relief is at most 0.058 R against a
+                // two-cell tangent step, nowhere near enough to tip the cross
+                // product through the tangent plane. It stays as a cheap floor
+                // under a normal that must never point into the planet.
+                //
+                // It is emphatically *not* what keeps the planet the right way
+                // out: this forces the normal *attribute* outward and says
+                // nothing about the triangle winding, which is `build_indices`'
+                // business and was inward for six phases while
+                // `normals_are_unit_length_and_point_outward` stayed green off
+                // the back of this very branch. Read from `corners`, not
+                // `positions`: identical here, but it keeps every input to a
+                // normal on the same grid, so the two chunks sharing a border
+                // cannot diverge through this branch either.
                 let p = corner(self, gi, gj);
                 if n[0] * p[0] + n[1] * p[1] + n[2] * p[2] < 0.0 {
                     n = [-n[0], -n[1], -n[2]];
@@ -770,14 +798,14 @@ mod tests {
     fn libm_sqrt(x: f32) -> f32 {
         let (mut lo, mut hi) = (0.0f32, x.max(1.0));
         for _ in 0..60 {
-            let mid = (lo + hi) * 0.5;
+            let mid = f32::midpoint(lo, hi);
             if mid * mid < x {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        (lo + hi) * 0.5
+        f32::midpoint(lo, hi)
     }
 
     fn meshed() -> (alloc::boxed::Box<World>, alloc::boxed::Box<Mesh>) {
@@ -962,6 +990,68 @@ mod tests {
         // Every interior quad contributes two triangles.
         let quads = (VERTS_PER_EDGE - 1) * (VERTS_PER_EDGE - 1);
         assert_eq!(INDICES_PER_CHUNK, quads * 6);
+    }
+
+    #[test]
+    fn triangles_wind_outward_so_the_planet_is_not_inside_out() {
+        // The invariant whose absence let the planet render inside out for the
+        // whole of phases 1-6. `normals_are_unit_length_and_point_outward`
+        // below pins the *normal attribute*, and the mesher forces that outward
+        // explicitly (see `build_normals`) — so it stayed green while the
+        // *winding* was inward, and every consumer that culls by facing drew the
+        // far hemisphere's inner surface instead of the near one. Under GL's
+        // `frontFace(CCW)` and three's default `side: FrontSide` that is a
+        // see-through globe: the ground under the camera is culled and the back
+        // of the world shows through it.
+        //
+        // Checked on real meshed geometry rather than on `build_indices` alone,
+        // because winding is only meaningful against the positions the indices
+        // point at.
+        let (_, m) = meshed();
+        let mut checked = 0usize;
+        let mut degenerate = 0usize;
+        for chunk in 0..CHUNKS {
+            let vbase = chunk * VERTS_PER_CHUNK;
+            for tri in m.indices.as_chunks::<3>().0 {
+                let p = [
+                    m.pos(vbase + tri[0] as usize),
+                    m.pos(vbase + tri[1] as usize),
+                    m.pos(vbase + tri[2] as usize),
+                ];
+                let u = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+                let v = [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]];
+                let n = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                // The skirt ring is an exact duplicate of the border corner
+                // while `SKIRT_DROP` is zero, so its triangles have no area and
+                // no orientation to check. Filtered on the cross product itself
+                // rather than by excluding index ranges by hand, so this stays
+                // correct if the skirt ever drops again.
+                if n[0] * n[0] + n[1] * n[1] + n[2] * n[2] <= 1e-18 {
+                    degenerate += 1;
+                    continue;
+                }
+                // The centroid points outward: every vertex is on the planet, so
+                // the radial and the outward face direction agree.
+                let c = [
+                    (p[0][0] + p[1][0] + p[2][0]) / 3.0,
+                    (p[0][1] + p[1][1] + p[2][1]) / 3.0,
+                    (p[0][2] + p[1][2] + p[2][2]) / 3.0,
+                ];
+                let facing = n[0] * c[0] + n[1] * c[1] + n[2] * c[2];
+                assert!(
+                    facing > 0.0,
+                    "chunk {chunk} triangle {tri:?} winds inward (facing {facing:e}); \
+                     the whole planet is inside out"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no triangle had any area; the test proved nothing");
+        assert!(degenerate > 0, "the skirt ring stopped being degenerate; revisit SKIRT_DROP");
     }
 
     #[test]

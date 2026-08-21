@@ -260,6 +260,64 @@ steep-reads-as-rock band therefore swung around as the camera orbited. The model
 matrix is the identity here, so `mat3(modelMatrix) * normal` is both correct and
 free.
 
+## The planet was inside out
+
+For phases 1–6 the globe rendered **see-through**: the near hemisphere was culled
+and what you looked at was the *inner* surface of the far one.
+
+`mesh.rs`'s `build_indices` emitted each quad as `a, c, b` / `b, c, d`, where `i`
+steps along `FACE_RIGHT` and `j` along `FACE_UP`. That winding normal is
+`up × right`, which is *inward* — and `seams.rs`'s `build_seam_table` asserts
+`right × up == normal` in const eval, so this was exact rather than approximate:
+all six cube faces came out clockwise seen from outside. Both globe materials use
+three's default `side: FrontSide`, which culls back faces, so the ground under
+the camera was thrown away and the back of the world drawn in its place. The
+water inherited it, because `planet.ts` and `water.ts` share `sim.meshIndices`.
+
+Three things kept it from looking like a broken mesh, which is why it survived
+six phases and three rounds of fixes:
+
+- **The silhouette is unchanged.** Near and far hemisphere project to the same
+  disc, so nothing went missing at the edge — the depth was just ~2 R further
+  back.
+- **The normal attribute is forced outward** independently, in `build_normals`,
+  so the far side's inner surface lit plausibly instead of inverting.
+- **The limb gate went vacuous.** `planet.ts` keys its haze on
+  `limb = 1 - smoothstep(0.12, 0.62, max(dot(up, viewDir), 0.0))`. On the far
+  hemisphere `dot(up, viewDir) ≤ 0`, so `limb == 1` over the whole disc and the
+  full sky-colour wash landed everywhere rather than at the rim. The invariant
+  the tuning rested on — "the working ground sits at `dot(up, viewDir) >= 0.70`,
+  so the gate holds it at zero haze by construction" — was true of a hemisphere
+  that was never drawn.
+
+Hence the recurring reports, each of which got answered at the wrong layer: a
+concave surface shaded with outward normals has no curvature gradient, so the
+planet "read as a disc"; the far side genuinely showed through, so it "read as a
+glass marble". `9ca0798` cut water alpha and Fresnel, `db23295` moved the haze
+gate, `f9df386` raised the limb wash 4.2× to put the curvature cues back. None
+of them touched `side` or the index order, and each was tuning the compensation
+rather than the cause.
+
+Nothing tested orientation. `indices_are_a_valid_triangle_list` checked index
+range and triangle count; `normals_are_unit_length_and_point_outward` pinned the
+half that was already right. The missing check is now
+`triangles_wind_outward_so_the_planet_is_not_inside_out`, which walks real meshed
+geometry and asserts every non-degenerate triangle's `(v1-v0) × (v2-v0)` faces
+along the centroid. It filters on the cross product rather than excluding index
+ranges, because the skirt ring is an exact duplicate of the border corner while
+`SKIRT_DROP` is zero and so has no orientation to check.
+
+**The limb shell no longer paints the disc.** With the winding fixed, the
+atmosphere shell's `offPlanet` feather was found to be double-counting: it added
+the *whole* tangent column, scaled only by the feather, on top of ground that
+`dioAerial` had already hazed by the same amount. It was widened to hide a step
+at the silhouette, but `tau` is written to agree with the ground shaders at
+`h = 0` by construction — which is why `dioColumn` is shared rather than copied —
+so there was no step to hide. It also was not the "thin 3% wedge" it was
+described as: `b` is an impact parameter, so a fixed band in `b` covers more and
+more screen as the camera descends and the limb flattens, which is how it became
+a bright band lying across the near sea. The feather now stops at the limb.
+
 ## Two more defects of the same kind
 
 - **The hand's fill sphere was hidden by its own container.** `palm` is a
