@@ -120,44 +120,32 @@ const fn derive(f: usize, d: usize) -> SeamRule {
     let rg = FACE_RIGHT[g];
     let ug = FACE_UP[g];
 
-    let axis;
-    let flip;
-    if veq(e3, rg) {
-        axis = Axis::X;
-        flip = false;
+    let (axis, flip) = if veq(e3, rg) {
+        (Axis::X, false)
     } else if veq(e3, neg(rg)) {
-        axis = Axis::X;
-        flip = true;
+        (Axis::X, true)
     } else if veq(e3, ug) {
-        axis = Axis::Y;
-        flip = false;
+        (Axis::Y, false)
     } else if veq(e3, neg(ug)) {
-        axis = Axis::Y;
-        flip = true;
+        (Axis::Y, true)
     } else {
         panic!("edge axis is not in the destination face's tangent plane");
-    }
+    };
 
     // Entering along `+axis` puts us at index 0; entering along `-axis` puts us
     // at N-1. The entry axis is necessarily the one the edge coordinate did not
     // take, because `e3`, `in3` and `normal(g)` are mutually perpendicular.
-    let at_max;
-    let dir;
-    if veq(in3, rg) {
-        at_max = false;
-        dir = DIR_E as u8;
+    let (at_max, dir) = if veq(in3, rg) {
+        (false, DIR_E as u8)
     } else if veq(in3, neg(rg)) {
-        at_max = true;
-        dir = DIR_W as u8;
+        (true, DIR_W as u8)
     } else if veq(in3, ug) {
-        at_max = false;
-        dir = DIR_N as u8;
+        (false, DIR_N as u8)
     } else if veq(in3, neg(ug)) {
-        at_max = true;
-        dir = DIR_S as u8;
+        (true, DIR_S as u8)
     } else {
         panic!("entry direction is not in the destination face's tangent plane");
-    }
+    };
 
     SeamRule { face: g as u8, axis, flip, at_max, dir }
 }

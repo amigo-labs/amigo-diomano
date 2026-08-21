@@ -798,14 +798,14 @@ mod tests {
     fn libm_sqrt(x: f32) -> f32 {
         let (mut lo, mut hi) = (0.0f32, x.max(1.0));
         for _ in 0..60 {
-            let mid = (lo + hi) * 0.5;
+            let mid = f32::midpoint(lo, hi);
             if mid * mid < x {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        (lo + hi) * 0.5
+        f32::midpoint(lo, hi)
     }
 
     fn meshed() -> (alloc::boxed::Box<World>, alloc::boxed::Box<Mesh>) {
