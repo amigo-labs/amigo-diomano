@@ -1012,7 +1012,7 @@ mod tests {
         let mut degenerate = 0usize;
         for chunk in 0..CHUNKS {
             let vbase = chunk * VERTS_PER_CHUNK;
-            for tri in m.indices.chunks_exact(3) {
+            for tri in m.indices.as_chunks::<3>().0 {
                 let p = [
                     m.pos(vbase + tri[0] as usize),
                     m.pos(vbase + tri[1] as usize),
