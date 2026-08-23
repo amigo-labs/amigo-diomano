@@ -17,14 +17,15 @@
  */
 
 import type { Sim } from "./main";
-import { VERB } from "./main";
+import { VERB } from "./verbs";
 
 export interface Audio {
   resume(): Promise<void>;
   suspend(): Promise<void>;
   sync(sim: Sim, dtMs: number): void;
   /** Confirmation one-shot for an applied verb. `gain` scales it (opponent casts play quieter). */
-  gesture(verb: number, gain?: number): void;
+  /** One-shot for an applied verb — the player's own or, quieter, the opponent's. */
+  verbSfx(verb: number, gain?: number): void;
   /** Two falling dull pings: the diegetic "no" for a refused or empty cast. */
   refusal(): void;
   /** Earth being worked. Bumped per applied raise/lower, decays in `sync`. */
@@ -164,7 +165,7 @@ export function createAudio(): Audio {
       if (sculptGain) sculptGain.gain.value = Math.min(sculptLevel, 0.6) * 0.3;
     },
 
-    gesture(verb: number, gain = 1): void {
+    verbSfx(verb: number, gain = 1): void {
       switch (verb) {
         case VERB.MAGNET:
           // The only command in the game finally sounds like one: a small

@@ -533,6 +533,55 @@ the fixes, in causal order:
       intro pan, gameplay, forced ending, end card, restart, all screenshotted
       and the restart asserted to produce a running match
 
+### 20. The spawn pedestal, an honest end card, and a menu instead of gestures ✅
+
+Two problems reported from play, both fixed at the root:
+
+- [x] **"Niederlage" seconds after starting.** The `074e3dd` terrain (archipelago
+      bias 150 → 350) had moved both spawns into deep ocean, leaving each god's
+      forced 5×5 platform a ~670-unit soil mesa — their *entire* territory and
+      their *only* influence source. The scripted opponent's first earthquake
+      converted the soil to ash, the ash obeyed the angle of repose against the
+      abyss, the whole spawn avalanched into the sea, and `check_sudden_death`
+      ended the match with no player mistake anywhere. Worse, an *idle* match
+      died on its own: dry-rot turned the platform's soil to sand at ~tick 8,300
+      (the player always first — the generator dealt them less fertility), and
+      the sand slid the same way. And on pangaea the fixed height 320 dug the
+      platform into a *pit* wherever real mountains stood around a spawn, so
+      material slid *onto* it and razed the seed settlement inside two seconds.
+      The fix is one mechanism, `carve_spawn_pedestal`: the platform height is
+      surveyed (`spawn_platform_height` — at least the documented 320, always
+      two terraces above anything within 12 cells), and a 3-wide flat **rock**
+      shelf rings it exactly one terrace down. `TERRACE <= REPOSE_ASH` (pinned
+      by a compile-time assert) means quake-ash and rot-sand now *rest on the
+      shelf* instead of avalanching; rock neither burns nor rots nor slides; and
+      the shelf auto-founds satellite huts, so sudden death again means "lost
+      all ground", never "lost one cast". Seed fertility is a fixed 200 (was
+      `max(120)`), killing the rot asymmetry. Five regression tests pin it —
+      opening war, idle rot, one-quake survival, shelf satellites, and all
+      3 terrains × 4 seeds — plus minimum-match-length asserts in
+      `screenshot.mjs` and `diomano-cli trace` (no outcome before the first
+      wave peak, tick 1,275). The AI legitimately beating a *never-acting*
+      player by siege at ~tick 4,200 remains, per §5.5 and the playtest note
+      below. Fixture, corpus and cross-build hashes regenerated (seeding
+      changes state from tick 0)
+- [x] **The end card says why.** Sudden death and the wave-score decision are
+      different stories; the card now tells the right one (derived from
+      `dio_tide_phase` — `decide_match` fires exactly at `TIDE_DONE`), naming
+      which people lost all influence and during which wave
+- [x] **The radial power menu replaces the gestures** (user decision; §8
+      narrowed accordingly). Right-click opens a ring of the manifest's enabled
+      powers at the cursor — costs live from the new `dio_power_cost`/
+      `dio_power_enabled` exports, unaffordable slices greyed against live
+      mana, free-use charges shown, armageddon behind a confirming second
+      click — and casts at the cell snapshotted at open time. Right-drag stays
+      the orbit (same 5 px/400 ms click test the magnet uses). `gestures.ts`
+      and the stroke trail are gone, and with them the main↔gestures import
+      cycle; `VERB`/`MOD`/`POWER` moved to `verbs.ts`. The hand's brush-preview
+      ring now mirrors `brush_radius` exactly (thrown base 2; extreme over
+      increased), and its armageddon pulse reads the manifest price instead of
+      a mirrored 2500
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on

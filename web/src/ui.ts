@@ -11,21 +11,34 @@
 export interface Ui {
   /** Show the title card. Resolves on the player's click, which is also the audio unlock. */
   showTitle(): Promise<void>;
-  /** Show the end card: outcome, per-wave score rows, restart buttons. */
+  /** Show the end card: outcome, why it ended, per-wave score rows, restart buttons. */
   showGameOver(
     outcome: number,
     waves: { mine: number; theirs: number }[],
+    cause: EndCause,
     onRestart: (newSeed: boolean) => void,
   ): void;
   hide(): void;
+}
+
+/**
+ * Why the match ended. Sudden death (§5.5: a god's influence reached zero) and
+ * the wave-score decision after the last recovery are different stories, and
+ * the card should tell the right one — a player who never saw the enemy army
+ * deserves to learn *what* ended their match, not just that it ended.
+ */
+export interface EndCause {
+  /** True when the match ended by influence hitting zero, not by wave score. */
+  suddenDeath: boolean;
+  /** Wave the match ended during (0-based), for the sudden-death sentence. */
+  wave: number;
 }
 
 const CONTROLS: [string, string][] = [
   ["Ziehen (links)", "Land heben / senken — die Hand füllt und leert sich"],
   ["Klick (links)", "Magnet setzen: dein Volk folgt ihm"],
   ["Ziehen (rechts)", "Planet drehen · Mausrad: Zoom"],
-  ["Spirale (rechts), dann Zeichen", "Kraft wirken: ~ Flut · ∧ Vulkan · Z Beben · + Held"],
-  ["2 Spiralen + halten", "Armageddon"],
+  ["Klick (rechts)", "Kraftmenü öffnen — Kräfte kosten Mana"],
   ["1 / 2 / 3", "Erde / Wasser / Lava greifen"],
   ["Umschalt / Alt / Strg", "geworfen / verstärkt / extrem"],
 ];
@@ -74,10 +87,18 @@ export function createUi(): Ui {
     showGameOver(
       outcome: number,
       waves: { mine: number; theirs: number }[],
+      cause: EndCause,
       onRestart: (newSeed: boolean) => void,
     ): void {
       const el = make();
       const headline = outcome === 1 ? "Sieg" : outcome === 2 ? "Niederlage" : "Unentschieden";
+      const causeLine = cause.suddenDeath
+        ? outcome === 1
+          ? `Das gegnerische Volk verlor während Welle ${cause.wave + 1} allen Einfluss.`
+          : outcome === 2
+            ? `Dein Volk verlor während Welle ${cause.wave + 1} allen Einfluss.`
+            : "Beide Völker verloren zugleich allen Einfluss."
+        : "Nach allen Wellen entschieden: Wer öfter am Wellenhöhepunkt mehr Land hielt, gewinnt.";
       // Only waves that were actually scored; a match decided by sudden death
       // before the first wave peak has nothing to tabulate, and seven rows of
       // "0 · 0" would say less than one honest sentence.
@@ -92,10 +113,11 @@ export function createUi(): Ui {
         scored.length > 0
           ? `<p class="premise">Gehaltenes Land am Höhepunkt jeder Welle — du ◂ · ▸ Gegner</p>
              <table>${rows}</table>`
-          : `<p class="premise">Ein Volk verlor allen Einfluss, bevor die erste Welle zählte.</p>`;
+          : `<p class="premise">Kein Wellenhöhepunkt wurde erreicht — nichts zu zählen.</p>`;
       el.innerHTML = `
         <div>
           <h1>${headline}</h1>
+          <p class="premise">${causeLine}</p>
           ${summary}
           <p>
             <button data-restart="same">Nochmal spielen</button>

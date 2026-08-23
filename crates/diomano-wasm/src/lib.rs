@@ -377,6 +377,24 @@ pub extern "C" fn dio_magnet_y(player: u32) -> u32 {
     u32::from(world().magnet[(player as usize) % PLAYERS].y)
 }
 
+/// Whether a power is enabled in this map's manifest. Exported rather than
+/// mirrored: the manifest can change both per map, and the power menu grays
+/// or omits entries from what the sim will actually accept.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_power_enabled(power: u32) -> u32 {
+    let w = world();
+    let k = (power as usize).min(diomano_sim::world::POWER_COUNT - 1);
+    u32::from(w.cfg.power_enabled[k])
+}
+
+/// A power's mana cost in this map's manifest, in whole mana units.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_power_cost(power: u32) -> u32 {
+    let w = world();
+    let k = (power as usize).min(diomano_sim::world::POWER_COUNT - 1);
+    u32::from(w.cfg.power_cost[k])
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_outcome() -> u32 {
     u32::from(world().outcome)
