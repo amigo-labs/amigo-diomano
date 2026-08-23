@@ -626,11 +626,20 @@ fn cmd_trace(o: &Opts) -> Result<(), String> {
     }
     let mut w = World::boxed();
     w.init(&cfg);
+    // The earliest legitimate decision point: the first wave peak. An outcome
+    // before it means a spawn dissolved with no war fought — the instant-defeat
+    // failure mode, worth a non-zero exit even from a diagnostic tool. The
+    // deliberate `--cataclysm` armageddon is exempt: ending early is its job.
+    let first_wave_peak = cfg.recovery_ticks + cfg.telegraph_ticks + cfg.impact_ticks / 2;
+    let mut decided_at: Option<u32> = None;
     println!("tick  walkers  settle  tiers      hand0  mana0  sea  combat  merges");
     for tick in 0..o.ticks {
         let mut buf = CommandBuf::new();
         demo_script(tick, o.seed, o.cataclysm, !o.ai, &mut buf);
         w.tick(buf.as_slice());
+        if w.outcome != 0 && decided_at.is_none() {
+            decided_at = Some(tick);
+        }
         if tick % o.every == 0 {
             let mut tiers = [0u32; 5];
             for s in &w.settlements {
@@ -691,6 +700,14 @@ fn cmd_trace(o: &Opts) -> Result<(), String> {
                 w.census.merges
             );
         }
+    }
+    if let Some(t) = decided_at
+        && !o.cataclysm
+        && u64::from(t) < u64::from(first_wave_peak)
+    {
+        return Err(format!(
+            "match decided at tick {t}, before the first wave peak ({first_wave_peak}) — a spawn dissolved with no war fought"
+        ));
     }
     Ok(())
 }

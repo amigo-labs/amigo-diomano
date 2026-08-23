@@ -132,13 +132,20 @@ async function main() {
 
     // Force the match to its end quickly: tick the sim hard from the console.
     // (The dev handle exists exactly for this kind of interrogation.)
-    const outcome = await page.evaluate(() => {
+    const { outcome, decidedAt } = await page.evaluate(() => {
       const sim = window.diomano.sim;
       for (let i = 0; i < 12000 && sim.e.dio_outcome() === 0; i++) sim.tick();
-      return sim.e.dio_outcome();
+      return { outcome: sim.e.dio_outcome(), decidedAt: sim.e.dio_tick_count() };
     });
     if (outcome === 0) fail("12,000 forced ticks and no outcome — the match never ends");
-    console.log(`  forced outcome: ${outcome}`);
+    // Minimum match length: telegraph (300) + half impact (75) after the first
+    // calm (900) is the first wave peak at tick 1,275. An outcome before that
+    // means somebody's spawn dissolved with no war fought — the instant-defeat
+    // regression this line exists to catch.
+    if (decidedAt < 1275) {
+      fail(`match decided at tick ${decidedAt}, before the first wave peak (1,275)`);
+    }
+    console.log(`  forced outcome: ${outcome} at tick ${decidedAt}`);
     // One rendered frame notices the outcome; the card follows 2.5 s later.
     await page.waitForTimeout(3500);
     await shoot("5-game-over");

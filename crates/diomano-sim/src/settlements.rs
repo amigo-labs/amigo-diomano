@@ -335,6 +335,101 @@ const CAUSEWAY_SALT: u32 = 0xCA05_E3A7;
 /// sea floor instead of a sheer wall — and never as new passable land.
 const CAUSEWAY_APRON: [i16; 3] = [-8, -64, -160];
 
+/// Minimum height of the 5x5 spawn plateau — the documented 320 of §5.4. On
+/// terrain that stands taller than this near a spawn, the platform rises with
+/// it: see `spawn_platform_height`.
+pub const SPAWN_PLATFORM_MIN_HEIGHT: i16 = 320;
+
+/// The whole pedestal argument collapses if a repose retune drops below the
+/// terrace step, so pin it at compile time.
+const _: () = assert!(crate::world::TERRACE as i32 <= crate::materials::REPOSE_ASH);
+
+/// Chebyshev rings of the spawn shelf: the platform occupies r <= 2, the flat
+/// rock shelf r = 3..=5. Three cells of width is enough for the game's own
+/// founding loop (`found_at_size(3)`) to raise satellite huts there — which is
+/// what keeps one earthquake on the platform from being an instant
+/// sudden-death loss: the seed settlement is no longer the player's only
+/// influence source.
+pub const SPAWN_SHELF_INNER: i32 = 3;
+pub const SPAWN_SHELF_OUTER: i32 = 5;
+
+/// How far around a spawn the local relief is surveyed before the platform
+/// height is chosen. Granular material only ever moves downhill, so a pile
+/// can never climb above its own source; a platform whose shelf clears every
+/// cell this survey sees cannot be buried by anything the survey saw.
+const SPAWN_SURVEY_RADIUS: i32 = 12;
+
+/// Submarine apron targets by ring beyond the shelf (r = 6..=8), mirroring
+/// `CAUSEWAY_APRON`: a stepped rock ramp below the calm sea, so on wet maps
+/// the pedestal reads as a seamount instead of a sheer pillar.
+const SPAWN_APRON: [i16; 3] = [-8, -64, -160];
+
+/// The height this spawn's 5x5 platform is forced to: at least the documented
+/// 320, and always two terraces above the tallest natural cell the survey
+/// sees. The old fixed 320 dug the platform into a *pit* wherever the
+/// generator raised real mountains around a spawn (pangaea, some volcano
+/// seeds) — and the first tick of physics slid sand from above onto the
+/// plateau, broke its flatness, and razed the seed settlement inside two
+/// seconds. Two terraces, not one: the shelf sits one terrace below the
+/// platform and must itself clear the surveyed relief.
+fn spawn_platform_height(w: &World, face: usize, cx: i32, cy: i32) -> i16 {
+    let t = i32::from(crate::world::TERRACE);
+    let mut max_h = i32::from(SPAWN_PLATFORM_MIN_HEIGHT) - 2 * t;
+    for dy in -SPAWN_SURVEY_RADIUS..=SPAWN_SURVEY_RADIUS {
+        for dx in -SPAWN_SURVEY_RADIUS..=SPAWN_SURVEY_RADIUS {
+            let c = idx(face, (cx + dx) as usize, (cy + dy) as usize);
+            max_h = max_h.max(i32::from(w.height[c]));
+        }
+    }
+    // Round up to a terrace, then clear it by two.
+    let aligned = max_h.div_euclid(t) * t + if max_h.rem_euclid(t) == 0 { 0 } else { t };
+    (aligned + 2 * t).min(i32::from(crate::world::HEIGHT_MAX)) as i16
+}
+
+/// Terrace the ground around one spawn platform: a flat rock shelf one
+/// terrace down, then a stepped submarine apron.
+///
+/// The shelf step is load-bearing twice over. The platform-to-shelf drop is
+/// `TERRACE`, which sits *at* the ash angle of repose and *below* the sand
+/// one — so even if every platform cell turns to quake-ash or rot-sand, the
+/// material rests on the shelf instead of avalanching 600+ units into the
+/// ocean the archipelago generator puts around the spawns. And the shelf
+/// itself is rock: it never becomes ash (earthquake converts soil only),
+/// never rots, never slides. Raise-only below the shelf height, like
+/// `carve_cell` — it never digs.
+fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: i16) {
+    let shelf = platform - crate::world::TERRACE;
+    for dy in -SPAWN_SHELF_OUTER - 3..=SPAWN_SHELF_OUTER + 3 {
+        for dx in -SPAWN_SHELF_OUTER - 3..=SPAWN_SHELF_OUTER + 3 {
+            let r = dx.abs().max(dy.abs());
+            if r < SPAWN_SHELF_INNER {
+                continue;
+            }
+            let (x, y) = ((cx + dx) as usize, (cy + dy) as usize);
+            let c = idx(face, x, y);
+            if r <= SPAWN_SHELF_OUTER {
+                if w.height[c] < shelf {
+                    w.height[c] = shelf;
+                    w.material[c] = crate::world::MAT_ROCK;
+                    w.sediment[c] = 0;
+                    w.vegetation[c] = 0;
+                    w.fertility[c] = 0;
+                    w.water[c] = 0;
+                    w.lava[c] = 0;
+                }
+            } else {
+                raise_seabed(
+                    w,
+                    face,
+                    x as i32,
+                    y as i32,
+                    SPAWN_APRON[(r - SPAWN_SHELF_OUTER - 1) as usize],
+                );
+            }
+        }
+    }
+}
+
 /// Great-circle steps from one spawn to its antipode: half of the 4N loop.
 pub const CORRIDOR_STEPS: usize = 2 * N;
 
@@ -530,16 +625,24 @@ fn carve_contact_corridor(w: &mut World) {
 /// placing the first hut.
 pub fn seed_starting_positions(w: &mut World) {
     for (player, &(face, cx, cy)) in STARTS.iter().enumerate() {
+        // Surveyed before anything is forced, so the natural relief under the
+        // platform itself still counts.
+        let platform = spawn_platform_height(w, face, cx as i32, cy as i32);
         let size = 5usize;
         let half = (size / 2) as i32;
         for dy in -half..=half {
             for dx in -half..=half {
                 let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
-                w.height[c] = 320;
+                w.height[c] = platform;
                 w.water[c] = 0;
                 w.lava[c] = 0;
                 w.material[c] = crate::world::MAT_SOIL;
-                w.fertility[c] = w.fertility[c].max(120);
+                // A fixed value, not `max(120)`: the generator's fertility is
+                // asymmetric between the two spawns, and whichever god drew
+                // less watched their only soil rot to sand — and slide — first
+                // in an idle match. 200 also pushes the first possible rot
+                // past any decided match (600 + 200*60 ticks > 7 waves).
+                w.fertility[c] = 200;
             }
         }
         let slot = player;
@@ -561,6 +664,7 @@ pub fn seed_starting_positions(w: &mut World) {
             }
         }
         w.settlement_count = w.settlement_count.saturating_add(1);
+        carve_spawn_pedestal(w, face, cx as i32, cy as i32, platform);
     }
     carve_contact_corridor(w);
     w.ghost_copy_all();
@@ -955,5 +1059,156 @@ mod tests {
             }
         }
         assert!(reached, "the causeway did not survive 3,600 ticks of physics and tide");
+    }
+
+    /// Cells each player influences right now — the quantity sudden death
+    /// watches (tide.rs::check_sudden_death).
+    fn influence_held(w: &World) -> [u32; PLAYERS] {
+        let mut held = [0u32; PLAYERS];
+        for &i in &w.influence {
+            if i32::from(i) > 0 {
+                held[0] += 1;
+            } else if i32::from(i) < 0 {
+                held[1] += 1;
+            }
+        }
+        held
+    }
+
+    /// The regression this whole pedestal exists for: with the shipped map and
+    /// the scripted opponent, the match must survive the opening war. Before
+    /// the pedestal, the AI's *first earthquake* turned the player's 5x5
+    /// spawn — their entire territory on the deep-ocean archipelago — into
+    /// ash that avalanched into the sea, and sudden death ended the match in
+    /// under 80 seconds with no player mistake anywhere. Now the ash rests on
+    /// the shelf and the shelf satellites keep influence alive, so 3,000
+    /// ticks covers several strikes and the army's arrival. (A player who
+    /// *never* acts still loses to the marching army around tick ~4,200 —
+    /// that is the opponent legitimately winning a war nobody contested,
+    /// §5.5, not this bug.)
+    #[test]
+    fn the_default_match_survives_the_opening_war() {
+        let mut w = World::boxed();
+        w.init(&MapConfig { ai_enabled: 1, ..MapConfig::DEFAULT });
+        for _ in 0..3_000 {
+            w.tick(&[]);
+        }
+        assert_eq!(w.outcome, 0, "the default match decided itself during the opening war");
+        let held = influence_held(&w);
+        assert!(held[0] > 0, "player 0 lost all influence by tick 3,000");
+        assert!(held[1] > 0, "player 1 lost all influence by tick 3,000");
+    }
+
+    /// With no opponent and no input at all, the world alone must not dissolve
+    /// a spawn: before the fixed seed fertility, dry-rot turned the player's
+    /// soil to sand around tick 8,300 and the sand slid off the mesa — an idle
+    /// match was a guaranteed sudden-death loss for player 0 specifically,
+    /// because the generator dealt them less fertility than the opponent.
+    #[test]
+    fn an_idle_default_match_is_not_dissolved_by_rot() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        for _ in 0..9_000 {
+            w.tick(&[]);
+        }
+        assert_eq!(w.outcome, 0, "an idle match decided itself");
+        let held = influence_held(&w);
+        assert!(held[0] > 0, "player 0's spawn dissolved with nobody touching it");
+        assert!(held[1] > 0, "player 1's spawn dissolved with nobody touching it");
+    }
+
+    /// One enemy earthquake on the spawn plateau — the scripted opponent's
+    /// actual opening strike, same target offset — must wound, not end. The
+    /// dents raze the seed settlement, but the ash has to rest on the shelf
+    /// (TERRACE <= REPOSE_ASH) instead of avalanching, and the shelf
+    /// satellites have to keep the player's influence alive.
+    #[test]
+    fn the_spawn_pedestal_survives_an_earthquake() {
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.power_cost = [0; crate::world::POWER_COUNT];
+        let mut w = World::boxed();
+        w.init(&cfg);
+        // Let the shelf satellites found and project first, as they have in
+        // any real match by the time the AI can afford the strike.
+        for _ in 0..300 {
+            w.tick(&[]);
+        }
+        let quake = crate::world::Command {
+            tick: w.tick,
+            x: (STARTS[0].1 as i32 + 1) as u16,
+            y: (STARTS[0].2 as i32 - 1) as u16,
+            player: 1,
+            verb: crate::world::VERB_EARTHQUAKE,
+            face: STARTS[0].0 as u8,
+            modifier: 0,
+        };
+        w.tick(&[quake]);
+        for _ in 0..900 {
+            w.tick(&[]);
+        }
+        assert_eq!(w.outcome, 0, "one earthquake on the spawn ended the match");
+        assert!(influence_held(&w)[0] > 0, "one earthquake erased player 0's influence");
+        // The land itself must still be there: nothing near the spawn may have
+        // slid into the abyss below the causeway band.
+        let (face, cx, cy) = STARTS[0];
+        let mut dry_land = 0usize;
+        for dy in -7i32..=7 {
+            for dx in -7i32..=7 {
+                let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+                if w.height[c] > CAUSEWAY_CREST_MAX {
+                    dry_land += 1;
+                }
+            }
+        }
+        assert!(dry_land >= 60, "the spawn pedestal avalanched: {dry_land} tall cells left");
+    }
+
+    /// The shelf is not scenery: the game's own founding loop must raise
+    /// satellites on it within seconds, because those satellites are what
+    /// makes sudden death mean "lost all ground" instead of "lost one cast".
+    #[test]
+    fn the_spawn_shelf_founds_satellites() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        for _ in 0..200 {
+            w.tick(&[]);
+        }
+        for player in 0..PLAYERS {
+            let alive =
+                w.settlements.iter().filter(|s| s.alive() && s.owner == player as u8).count();
+            assert!(alive >= 2, "player {player} has {alive} settlement(s) at tick 200");
+        }
+    }
+
+    /// The pedestal is a promise about *every* map, not one seed: on each
+    /// shipped terrain type the spawns must stand, hold influence, and still
+    /// be standing after the first waves of physics.
+    #[test]
+    fn spawns_hold_influence_on_every_terrain_and_seed() {
+        for terrain in [
+            crate::world::TERRAIN_ARCHIPELAGO,
+            crate::world::TERRAIN_PANGAEA,
+            crate::world::TERRAIN_VOLCANO,
+        ] {
+            for seed in [0x5EEDu32, 1, 7, 99] {
+                let mut w = World::boxed();
+                w.init(&MapConfig { seed, terrain, ..MapConfig::DEFAULT });
+                for s in 0..PLAYERS {
+                    assert!(
+                        footprint_still_flat(&w, &w.settlements[s]),
+                        "terrain {terrain} seed {seed:#x}: spawn {s} is not flat at tick 0"
+                    );
+                }
+                for _ in 0..600 {
+                    w.tick(&[]);
+                }
+                assert_eq!(w.outcome, 0, "terrain {terrain} seed {seed:#x}: decided by tick 600");
+                let held = influence_held(&w);
+                assert!(
+                    held[0] > 0 && held[1] > 0,
+                    "terrain {terrain} seed {seed:#x}: a spawn lost all influence by tick 600"
+                );
+            }
+        }
     }
 }
