@@ -479,7 +479,7 @@ Following the Populous II correction — never strip the core verbs.
 
 | Verb | Cost | Notes |
 |---|---|---|
-| Raise / lower land | free | Where ~90% of playtime goes. Direct drag, no gesture. |
+| Raise / lower land | free | Where ~90% of playtime goes. Direct drag, no menu entry. |
 | Papal magnet | cheap | Place a flag; population walks toward it. The *only* command in the game. First walker to reach it becomes leader; if the leader dies the magnet drops there. |
 | Armageddon | very expensive | Immediately triggers the final tide wave at maximum strength. Stalemate breaker. Deliberately awkward to invoke (§8). |
 
@@ -504,7 +504,7 @@ Multiply the verb set without adding verbs:
 - **Thrown vs. poured** — thrown: large radius at the impact point. Poured: same
   effect, small radius directly under the hand.
 - **Increased / extreme variants** — same verb scaled, at proportionally higher
-  cost, selected with a gesture modifier.
+  cost, selected with a held modifier key (shift / alt / ctrl, §8).
 - **One-shot pickups** — free single-use powers lying on the terrain. Contested map
   objects; excellent in a duel.
 
@@ -608,10 +608,10 @@ so a silent peer is distinguishable from a stalled one.
 **Input delay: 6 ticks (200 ms)** `[START]`. Generous by action-game standards and
 invisible in this genre — spend the latency budget here rather than risking stalls.
 
-Gesture recognition runs entirely client-side; only the result `(verb, modifier,
-target cell)` enters the command stream. **Sample the pointer path on a fixed timer,
-never per frame** — Black & White 2 failed to recognise gestures at low frame rates,
-and that failure mode is avoidable.
+Verb selection (the radial power menu, §8) runs entirely client-side; only the
+result `(verb, modifier, target cell)` enters the command stream. That invariant
+predates the menu — it held for the retired gesture recogniser too — and it is
+what keeps the input surface swappable without touching the wire format.
 
 ### 6.3 Desync detection
 
@@ -823,27 +823,34 @@ numbers in this document, replacing the `[START]` values.
 
 ## 8. Input: the hand
 
-- **No HUD.** The god has no body, only a hand — cursor, matter carrier and
-  influence indicator in one.
+- **No persistent HUD.** The god has no body, only a hand — cursor, matter
+  carrier and influence indicator in one. The one exception is the *transient*
+  radial power menu below, which exists only between its opening right-click
+  and its close. (This narrows the original "no HUD" pillar: the gesture
+  alphabet it described was retired by user decision in favour of a menu.)
 - Mana, held matter and influence reach are all communicated diegetically.
 
-**Gesture set** `[START]`. All are drawn with the hand; a clockwise spiral arms
-gesture mode first, confirmed by a light trail.
+**Controls.** The right button carries both camera and casting: a drag orbits,
+a click (under 5 px of travel, under 400 ms — the same test the left button
+uses for the magnet) opens the radial power menu at the cursor.
 
 | Input | Verb |
 |---|---|
-| direct drag | raise / lower land |
-| click | place papal magnet |
-| spiral, then `~` | flood |
-| spiral, then `∧` | volcano |
-| spiral, then `∪` | swamp |
-| spiral, then `Z` | earthquake |
-| spiral, then `+` | champion |
-| second spiral while held | increased → extreme variant |
-| double spiral, then hold 2 s | Armageddon |
+| direct drag (left) | raise / lower land |
+| click (left) | place papal magnet |
+| drag (right) | orbit the planet |
+| click (right) | open the power menu |
+| menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
+| shift / alt / ctrl | thrown / increased / extreme variant |
 
-Raise/lower deliberately has no gesture — it is the constant verb and must stay
-frictionless. Armageddon deliberately has the most friction; it is irreversible.
+The menu snapshots the cell under the cursor when it opens and casts there;
+flood, champion and armageddon ignore the target in the sim anyway. Slices
+show their manifest cost (from `dio_power_cost`/`dio_power_enabled`, never a
+mirrored table), grey out live when unaffordable, and show collected free-use
+charges. Raise/lower deliberately has no menu entry — it is the constant verb
+and must stay a frictionless drag. Armageddon deliberately keeps the most
+friction; it is irreversible, so its slice demands a second, confirming click
+within 1.5 s in place of the old two-second hold.
 
 ---
 
@@ -855,8 +862,8 @@ frictionless. Armageddon deliberately has the most friction; it is irreversible.
 table and ghost borders, flow field, influence projection, walkers, combat,
 settlements, mana, command application, tick loop, state hash, chunk meshing.
 
-**TypeScript:** Three.js, camera, gesture recognition, WebRTC, lobby and Durable
-Objects, audio, shell UI.
+**TypeScript:** Three.js, camera, the radial power menu, WebRTC, lobby and
+Durable Objects, audio, shell UI.
 
 ### 9.2 Why Rust for the simulation
 
@@ -1067,13 +1074,15 @@ by actually saving one.
 - [ ] Earthquake, swamp, volcano, flood
 - [ ] Thrown vs. poured, increased/extreme
 - [ ] One-shot pickups
-- [ ] Gesture recognition on a fixed timer, set per §8
+- [ ] Gesture recognition on a fixed timer, set per §8 *(superseded: the
+      gesture alphabet was retired for the radial power menu — see §8)*
 - [ ] Armageddon
 - [ ] Hand interface, no HUD
 
-**DoD:** every gesture in §8 recognised at 15 fps as reliably as at 60 fps.
-Disabling a power in the manifest removes it from the game with no code change.
-No HUD element anywhere on screen.
+**DoD:** every power castable from the §8 radial menu, at 15 fps as reliably as
+at 60 fps. Disabling a power in the manifest removes it from the menu and the
+game with no code change. No persistent HUD element anywhere on screen.
+*(Original wording asked for gesture recognition; superseded as above.)*
 
 ### Phase 7 — netcode · ~5 evenings
 

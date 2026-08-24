@@ -93,16 +93,7 @@ export interface OrbitCamera {
   drift(radPerSec: number): void;
 }
 
-/**
- * @param gestureArmed Set by the gesture recogniser. `verbs.md` gives right-drag
- *   to the camera only "(no spiral)"; once a spiral has armed gesture mode the
- *   stroke belongs to the recogniser and the camera must let go of it, or the
- *   planet turns under a gesture that is being matched in screen space.
- */
-export function createCamera(
-  canvas: HTMLCanvasElement,
-  gestureArmed: { value: boolean },
-): OrbitCamera {
+export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
 
   // Spherical coordinates: yaw around the world Y axis, pitch from the equator.
@@ -154,12 +145,6 @@ export function createCamera(
   const onPointerMove = (ev: PointerEvent): void => {
     zoomAnchorX = (ev.clientX / innerWidth) * 2 - 1;
     zoomAnchorY = -(ev.clientY / innerHeight) * 2 + 1;
-    // The spiral has claimed this stroke. Drop it mid-drag rather than fighting
-    // the recogniser for it, and do not resume until the pointer is released.
-    if (panning && gestureArmed.value) {
-      panning = false;
-      return;
-    }
     if (!panning) return;
     // Sensitivity tracks distance, so a pixel of drag moves about the same
     // amount of ground at every zoom level.
@@ -172,8 +157,6 @@ export function createCamera(
 
   const onPointerUp = (ev: PointerEvent): void => {
     panning = false;
-    // Unconditionally, because a stroke the gesture recogniser took over ends
-    // with `panning` already false and the capture still held.
     if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
   };
 
@@ -205,7 +188,8 @@ export function createCamera(
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
   canvas.addEventListener("wheel", onWheel, { passive: false });
-  // Right-drag is the gesture control, so the browser menu is in the way.
+  // The right button orbits (drag) and opens the power menu (click), so the
+  // browser menu is in the way either way.
   canvas.addEventListener("contextmenu", (ev) => ev.preventDefault());
 
   const eye = new THREE.Vector3();

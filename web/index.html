@@ -11,11 +11,11 @@
     />
     <style>
       /*
-        There is no HUD (HANDOFF §8). The god has no body, only a hand — cursor,
-        matter carrier and influence indicator in one. Everything below is here
-        to get a full-bleed canvas and a black page behind the planet; there is
-        deliberately nothing to style, because there is deliberately nothing on
-        screen but the world.
+        There is no persistent HUD (HANDOFF §8). The god has no body, only a
+        hand — cursor, matter carrier and influence indicator in one. The one
+        transient in-match element is the radial power menu (.radial below),
+        which exists only while its right-click holds it open; everything else
+        here is a full-bleed canvas and a black page behind the planet.
       */
       html,
       body {
@@ -104,6 +104,68 @@
         50% {
           opacity: 0.45;
         }
+      }
+      /*
+        The radial power menu. A full-screen backdrop swallows every pointer
+        event while it is open — a stray closing click must never leak through
+        to the hand as a magnet placement — and the slices sit on a circle
+        around the point that was right-clicked.
+      */
+      .radial {
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        cursor: auto;
+      }
+      .radial-slice {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        background: rgba(4, 6, 12, 0.78);
+        border: 1px solid #5a6478;
+        border-radius: 6px;
+        color: #e6e2d8;
+        font:
+          13px/1.35 system-ui,
+          sans-serif;
+        text-align: center;
+        padding: 7px 12px;
+        min-width: 86px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .radial-slice:hover {
+        border-color: #ffe9c0;
+        color: #ffe9c0;
+      }
+      .radial-slice .cost {
+        display: block;
+        font-size: 11px;
+        color: #a8b0c0;
+      }
+      .radial-slice .charge {
+        color: #ffd75e;
+      }
+      .radial-slice.disabled {
+        opacity: 0.38;
+        cursor: not-allowed;
+      }
+      .radial-slice.confirm {
+        border-color: #ff6a2a;
+        color: #ff6a2a;
+      }
+      .radial-hub {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        max-width: 190px;
+        color: #a8b0c0;
+        font:
+          12px/1.45 system-ui,
+          sans-serif;
+        text-align: center;
+        pointer-events: none;
+      }
+      .radial-hub .mods {
+        color: #ffe9c0;
       }
       /* Shown only if WebGL2 or WebAssembly is missing. Not UI: an epitaph. */
       #fallback {

@@ -17,8 +17,8 @@
 import * as THREE from "three";
 import type { OrbitCamera } from "./camera";
 import type { Sim } from "./main";
-import { MOD, VERB } from "./main";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirection, pickCell } from "./renderer/planet";
+import { MOD, POWER, VERB, readModifier } from "./verbs";
 
 /** Screen pixels of vertical drag per terrace command. */
 const DRAG_PIXELS_PER_STEP = 14;
@@ -35,9 +35,6 @@ const CLICK_MAX_MS = 400;
 
 /** Cap on queued terrace steps: a wild flick drains for at most ~0.8 s. */
 const MAX_PENDING_STEPS = 24;
-
-/** Mana at which the palm starts its "the big one is affordable" pulse. */
-const PULSE_THRESHOLD = 2500;
 
 export interface Target {
   face: number;
@@ -124,6 +121,10 @@ export function createHand(
   const pointer = new THREE.Vector2(0, 0);
   let current: Target | null = null;
 
+  // Mana at which the palm starts its "the big one is affordable" pulse: the
+  // armageddon price from the live manifest, not a mirrored 2500.
+  const pulseThreshold = Math.max(sim.e.dio_power_cost(POWER.ARMAGEDDON), 1);
+
   let dragging = false;
   let dragOriginY = 0;
   /** Accumulated steps not yet emitted. Positive raises, negative lowers. */
@@ -180,12 +181,6 @@ export function createHand(
     }
     current = cell;
   };
-
-  /** §5.3's modifiers, read live so releasing shift mid-drag takes effect. */
-  const readModifier = (ev: PointerEvent | MouseEvent): number =>
-    (ev.shiftKey ? MOD.THROWN : 0) |
-    (ev.altKey ? MOD.INCREASED : 0) |
-    (ev.ctrlKey ? MOD.EXTREME : 0);
 
   canvas.addEventListener("pointermove", (ev) => {
     pointer.x = (ev.clientX / innerWidth) * 2 - 1;
@@ -337,8 +332,8 @@ export function createHand(
       // pulses gently: the big one is affordable, still without a number.
       const now = performance.now();
       const mana = sim.e.dio_mana(player);
-      const glow = Math.min(Math.sqrt(mana / PULSE_THRESHOLD), 1);
-      const pulse = mana >= PULSE_THRESHOLD ? Math.sin(now / 240) * 0.06 : 0;
+      const glow = Math.min(Math.sqrt(mana / pulseThreshold), 1);
+      const pulse = mana >= pulseThreshold ? Math.sin(now / 240) * 0.06 : 0;
       const palmMat = palm.material as THREE.MeshBasicMaterial;
       if (now < flashUntil) {
         // The refusal: a dull red dip, unmistakably "no" without a toast.
@@ -369,10 +364,14 @@ export function createHand(
           .add(moteOffset);
       }
 
-      // Footprint ring, lying flat on the surface.
+      // Footprint ring, lying flat on the surface. The radius mirrors
+      // `brush_radius` in world.rs exactly: thrown widens the base to 2, and
+      // extreme (+3) wins over increased (+1) rather than stacking.
       ring.position.copy(dir).multiplyScalar(surface + 0.002);
       ring.quaternion.setFromUnitVectors(ringNormal, dir);
-      const radius = 1 + (modifier & MOD.THROWN ? 1 : 0) + (modifier & MOD.EXTREME ? 3 : 0);
+      const radius =
+        (modifier & MOD.THROWN ? 2 : 1) +
+        (modifier & MOD.EXTREME ? 3 : modifier & MOD.INCREASED ? 1 : 0);
       ring.scale.setScalar(cellScale * (radius + 0.5) * 2);
     },
 

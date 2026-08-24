@@ -21,49 +21,18 @@
 import * as THREE from "three";
 import { createAudio } from "./audio";
 import { createCamera } from "./camera";
-import { createGestures } from "./gestures";
 import { createHand } from "./hand";
 import { createLoop } from "./loop";
+import { createRadial } from "./radial";
 import { createAtmosphere } from "./renderer/atmosphere";
 import { createEffects } from "./renderer/effects";
 import { cellDirection, createPlanet } from "./renderer/planet";
 import { createPost } from "./renderer/post";
-import { createTrail } from "./renderer/trail";
 import { createVegetation } from "./renderer/vegetation";
 import { createView } from "./renderer/view";
 import { createWater } from "./renderer/water";
 import { createUi } from "./ui";
-
-// ---------------------------------------------------------------------------
-// Verbs and modifiers
-//
-// Mirrors of the constants in `crates/diomano-sim/src/world.rs`. They are not
-// exported from wasm one getter each because that would be forty exports to
-// avoid one comment; `assertLayout` below checks the things that actually
-// change silently (grid size, struct strides) at load time.
-// ---------------------------------------------------------------------------
-
-export const VERB = {
-  NOP: 0,
-  RAISE: 1,
-  LOWER: 2,
-  MAGNET: 3,
-  EARTHQUAKE: 4,
-  SWAMP: 5,
-  VOLCANO: 6,
-  FLOOD: 7,
-  CHAMPION: 8,
-  ARMAGEDDON: 9,
-  SET_HAND: 10,
-} as const;
-
-export const MOD = {
-  THROWN: 1 << 0,
-  INCREASED: 1 << 1,
-  EXTREME: 1 << 2,
-} as const;
-
-export const HAND_MATERIAL = { EARTH: 0, WATER: 1, LAVA: 2 } as const;
+import { VERB } from "./verbs";
 
 export const TIDE = { CALM: 0, TELEGRAPH: 1, IMPACT: 2, RECOVERY: 3, DONE: 4 } as const;
 
@@ -142,6 +111,8 @@ interface RawExports {
   dio_magnet_x(player: number): number;
   dio_magnet_y(player: number): number;
   dio_free_uses(player: number, power: number): number;
+  dio_power_enabled(power: number): number;
+  dio_power_cost(power: number): number;
   dio_outcome(): number;
   dio_wave_count(): number;
   dio_score(player: number, wave: number): number;
@@ -532,10 +503,7 @@ async function boot(): Promise<void> {
     // Every shader's shared values live in one place; see `renderer/view.ts` for
     // the three features that broke when they were per-material copies.
     const view = createView();
-    // Set by the gesture recogniser and read by the camera, so a spiral takes
-    // the stroke away from the orbit control instead of sharing it.
-    const gestureArmed = { value: false };
-    const camera = createCamera(canvas, gestureArmed);
+    const camera = createCamera(canvas);
     const planet = createPlanet(sim, view);
     const water = createWater(sim, view);
     const atmosphere = createAtmosphere(view);
@@ -559,26 +527,23 @@ async function boot(): Promise<void> {
     };
 
     const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, trackCast);
-    const trail = createTrail();
     const effects = createEffects(sim);
-    scene.add(hand.group, trail.object, effects.group);
+    scene.add(hand.group, effects.group);
     /** High-water mark in the simulation's verb-event ring. */
     let seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
-    const gestures = createGestures(
-      canvas,
-      (verb, modifier) => {
-        const target = hand.target();
-        if (!target) {
-          // A gesture drawn over empty space used to vanish silently.
-          audio.refusal();
-          hand.flash();
-          return;
-        }
+    // The power menu replaces the gesture recogniser: a right-*click* (right-
+    // *drag* stays the orbit) opens a radial menu at the cursor, and a chosen
+    // power casts at the cell that was under the cursor when it opened.
+    const radial = createRadial(canvas, sim, LOCAL_PLAYER, hand, {
+      cast(verb, modifier, target) {
         sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
         trackCast(verb);
       },
-      gestureArmed,
-    );
+      refuse() {
+        audio.refusal();
+        hand.flash();
+      },
+    });
 
     const applySize = (): void => {
       // Re-read the device pixel ratio every time: dragging a window between a 1x and
@@ -612,13 +577,13 @@ async function boot(): Promise<void> {
           const i = pendingCasts.findIndex((p) => p.verb === ev.verb);
           if (i >= 0) {
             pendingCasts.splice(i, 1);
-            audio.gesture(ev.verb);
+            audio.verbSfx(ev.verb);
           }
         } else if (ev.verb !== VERB.RAISE && ev.verb !== VERB.LOWER && ev.verb !== VERB.SET_HAND) {
           // The opponent's casts, quieter. This is how the other god becomes
           // audible — the client sees its own commands but never theirs, so
           // the applied-verb ring is the only source (§ effects, same idea).
-          audio.gesture(ev.verb, 0.4);
+          audio.verbSfx(ev.verb, 0.4);
         }
       }
       // Casts the sim never applied: refused on cost, or a disabled power.
@@ -670,8 +635,15 @@ async function boot(): Promise<void> {
           theirs: sim.e.dio_score(1 - LOCAL_PLAYER, wave),
         });
       }
+      // `decide_match` fires exactly when the tide reaches DONE; any outcome
+      // set before that is sudden death (§5.5) — derived here rather than
+      // exported, because the sim already says it through the tide phase.
+      const cause = {
+        suddenDeath: sim.e.dio_tide_phase() !== TIDE.DONE,
+        wave: sim.e.dio_tide_wave(),
+      };
       setTimeout(() => {
-        if (handledOutcome !== 0) ui.showGameOver(outcome, waves, restart);
+        if (handledOutcome !== 0) ui.showGameOver(outcome, waves, cause, restart);
       }, 2500);
     };
 
@@ -696,7 +668,7 @@ async function boot(): Promise<void> {
         water.sync();
         vegetation.sync(tick);
         hand.sync(alpha);
-        trail.sync(camera.camera, gestures.stroke, gestures.armed);
+        radial.sync();
         // Effects read what the simulation *applied*, so the opponent's powers
         // are visible too and a power refused on cost throws nothing.
         const fired = sim.verbEvents(seenVerbEvents);
@@ -730,7 +702,7 @@ async function boot(): Promise<void> {
       camera,
       view,
       effects,
-      trail,
+      radial,
     };
 
     // Honest tab handling: a hidden tab pauses the world instead of silently
@@ -748,7 +720,8 @@ async function boot(): Promise<void> {
     });
 
     // Render first — the planet turns idly behind the title card — and only
-    // start ticking and listening for gestures once the player clicks through.
+    // start ticking and listening for the power menu once the player clicks
+    // through.
     loop.start();
     camera.drift(0.03);
     await ui.showTitle();
@@ -757,7 +730,7 @@ async function boot(): Promise<void> {
     void audio.resume();
     camera.drift(0);
     matchStarted = true;
-    gestures.start();
+    radial.attach();
 
     // A one-time tour: two seconds on the opponent's spawn — the other god
     // exists, acts, and its first lessons are audible — then an eased pan

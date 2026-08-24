@@ -28,7 +28,7 @@ Requires `rustup` (with the `wasm32-unknown-unknown` target), `bun`, `just` and
 crates/diomano-sim/    the entire simulation. no_std, integer-only, no dependencies
 crates/diomano-wasm/   thin extern "C" shell. exports and pointer getters only
 crates/diomano-cli/    native replay verifier and perf harness
-web/                   Three.js renderer, camera, hand, gestures, audio
+web/                   Three.js renderer, camera, hand, power menu, audio
 fixtures/              a recorded session and the hashes it must produce
 ```
 
@@ -40,9 +40,10 @@ collapsed.
 
 ## Controls
 
-No HUD. The hand is the entire interface — cursor, matter carrier and mana
+No persistent HUD. The hand is the interface — cursor, matter carrier and mana
 indicator in one. It visibly fills as you dig and empties as you build, because
-material is conserved and a full hand cannot dig.
+material is conserved and a full hand cannot dig. Powers are cast from a
+transient radial menu on right-click.
 
 | Input | Verb |
 |---|---|
@@ -50,8 +51,8 @@ material is conserved and a full hand cannot dig.
 | left click | place the papal magnet — the only command in the game |
 | `1` `2` `3` | carry earth / water / lava |
 | middle or right drag | orbit the planet |
-| right drag, spiral, then a shape | flood `~`, volcano `∧`, swamp `∪`, earthquake `Z`, champion `+` |
-| shift / alt / ctrl while dragging | thrown / increased / extreme |
+| right click | open the power menu: magnet, earthquake, volcano, flood, champion, armageddon |
+| shift / alt / ctrl | thrown / increased / extreme |
 
 ## What is not here
 

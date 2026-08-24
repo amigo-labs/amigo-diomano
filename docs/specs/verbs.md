@@ -1,7 +1,7 @@
 # Verbs, powers and the map manifest
 
 Split from `docs/HANDOFF.md` §5 and §8 (Phase 0). Implemented by
-`crates/diomano-sim/src/{powers,tide}.rs` and `web/src/{hand,gestures}.ts`.
+`crates/diomano-sim/src/{powers,tide}.rs` and `web/src/{hand,radial}.ts`.
 
 ---
 
@@ -9,7 +9,7 @@ Split from `docs/HANDOFF.md` §5 and §8 (Phase 0). Implemented by
 
 | Verb | Cost | Notes |
 |---|---|---|
-| Raise / lower land | free | Where ~90% of playtime goes. Direct drag, no gesture. |
+| Raise / lower land | free | Where ~90% of playtime goes. Direct drag, no menu entry. |
 | Papal magnet | cheap | Place a flag; population walks toward it. The *only* command in the game. First walker to reach it becomes leader; if the leader dies the magnet drops there. |
 | Armageddon | very expensive | Immediately triggers the final tide wave at maximum strength. Stalemate breaker. Deliberately awkward to invoke. |
 
@@ -124,38 +124,37 @@ communicated diegetically:
 |---|---|
 | left drag up / down | raise / lower land |
 | left click (no drag) | place papal magnet |
-| right drag, spiral, then `~` | flood |
-| right drag, spiral, then `∧` | volcano |
-| right drag, spiral, then `∪` | swamp |
-| right drag, spiral, then `Z` | earthquake |
-| right drag, spiral, then `+` | champion |
-| second spiral while held | increased → extreme variant |
-| double spiral, then hold 2 s | Armageddon |
-| shift / alt / ctrl while dragging | thrown / increased / extreme |
+| right drag | orbit the planet |
+| right click (no drag) | open the radial power menu |
+| menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
+| shift / alt / ctrl | thrown / increased / extreme |
 | `1` `2` `3` | switch the hand to earth / water / lava |
-| middle or right drag (no spiral) | orbit the planet |
+| middle drag | orbit the planet |
 
-Raise/lower deliberately has no gesture — it is the constant verb and must stay
-frictionless. Armageddon deliberately has the most friction; it is irreversible.
+Raise/lower deliberately has no menu entry — it is the constant verb and must
+stay a frictionless drag. Armageddon deliberately has the most friction; it is
+irreversible, so its slice demands a second, confirming click.
 
-### Gesture recognition
+### The power menu
 
-**Sampled on a fixed timer (60 Hz `setInterval`), never per frame.** Black &
-White 2 failed to recognise gestures at low frame rates and that failure mode is
-avoidable: at 15 fps the sampled path is identical to the one at 60 fps, which
-is the Phase 6 DoD stated as a mechanism rather than as a hope.
+*(Replaces the retired gesture alphabet — the spiral-plus-glyph recogniser of
+the original §8 — by user decision; `web/src/gestures.ts` and the stroke trail
+are gone with it.)*
 
-The path is resampled to 32 points, each segment quantised to one of eight
-compass headings, runs collapsed — so a stroke becomes a short string like
-`E S W N` which templates match as a subsequence. Scale- and speed-invariant,
-and small enough to read.
+A right *click* (the same 5 px / 400 ms test the magnet uses on the left
+button) opens `web/src/radial.ts`'s ring at the cursor; a right *drag* is still
+the orbit. The menu snapshots the cell under the cursor at open time and casts
+there — the ring covers that ground, and flood, champion and armageddon ignore
+the target in the sim anyway. Slices come from `dio_power_enabled`, show costs
+from `dio_power_cost` (both wasm exports, because the manifest can change them
+per map), grey out live against `dio_mana` while the world keeps ticking, and
+show `dio_free_uses` charges. Escape, a click on the backdrop or another right
+click closes it; the full-screen backdrop swallows every pointer event so a
+closing click can never leak through to the hand as a magnet placement.
 
-Recognition is entirely client-side; only the resulting `(verb, modifier)` ever
-enters the command stream.
-
-`classify` returns `null` when nothing matches, which is the right answer far
-more often than a wrong verb would be: every gesture costs mana and two of them
-are irreversible.
+Selection is entirely client-side; only the resulting `(verb, modifier,
+target)` ever enters the command stream — the invariant that made the input
+surface swappable in the first place.
 
 ## Command wire format
 

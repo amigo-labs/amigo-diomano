@@ -32,7 +32,7 @@
 
 import * as THREE from "three";
 import type { Sim, VerbEventView } from "../main";
-import { VERB } from "../main";
+import { VERB } from "../verbs";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
 
 /** Live particles. Beyond this the oldest are recycled. */
