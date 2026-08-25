@@ -378,15 +378,36 @@ const SPAWN_SHELF_RADIUS_16: i32 = 83;
 /// seed.
 const SPAWN_FRINGE_16: i32 = 22;
 
-/// Outer radius of the submarine apron, x16 — where the seamount meets the
-/// ocean floor and stops being forced at all.
+/// Where the submarine apron stops being forced, x16, before its wobble.
 ///
-/// 11 cells, so the loop's reach is 12: exactly [`SPAWN_SURVEY_RADIUS`], which is
-/// the radius `spawn_platform_height` already assumes stays inside a face. Wider
-/// than the old three rings on purpose — the flank then drops about 33 units per
-/// cell instead of 56 and 96, and a slope that shallow reads as a seamount rather
-/// than as the top of a wall.
-const SPAWN_APRON_RADIUS_16: i32 = 176;
+/// Eight cells, matching the reach of the three rings this replaced, plus a
+/// wobble that only ever pushes outward — so the flank averages 9.5 cells where
+/// the old Chebyshev-8 square averaged 9.1, and is irregular instead of being a
+/// polygon. That matters more than it sounds: the apron is rock at ocean-floor
+/// depth, so it renders as a dark halo around the spawn, and the *outline of
+/// that halo* is the most visible thing about the whole pedestal from orbit. The
+/// first attempt used a flat 11 cells and drew a clean dark octagon, which
+/// traded one piece of obvious geometry for another.
+const SPAWN_APRON_RADIUS_16: i32 = 128;
+
+/// How far the apron's toe may wander outward, x16. Three cells, on its own
+/// octave — one step coarser than the shelf's fringe, so the two outlines do not
+/// wander together and read as one shape scaled twice.
+///
+/// Shift 9, not 10. At shift 10 the lattice spacing is eight cells, which is
+/// less than one lattice cell across the whole pedestal: the "wobble" came out
+/// as a single constant offset per spawn and the toe drew a clean circle. Shift
+/// 9 is four cells, so the toe of a nine-cell flank gets about fourteen lobes
+/// around its circumference.
+const SPAWN_APRON_WOBBLE_16: i32 = 48;
+
+/// Denominator of the flank's gradient, x16 — held fixed at the *widest* extent
+/// rather than at [`SPAWN_APRON_RADIUS_16`], so the slope stays a constant 33
+/// units per cell no matter where this cell's toe happens to fall. Where the
+/// wobble ends the apron early the flank simply stops partway down the same
+/// ramp and the natural sea floor takes over, which is a boundary the generator
+/// drew and therefore already irregular.
+const SPAWN_APRON_SPAN_16: i32 = 176 - SPAWN_SHELF_RADIUS_16;
 
 /// How far around a spawn the local relief is surveyed before the platform
 /// height is chosen. Granular material only ever moves downhill, so a pile
@@ -394,8 +415,9 @@ const SPAWN_APRON_RADIUS_16: i32 = 176;
 /// cell this survey sees cannot be buried by anything the survey saw.
 const SPAWN_SURVEY_RADIUS: i32 = 12;
 
-/// The apron's height at the shelf edge and at its outer radius. Everything
-/// between is interpolated, so the flank is a slope rather than three terraces.
+/// The apron's height at the shelf edge, and at the far end of its ramp.
+/// Everything between is interpolated, so the flank is a slope rather than the
+/// three terraces this replaced.
 ///
 /// Both below the calm sea (0) by construction, which is the load-bearing part:
 /// the apron is geography the walkers cannot use, and an apron cell that dried
@@ -454,19 +476,25 @@ fn spawn_platform_height(w: &World, face: usize, cx: i32, cy: i32) -> i16 {
 ///   so the shelf can gain ground and never lose it, and every guarantee that
 ///   depends on the shelf's width holds for any seed rather than for the seeds
 ///   that were tried.
-/// - The apron is a **slope**, not three terraces: its target height is
-///   interpolated from `SPAWN_APRON_TOP` at the shelf edge to `SPAWN_APRON_TOE`
-///   at the outer radius. Same argument as `CAUSEWAY_APRON` — the pedestal must
-///   rise out of the sea floor rather than stand on a sheer wall — but three
-///   steps of 56 and 96 units were doing the opposite of that in the shallows,
-///   where they are exactly the terraces the eye reads as construction.
+/// - The apron is a **slope**, not three terraces: its target height ramps from
+///   `SPAWN_APRON_TOP` at the shelf edge toward `SPAWN_APRON_TOE`. Same argument
+///   as `CAUSEWAY_APRON` — the pedestal must rise out of the sea floor rather
+///   than stand on a sheer wall — but three steps of 56 and 96 units were doing
+///   the opposite of that in the shallows, where they are exactly the terraces
+///   the eye reads as construction. Its outer edge wobbles on its own coarser
+///   octave, because the apron is rock at ocean-floor depth and so renders as a
+///   dark halo whose *outline* is the most visible thing about the pedestal from
+///   orbit; a flat radius there just draws a dark octagon instead.
 ///
 /// The interpolation is in radius, not in squared radius, hence the `isqrt`: a
 /// ramp linear in `d2` falls slowly at the top and steeply at the toe, which is
 /// an upside-down seamount.
 fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: i16) {
     let shelf = platform - crate::world::TERRACE;
-    let reach = SPAWN_APRON_RADIUS_16 / 16 + 1;
+    // Far enough for the widest toe the wobble can produce: 11 cells, so 12,
+    // which is exactly `SPAWN_SURVEY_RADIUS` — the radius
+    // `spawn_platform_height` already assumes stays inside a face.
+    let reach = (SPAWN_APRON_RADIUS_16 + SPAWN_APRON_WOBBLE_16) / 16 + 1;
     for dy in -reach..=reach {
         for dx in -reach..=reach {
             // The inner ring keeps the platform's shape: `detect_plateaus`
@@ -479,12 +507,14 @@ fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: 
             // Radius x16, so the fringe and the ramp both have sub-cell
             // resolution without a single float.
             let r16 = ((dx * dx + dy * dy) * 256).isqrt();
-            // Outward only. `noise_at` returns 0..=65535.
+            // Both fringes are outward only. `noise_at` returns 0..=65535.
             let (px, py, pz) = crate::world::cube_point(face, x, y);
-            let fringe = crate::world::noise_at(px, py, pz, 8, w.cfg.seed ^ SPAWN_FRINGE_SALT)
-                * SPAWN_FRINGE_16
-                / 65535;
+            let seed = w.cfg.seed ^ SPAWN_FRINGE_SALT;
+            let fringe = crate::world::noise_at(px, py, pz, 8, seed) * SPAWN_FRINGE_16 / 65535;
+            let wobble =
+                crate::world::noise_at(px, py, pz, 9, seed) * SPAWN_APRON_WOBBLE_16 / 65535;
             let shelf_edge = SPAWN_SHELF_RADIUS_16 + fringe;
+            let apron_edge = SPAWN_APRON_RADIUS_16 + wobble;
             if r16 <= shelf_edge {
                 let c = idx(face, x as usize, y as usize);
                 if w.height[c] < shelf {
@@ -496,7 +526,7 @@ fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: 
                     w.water[c] = 0;
                     w.lava[c] = 0;
                 }
-            } else if r16 <= SPAWN_APRON_RADIUS_16 {
+            } else if r16 <= apron_edge {
                 // Height is a function of radius alone — of the *unjittered*
                 // radius, not of this cell's own shelf edge. Measuring the ramp
                 // from `shelf_edge` seemed the natural thing and was wrong twice:
@@ -505,12 +535,12 @@ fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: 
                 // to 50 units a cell, worse than the three terraces it replaced.
                 //
                 // Anchored here the flank is a clean 33 units per cell for every
-                // seed, and the fringe does only the job it is for: deciding where
-                // the shelf stops and the flank starts, which is the outline you
-                // can actually see from above.
-                const SPAN: i32 = SPAWN_APRON_RADIUS_16 - SPAWN_SHELF_RADIUS_16;
-                let t = r16 - SPAWN_SHELF_RADIUS_16;
-                let h = SPAWN_APRON_TOP + (SPAWN_APRON_TOE - SPAWN_APRON_TOP) * t / SPAN;
+                // seed, and the two fringes do only the job they are for:
+                // deciding where the shelf stops and where the flank does, which
+                // is the pair of outlines you can actually see from above.
+                let t = (r16 - SPAWN_SHELF_RADIUS_16).min(SPAWN_APRON_SPAN_16);
+                let h =
+                    SPAWN_APRON_TOP + (SPAWN_APRON_TOE - SPAWN_APRON_TOP) * t / SPAWN_APRON_SPAN_16;
                 raise_seabed(w, face, x, y, h as i16);
             }
         }
@@ -1299,9 +1329,11 @@ mod tests {
         assert_eq!(at(0, -5), shelf, "the shelf does not reach (0,-5) on the axis");
 
         // A slope. Walking outward along an axis, the flank must fall in small
-        // steps all the way to the toe: the three-ring apron dropped 56 and then
-        // 96 units at a stroke, which is exactly the terrace the eye reads as
-        // construction. 40 leaves headroom over the ~33 the ramp actually uses.
+        // steps: the three-ring apron dropped 56 and then 96 units at a stroke,
+        // which is exactly the terrace the eye reads as construction. 40 leaves
+        // headroom over the ~33 the ramp actually uses. Where the flank ends is
+        // the wobble's business, so the walk stops at the first untouched cell
+        // rather than demanding a fixed extent.
         let mut previous: Option<i16> = None;
         let mut flank_cells = 0;
         for d in 4..=11i32 {
@@ -1309,8 +1341,10 @@ mod tests {
             if h == shelf {
                 continue; // still on the shelf; the fringe decides where it ends
             }
+            if h == -600 {
+                break; // past the toe: untouched sea floor
+            }
             assert!(h < 0, "flank cell at radius {d} stands at {h}, above the calm sea");
-            assert!(h > -600, "the flank stops before radius {d}: still at the sea floor");
             if let Some(prev) = previous {
                 assert!(h <= prev, "the flank rises again at radius {d}: {h} after {prev}");
                 assert!(
@@ -1322,11 +1356,12 @@ mod tests {
             previous = Some(h);
             flank_cells += 1;
         }
-        assert!(flank_cells >= 4, "only {flank_cells} flank cells — the apron barely exists");
+        assert!(flank_cells >= 2, "only {flank_cells} flank cells — the apron barely exists");
 
-        // And it stops. Beyond the apron the sea floor is untouched, which is
-        // what keeps the pedestal a feature rather than a continent.
-        assert_eq!(at(12, 0), -600, "the apron reaches past its own outer radius");
+        // And it stops. Beyond the widest toe the wobble allows, the sea floor is
+        // untouched — which is what keeps the pedestal a feature and not a
+        // continent, and what keeps the carve inside the surveyed radius.
+        assert_eq!(at(12, 0), -600, "the apron reaches past its own widest toe");
     }
 
     #[test]

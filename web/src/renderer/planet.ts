@@ -363,10 +363,32 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 mood = mix(uGodB, uGodA, clamp(influence * 0.5 + 0.5, 0.0, 1.0));
     albedo = mix(albedo, albedo * mood, min(abs(influence) * 0.55, 0.16));
 
-    // Ocean floor: dark, so the sea is a body rather than a window.
+    // Ocean floor: dark, so the sea is a body rather than a window — but only
+    // where there is actually water over this ground.
+    //
+    // The altitude mask is the gate. Depth is the dual-grid *mean* of four
+    // cells, so where dry ground meets deep water — the rim of a spawn pedestal,
+    // or any steep coast — a corner three hundred units above the waterline
+    // still reports a depth around fifty, and both the absorption and the
+    // abyssal colour were being applied to it: dry rock painted as sea bed.
+    //
+    // Slope was tried as the gate first and does not work: the Laplacian spreads
+    // a 312-unit step over two cells, which is a 26-degree face, nowhere near
+    // the threshold that separates cliff from ground. Altitude is the honest
+    // test anyway — whether this ground is under water is a question about its
+    // height, not about its steepness.
+    //
+    // This is *not* the cause of the black ring around a spawn pedestal, which
+    // was the reason it was investigated. That ring is a separate and older
+    // defect: the terrain geometry is present there (confirmed in wireframe) and
+    // the fragment output is exactly (0, 0, 0) for inputs that are dry, flat,
+    // pure rock 300 units above sea level — the same pixels, exactly black, on
+    // main. Something here produces a NaN or a hard zero for that case and this
+    // gate does not touch it. Left as a known defect rather than a guess.
     float depth = vAttrib.a * 255.0 * 8.0;
-    albedo *= exp(-depth * 0.0045);
-    albedo = mix(albedo, vec3(0.04, 0.06, 0.05), smoothstep(12.0, 90.0, depth));
+    float submerged = 1.0 - above;
+    albedo *= mix(1.0, exp(-depth * 0.0045), submerged);
+    albedo = mix(albedo, vec3(0.04, 0.06, 0.05), smoothstep(12.0, 90.0, depth) * submerged);
 
     float lambert = max(dot(n, uSunDirection), 0.0);
     // Cloud shadows, from the same noise the cloud shell draws (§7.3 tier 2),
