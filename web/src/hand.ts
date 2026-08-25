@@ -52,6 +52,17 @@ export interface Hand {
   sync(alpha: number): void;
   /** Briefly dim the palm to a dull red: the diegetic "no". */
   flash(): void;
+  /**
+   * Hide the hand outright, for as long as something else owns the screen.
+   *
+   * The radial menu opens *on* the ground the hand is working, and the palm and
+   * footprint ring are the two brightest things the renderer draws — cream and
+   * pale gold, scaled with the camera, so at close range they fill the middle of
+   * the frame precisely where the labels go. Dimming them was not enough: the
+   * menu has already snapshotted its target cell, so the hand has nothing left
+   * to say until the menu closes.
+   */
+  setSuppressed(on: boolean): void;
 }
 
 export function createHand(
@@ -141,6 +152,8 @@ export function createHand(
   let drainModifier = 0;
   /** `performance.now()` until which the palm shows the refusal flash. */
   let flashUntil = 0;
+  /** Set while the radial menu is open; see `setSuppressed`. */
+  let suppressed = false;
 
   /**
    * Which cell the pointer is over.
@@ -295,9 +308,10 @@ export function createHand(
       updateTarget();
       // Visible whenever it is over the planet, including while orbiting. The
       // page sets `cursor: none`, so hiding the hand during a camera drag left
-      // the screen with no pointer of any kind.
-      group.visible = current !== null;
-      if (!current) return;
+      // the screen with no pointer of any kind. The radial menu is the one
+      // exception, and it restores the system cursor while it is open.
+      group.visible = current !== null && !suppressed;
+      if (!current || suppressed) return;
 
       const dir = cellDirection(current.face, current.x, current.y, sim.N);
       const c = sim.idx(current.face, current.x, current.y);
@@ -377,6 +391,11 @@ export function createHand(
 
     flash(): void {
       flashUntil = performance.now() + 180;
+    },
+
+    setSuppressed(on: boolean): void {
+      suppressed = on;
+      if (on) group.visible = false;
     },
   };
 }

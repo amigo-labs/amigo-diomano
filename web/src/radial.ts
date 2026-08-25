@@ -30,8 +30,16 @@ import { MOD, POWER, VERB, readModifier } from "./verbs";
 const CLICK_SLOP_SQ = 5 * 5;
 const CLICK_MAX_MS = 400;
 
-/** Distance from the open point to each slice's centre, in pixels. */
-const RING_RADIUS = 120;
+/**
+ * Distance from the open point to each slice's centre, in pixels.
+ *
+ * 120 was set against a 13px label in an 86px box. At the legible size the
+ * boxes are ~120px wide, and six of them on a 120px ring have a 120px chord
+ * between neighbours — they overlapped, which is half of why the menu was hard
+ * to read at all. At 168 the tightest case (seven powers enabled) leaves a
+ * 146px chord, so nothing touches.
+ */
+const RING_RADIUS = 168;
 
 /** How long the armageddon confirm state waits for its second click. */
 const CONFIRM_MS = 1500;
@@ -117,6 +125,8 @@ export function createRadial(
   /** Non-null while the armageddon slice waits for its confirming click. */
   let confirmUntil = 0;
   let hovered: Entry | null = null;
+  /** Mana as last written into the hub, so `sync` only rewrites when it moves. */
+  let hubMana = -1;
 
   // Right-button click detection, alongside the camera's right-drag orbit.
   let downX = 0;
@@ -132,6 +142,8 @@ export function createRadial(
     target = null;
     confirmUntil = 0;
     hovered = null;
+    hubMana = -1;
+    hand.setSuppressed(false);
   };
 
   const modLine = (): string => {
@@ -142,11 +154,24 @@ export function createRadial(
     return parts.length > 0 ? parts.join(" · ") : "";
   };
 
+  /**
+   * The hub: what the hovered power does, which modifiers are held, and how much
+   * mana there is to spend.
+   *
+   * The mana line is the one readout §8's "no HUD" leaves room for — it lives
+   * inside a menu that exists only while it is held open. Without it every slice
+   * quoted a price with nothing to compare it against: the palm's glow says
+   * "roughly this much", which is enough to feel and useless for deciding
+   * between a 260 and a 600.
+   */
   const renderHub = (): void => {
     if (!hub) return;
     const blurb = hovered ? hovered.blurb : "Kraft wählen — Umschalt / Alt / Strg wandeln sie ab.";
     const line = modLine();
-    hub.innerHTML = `${blurb}${line ? `<div class="mods">${line}</div>` : ""}`;
+    hubMana = sim.e.dio_mana(player);
+    hub.innerHTML =
+      `${blurb}${line ? `<div class="mods">${line}</div>` : ""}` +
+      `<div class="mana">${hubMana} Mana</div>`;
   };
 
   const affordable = (entry: Entry): boolean =>
@@ -175,13 +200,20 @@ export function createRadial(
     }
     target = at;
     mods = readModifier(ev);
+    // The target cell is snapshotted above, so the hand has nothing left to
+    // show — and it is the brightest thing on screen, sitting exactly where the
+    // labels are about to go.
+    hand.setSuppressed(true);
 
     backdrop = document.createElement("div");
     backdrop.className = "radial";
     // Keep the whole ring on screen when opened near an edge.
-    const margin = RING_RADIUS + 70;
+    const margin = RING_RADIUS + 90;
     const cx = Math.min(Math.max(x, margin), innerWidth - margin);
     const cy = Math.min(Math.max(y, margin), innerHeight - margin);
+    // Anchor the backdrop's scrim on the ring rather than on the screen centre.
+    backdrop.style.setProperty("--cx", `${cx}px`);
+    backdrop.style.setProperty("--cy", `${cy}px`);
 
     const shown = ENTRIES.filter((entry) => sim.e.dio_power_enabled(entry.power) !== 0);
     slices = shown.map((entry, i) => {
@@ -278,6 +310,9 @@ export function createRadial(
       // The world moves on while the menu is open: mana accrues, charges get
       // spent, the confirm window runs out. Re-render from the live sim.
       for (const { el, entry } of slices) renderSlice(el, entry);
+      // The hub costs an `innerHTML` write, so it is rebuilt only when the
+      // number it shows actually moves — not sixty times a second.
+      if (sim.e.dio_mana(player) !== hubMana) renderHub();
     },
 
     get open(): boolean {

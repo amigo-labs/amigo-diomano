@@ -22,6 +22,7 @@ import * as THREE from "three";
 import { createAudio } from "./audio";
 import { createCamera } from "./camera";
 import { createHand } from "./hand";
+import { createHud } from "./hud";
 import { createLoop } from "./loop";
 import { createRadial } from "./radial";
 import { createAtmosphere } from "./renderer/atmosphere";
@@ -71,6 +72,7 @@ interface RawExports {
   dio_mesh_attribs_ptr(): number;
   dio_mesh_water_positions_ptr(): number;
   dio_mesh_attribs2_ptr(): number;
+  dio_mesh_attribs3_ptr(): number;
   dio_mesh_water_attribs_ptr(): number;
   dio_mesh_indices_ptr(): number;
   dio_mesh_dirty_ptr(): number;
@@ -224,6 +226,8 @@ export interface Sim {
   readonly meshAttribs: Uint8Array;
   /** Per vertex: lava depth, fertility, sediment, spare. */
   readonly meshAttribs2: Uint8Array;
+  /** Per vertex: rock, sand, soil, ash weights. Swamp is the remainder. */
+  readonly meshAttribs3: Uint8Array;
   readonly waterPositions: Float32Array;
   readonly waterAttribs: Uint8Array;
   readonly meshIndices: Uint16Array;
@@ -335,6 +339,7 @@ export async function loadSim(
     meshNormals: new Float32Array(buf, e.dio_mesh_normals_ptr(), totalVerts * 3),
     meshAttribs: new Uint8Array(buf, e.dio_mesh_attribs_ptr(), totalVerts * 4),
     meshAttribs2: new Uint8Array(buf, e.dio_mesh_attribs2_ptr(), totalVerts * 4),
+    meshAttribs3: new Uint8Array(buf, e.dio_mesh_attribs3_ptr(), totalVerts * 4),
     waterPositions: new Float32Array(buf, e.dio_mesh_water_positions_ptr(), totalVerts * 3),
     waterAttribs: new Uint8Array(buf, e.dio_mesh_water_attribs_ptr(), totalVerts * 4),
     meshIndices: new Uint16Array(buf, e.dio_mesh_indices_ptr(), indicesPerChunk),
@@ -515,6 +520,22 @@ async function boot(): Promise<void> {
     const post = createPost(renderer, scene, camera.camera, tier);
     const audio = createAudio();
     const ui = createUi();
+    // The readouts §8 did not allow for, and the reason the deviation was worth
+    // it — see the header of `hud.ts` and the note in PLAN.md.
+    const hud = createHud(sim, LOCAL_PLAYER);
+
+    // Volume, finally reachable: a slider on the title card and three keys in
+    // the match. The banner is the feedback — a level you cannot hear changing
+    // (because you set it during a quiet stretch) has to say so on screen.
+    addEventListener("keydown", (ev) => {
+      // "=" as well as "+": on a US layout the plus needs shift, and a player
+      // reaching for it without one should still get louder.
+      if (ev.key === "+" || ev.key === "=") audio.setVolume(audio.volume() + 0.1);
+      else if (ev.key === "-") audio.setVolume(audio.volume() - 0.1);
+      else if (ev.key === "m" || ev.key === "M") audio.toggleMute();
+      else return;
+      hud.banner(audio.muted() ? "Stumm" : `Lautstärke ${Math.round(audio.volume() * 100)}%`);
+    });
 
     // Truthful cast feedback. A push is only a *request*: the sim may refuse
     // it on cost or availability, and the old optimistic confirm played the
@@ -619,10 +640,15 @@ async function boot(): Promise<void> {
       water.refreshAll();
       camera.drift(0);
       ui.hide();
+      hud.reset();
+      hud.setVisible(true);
     };
 
     const onMatchEnd = (outcome: number): void => {
       handledOutcome = outcome;
+      // The epilogue tableau is the frozen planet, not a readout of a match that
+      // is over.
+      hud.setVisible(false);
       audio.sting(outcome === 1 ? "win" : outcome === 2 ? "loss" : "draw");
       // The frozen planet is the epilogue tableau; drift it slowly and let the
       // sting land before the card comes up.
@@ -646,6 +672,9 @@ async function boot(): Promise<void> {
         if (handledOutcome !== 0) ui.showGameOver(outcome, waves, cause, restart);
       }, 2500);
     };
+
+    /** Edge detector for the radial menu, so a hint retires the first time. */
+    let menuWasOpen = false;
 
     const loop = createLoop({
       update() {
@@ -675,6 +704,11 @@ async function boot(): Promise<void> {
         seenVerbEvents = fired.written;
         consumeVerbFeedback(fired.events);
         camera.shake(effects.sync(sim, fired.events, dtMs));
+        // The same applied-verb list the effects and the sounds read, so a
+        // coaching hint retires on what the simulation did.
+        hud.sync(fired.events);
+        if (radial.open && !menuWasOpen) hud.noteMenuOpened();
+        menuWasOpen = radial.open;
         atmosphere.sync(sim.e.dio_tide_phase(), sim.e.dio_ticks_to_impact());
         audio.sync(sim, dtMs);
 
@@ -724,13 +758,17 @@ async function boot(): Promise<void> {
     // through.
     loop.start();
     camera.drift(0.03);
-    await ui.showTitle();
+    await ui.showTitle({
+      get: () => audio.volume(),
+      set: (v) => audio.setVolume(v),
+    });
     // The title click is the browsers' required activation gesture: unlock
     // audio here and nothing is lost.
     void audio.resume();
     camera.drift(0);
     matchStarted = true;
     radial.attach();
+    hud.setVisible(true);
 
     // A one-time tour: two seconds on the opponent's spawn — the other god
     // exists, acts, and its first lessons are audible — then an eased pan

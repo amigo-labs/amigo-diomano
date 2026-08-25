@@ -204,6 +204,18 @@ average produced walls and blobs:
   coastlines — along all twelve cube edges. Each octave now samples at its own
   odd offset and axis permutation; both are exact integer isometries, so seam
   continuity is untouched.
+- **Per-octave shear**, because isometries are not enough. Every isometry of the
+  cubic lattice maps axis planes onto axis planes, so the swizzles stop the
+  octaves' flats from stacking on each other — which is what they are for — and
+  leave every lattice parallel to the cube's axes. At shift 8 that lattice is
+  two cells wide, so the grid it draws lands exactly at the scale a player looks
+  at from close range, and the world reads as rasterised. Each octave is
+  therefore also sampled through a shear (a coordinate offset by `>> 1` or
+  `>> 2` of another axis), tilting its planes 15 to 27 degrees off the axes.
+  Safe for the same reason as everything else here: a function of the 3D cube
+  point alone. `>>` is floor division for negatives, so the shear is continuous
+  through the origin, and its one-unit staircase is ~0.13 height units against a
+  16-unit terrace — three orders of magnitude below visible.
 - **Re-weighted octaves.** The old dominant octave's lattice spacing was the
   whole cube half-extent (~2 cells per axis over the entire planet), which made
   every map two smoothstep blobs per face. It is demoted to a continental
@@ -211,11 +223,17 @@ average produced walls and blobs:
   the old stack lacked.
 - **One ridged octave** (`ridge(n) = 65535 - |2n - 65535|`): connected
   mountain chains instead of round bumps.
-- **Domain warp** (amplitude 600, ~0.3 of the dominant spacing): value noise
-  has square isolines; sampling the height through a low-frequency warp of the
-  cube point bends them into natural curves. The warp field is itself a
-  continuous function of the 3D cube point, so nothing about it can introduce a
-  seam.
+- **Domain warp at two scales** (amplitude 600 against the shift-11 spacing of
+  2048, and 140 against the shift-9 spacing of 512 — both ~0.28 of their own
+  lattice): value noise has square isolines; sampling the height through a warp
+  of the cube point bends them into natural curves. Both warp fields are
+  continuous functions of the 3D cube point, so neither can introduce a seam,
+  and that argument does not care how many octaves of warp there are.
+
+  The coarse warp was alone here, and one warp cannot do this job: a shift-11
+  field is constant over 16 cells, so it *translates* the fine octaves rather
+  than bending them. Their own lattices stayed axis-aligned at cell scale, which
+  is the other half of the same rasterised look the shear above addresses.
 - **Midrange widening** (`widen(h) = smooth((h - 16384) * 2)`): the weighted
   octave average clusters around the midpoint, so the nominal ±720 amplitude
   was almost never reached and the rock threshold (380) and the renderer's
@@ -229,6 +247,12 @@ average produced walls and blobs:
   and pinned by `world::tests::terrain_profiles_produce_playable_land`:
   land fraction per profile, rock cells, real peaks, real ocean floor, across
   four seeds each.
+
+**Measured after the shear and the fine warp landed**, over the test's four
+seeds: archipelago 26–43% land, pangaea 56–79%, volcano 37–58%; peaks 720–816,
+ocean floor at the -720 clamp throughout. The distribution barely moved — the
+changes rotate and bend the field, they do not rescale it — so no bias needed
+retuning, which is the result rather than the absence of one.
 
 `world::tests::terrain_is_continuous_across_every_seam` asserts that the mean
 height step across a seam is within 3x the mean step inside a face.

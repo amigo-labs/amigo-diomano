@@ -124,6 +124,21 @@ async function main() {
     }
     await page.waitForTimeout(1200);
     await shoot("4b-close");
+
+    // The power menu, opened at close range over lit ground — precisely the
+    // case the legibility report was about, and the one no unit test can see.
+    // Asserted open first: a screenshot of a menu that never appeared is a
+    // screenshot of nothing, and it would pass review as easily as a good one.
+    await page.mouse.click(640, 400, { button: "right" });
+    await page.waitForTimeout(400);
+    if (!(await page.evaluate(() => window.diomano.radial.open))) {
+      fail("right-click did not open the power menu");
+    }
+    await shoot("4c-menu");
+
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+
     for (let i = 0; i < 14; i++) {
       await page.mouse.wheel(0, 400);
       await page.waitForTimeout(60);
