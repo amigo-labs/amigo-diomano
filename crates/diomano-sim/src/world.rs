@@ -984,29 +984,36 @@ impl World {
             _ => 350, // archipelago: most of the surface starts under water
         };
 
-        // Domain warp amplitude, ~0.3 of the dominant octave's 2048 spacing.
-        // Value noise on an axis-aligned lattice has square isolines; sampling
-        // the height field through a low-frequency warp of the cube point bends
-        // them into natural curves. The warp field is itself a continuous
-        // function of the 3D cube point, so the result stays seamless.
-        const WARP: i32 = 600;
+        // Domain warp amplitudes, each ~0.28 of its own lattice spacing. Value
+        // noise on an axis-aligned lattice has square isolines; sampling the
+        // height field through a warp of the cube point bends them into curves.
+        // Both warp fields are continuous functions of the 3D cube point, so the
+        // result stays seamless — that argument is the whole reason this is
+        // allowed at all, and it does not care how many octaves of warp there
+        // are.
+        //
+        // The coarse warp was here alone, and one warp cannot do this job. A
+        // shift-11 field is constant over 16 cells, so it *translates* the fine
+        // octaves rather than bending them: their own lattice — shift 8 is two
+        // cells wide at N = 64 — stayed axis-aligned at exactly the scale a
+        // player sees from close range, which is most of why the world read as
+        // rasterised. `WARP_FINE` is what actually bends it.
+        const WARP: i32 = 600; // vs. the shift-11 spacing of 2048
+        const WARP_FINE: i32 = 140; // vs. the shift-9 spacing of 512
 
         for face in 0..6usize {
             for y in 0..N {
                 for x in 0..N {
                     let (px, py, pz) = cube_point(face, x as i32, y as i32);
-                    let wx = (value_noise(px + 5741, py + 2099, pz - 4451, 11, seed ^ 0x7A17)
-                        - 32768)
-                        * WARP
-                        / 32768;
-                    let wy = (value_noise(py - 3299, pz + 5443, px + 1877, 11, seed ^ 0x3B21)
-                        - 32768)
-                        * WARP
-                        / 32768;
-                    let wz = (value_noise(pz + 4519, px - 2687, py + 3947, 11, seed ^ 0x51C3)
-                        - 32768)
-                        * WARP
-                        / 32768;
+                    let cwx = value_noise(px + 5741, py + 2099, pz - 4451, 11, seed ^ 0x7A17);
+                    let cwy = value_noise(py - 3299, pz + 5443, px + 1877, 11, seed ^ 0x3B21);
+                    let cwz = value_noise(pz + 4519, px - 2687, py + 3947, 11, seed ^ 0x51C3);
+                    let fwx = value_noise(px - 1213, pz + 3457, py + 907, 9, seed ^ 0x2D45);
+                    let fwy = value_noise(py + 2131, px - 4079, pz + 1523, 9, seed ^ 0x6E11);
+                    let fwz = value_noise(pz - 3701, py + 1049, px + 2381, 9, seed ^ 0x1F83);
+                    let wx = (cwx - 32768) * WARP / 32768 + (fwx - 32768) * WARP_FINE / 32768;
+                    let wy = (cwy - 32768) * WARP / 32768 + (fwy - 32768) * WARP_FINE / 32768;
+                    let wz = (cwz - 32768) * WARP / 32768 + (fwz - 32768) * WARP_FINE / 32768;
                     let h = fbm(px + wx, py + wy, pz + wz, seed);
                     let centred = widen(h) - 32768;
                     let raw = centred * amp / 32768;
@@ -1502,6 +1509,21 @@ const fn lerp16(a: i32, b: i32, t: i32) -> i32 {
     a + (((b - a) as i64 * t as i64) >> 16) as i32
 }
 
+/// One octave of the terrain generator's noise, for anything outside this module
+/// that needs a *coherent* field rather than a per-cell hash.
+///
+/// `settlements::carve_spawn_pedestal` is the caller: a shelf outline jittered by
+/// `hash3` per cell comes out speckled with orphaned cells, where a noise lattice
+/// gives an outline that wanders. Exposed as a thin wrapper rather than by making
+/// `value_noise` public, so the one thing callers must not do — pick their own
+/// lattice convention — stays inside this module, and so the doc comment can say
+/// what the caller needs: the argument is a **3D cube point** (`cube_point`), and
+/// that is the entire reason the result is seamless across a face boundary.
+#[must_use]
+pub fn noise_at(px: i32, py: i32, pz: i32, shift: u32, seed: u32) -> i32 {
+    value_noise(px, py, pz, shift, seed)
+}
+
 /// Integer 3D value noise. Returns `0..=65535`.
 ///
 /// `shift` is the log2 of the lattice spacing. Arithmetic shift gives floor
@@ -1554,12 +1576,42 @@ const fn ridge(n: i32) -> i32 {
 /// every map two smoothstep blobs per face. Demoted to a continental tilt;
 /// shift 11 (4 cells per axis — actual continents) leads, shift 10 is ridged
 /// for mountain chains, and shift 8 adds fine texture the old stack lacked.
+///
+/// # Sheared, because permutations are not enough
+///
+/// The swizzles above are exact integer isometries, and that is precisely their
+/// limitation: *every* isometry of the cubic lattice maps axis planes onto axis
+/// planes. Permuting and negating axes stops the octaves' flats from stacking on
+/// each other, which is what it was for, but every octave's lattice stays
+/// parallel to the cube's axes — and at shift 8 that lattice is two cells wide,
+/// so the grid it draws lands exactly at the scale a player looks at from close
+/// range. That is the raster in "the world is rasterised".
+///
+/// Each octave is therefore sampled through a shear as well: a coordinate offset
+/// by a fraction of another axis, which tilts the lattice planes off the cube's
+/// axes by 15 to 27 degrees. Three things make this safe:
+///
+/// - It is a function of the 3D cube point alone, like everything else here, so
+///   adjacent cells across a face boundary still sample adjacent points and
+///   `terrain_is_continuous_across_every_seam` still holds for the same reason.
+/// - `>>` is floor division for negatives too, so the shear is continuous
+///   through the origin rather than kinked at it.
+/// - The shear is a staircase, not a line — it steps by one unit every two or
+///   four — and one unit of sample coordinate is ~0.13 height units against a
+///   16-unit terrace. The step is three orders of magnitude below anything
+///   visible; the tilt is not.
 fn fbm(px: i32, py: i32, pz: i32, seed: u32) -> i32 {
-    let a = value_noise(px + 1657, py - 2413, pz + 3181, 12, seed);
-    let b = value_noise(py + 911, pz - 1543, px + 2729, 11, seed ^ 0x1111);
-    let c = ridge(value_noise(-pz + 449, px + 1993, py - 3361, 10, seed ^ 0x2222));
-    let d = value_noise(px - 613, py + 1279, pz - 2039, 9, seed ^ 0x3333);
-    let e = value_noise(-py + 337, pz + 761, px + 1201, 8, seed ^ 0x4444);
+    let a = value_noise(px + 1657 + (py >> 2), py - 2413, pz + 3181 - (px >> 2), 12, seed);
+    let b = value_noise(py + 911 + (px >> 1), pz - 1543 + (py >> 2), px + 2729, 11, seed ^ 0x1111);
+    let c = ridge(value_noise(
+        -pz + 449 + (py >> 1),
+        px + 1993 - (pz >> 2),
+        py - 3361 + (px >> 1),
+        10,
+        seed ^ 0x2222,
+    ));
+    let d = value_noise(px - 613 - (pz >> 1), py + 1279 + (px >> 2), pz - 2039, 9, seed ^ 0x3333);
+    let e = value_noise(-py + 337 + (pz >> 1), pz + 761 - (px >> 1), px + 1201, 8, seed ^ 0x4444);
     (a * 6 + b * 8 + c * 4 + d * 2 + e) / 21
 }
 

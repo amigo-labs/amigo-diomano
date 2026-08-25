@@ -16,12 +16,33 @@ The four smoothing steps, in order:
 
 1. **Dual grid** — a vertex is the mean of the four cells around it, putting
    vertices at cell corners and halving terracing immediately.
-2. **Material-weighted Laplacian**, one pass: rock 0.15, soil 0.40, sand 0.60,
-   ash 0.55. Rock stays crisp and cliff-like; sand reads as dunes. The material
-   map thereby drives silhouette, not just colour.
+2. **Material-weighted Laplacian**, two passes: rock 0.15, soil 0.40, sand 0.60,
+   ash 0.55, and then the same weights at half strength. Rock stays crisp and
+   cliff-like; sand reads as dunes. The material map thereby drives silhouette,
+   not just colour.
 3. **Chunk skirts** — an outer ring pushed slightly inward.
 4. **Seam vertices come from ghost-border data**, so face boundaries are
    continuous with no special case.
+
+### The second pass, and why it is a pass and not bigger weights
+
+§7.1 specifies one pass, and one pass leaves a terrace step reading as a step:
+the dual grid halves it and the Laplacian takes a fraction off what is left, so
+a hand-dug edge is still a stair. A second pass at half weight takes the corner
+off without flattening anything — rock goes from an effective 0.15 to about 0.22
+— so §7.1's deliberate contrast, cliffs crisp against dunes soft, survives it.
+
+Doubling the *weights* instead would have dissolved exactly that contrast, which
+is the whole reason this is a second pass. And it needs a double buffer
+(`smooth_pass1`): a Laplacian run in place reads cells its own pass has already
+written, so the result would depend on iteration order — the same class of bug
+the checkerboard passes in `water.rs` exist to avoid.
+
+The ghost ring is refreshed **between** the passes, for the same reason it is
+refreshed between checkerboard halves. Without it the second pass reads a stale
+border, and two faces sharing a corner stop averaging the same four numbers — so
+`face_boundary_vertices_coincide_exactly` and its colour twin would quietly stop
+holding.
 
 ### Why the Laplacian runs in cell space
 
@@ -116,6 +137,20 @@ and which chunk.
 Measured: **15.3 chunks re-meshed per tick** during the scripted perf session, at
 **1.00 ms** — charged to the render budget, not the 12 ms simulation budget, so it
 is 4.8% of the 21 ms the render half has.
+
+**Re-measured** after the second smoothing pass, `attribs3` and the terrain
+generator's shear and fine warp, and deliberately as a before/after on *one*
+machine, because the figure above came from a different one and the two are not
+comparable: 35.8 chunks/tick at 1.222 ms before, 43.3 chunks/tick at 1.478 ms
+after — 7.0% of the render half.
+
+The per-chunk cost is unchanged at 0.034 ms either side, so the extra grid pass
+and the extra attribute are not what moved the total: **the chunk count did**.
+That is a consequence of the generator change rather than of the mesher. More
+relief means more water in motion means more chunks whose contents differ from
+one tick to the next, and `chunk_content_hash` is doing exactly its job. Worth
+knowing before anyone reads the +21% as a meshing regression and goes looking
+for it in `build_chunk`.
 
 That is up from 0.60 ms, and the increase bought two things: the corner grid the
 normal pass needs (a second evaluation of the dual-grid average per vertex, which

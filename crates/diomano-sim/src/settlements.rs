@@ -330,6 +330,10 @@ pub const CAUSEWAY_HEIGHT: i16 = 2 * crate::world::TERRACE + crate::world::TERRA
 /// function of the walk index, and it does — see `corridor_cell`.
 const CAUSEWAY_SALT: u32 = 0xCA05_E3A7;
 
+/// Salt for the spawn shelf's fringe noise. Separate from `CAUSEWAY_SALT` so
+/// that a spawn's outline and the road's crest cannot rhyme.
+const SPAWN_FRINGE_SALT: u32 = 0x5EDE_57A1;
+
 /// Submarine apron targets by ring beyond the dry band: a stepped ramp, all
 /// below the calm sea (0), so the flanks read as a ridge rising out of the
 /// sea floor instead of a sheer wall — and never as new passable land.
@@ -344,14 +348,45 @@ pub const SPAWN_PLATFORM_MIN_HEIGHT: i16 = 320;
 /// terrace step, so pin it at compile time.
 const _: () = assert!(crate::world::TERRACE as i32 <= crate::materials::REPOSE_ASH);
 
-/// Chebyshev rings of the spawn shelf: the platform occupies r <= 2, the flat
-/// rock shelf r = 3..=5. Three cells of width is enough for the game's own
-/// founding loop (`found_at_size(3)`) to raise satellite huts there — which is
-/// what keeps one earthquake on the platform from being an instant
-/// sudden-death loss: the seed settlement is no longer the player's only
-/// influence source.
+/// Where the flat rock shelf begins, as a Chebyshev ring. The 5x5 platform
+/// occupies r <= 2 and this is the first ring outside it.
+///
+/// Still Chebyshev, and deliberately: the platform is a *square* because
+/// `detect_plateaus` measures square plateaus, and the ring that protects it has
+/// to have the same shape or it would eat a corner of the thing it protects.
+/// Everything outside this is round — see [`carve_spawn_pedestal`].
 pub const SPAWN_SHELF_INNER: i32 = 3;
-pub const SPAWN_SHELF_OUTER: i32 = 5;
+
+/// Outer radius of the shelf, x16, before the fringe is added.
+///
+/// This replaced a Chebyshev `r <= 5`, i.e. a square, which is most of why a
+/// spawn read as a building rather than as a hill. 5.2 cells (83/16) is the
+/// smallest radius that still contains the whole `SPAWN_SHELF_INNER` ring
+/// (its corner sits at sqrt(18) = 4.25), so the protective ring cannot be
+/// clipped by rounding the shelf off.
+///
+/// It also has to leave `found_at_size(3)` a flat 3x3 somewhere on the shelf,
+/// because that is what stops one earthquake on the platform from being an
+/// instant sudden-death loss — the seed settlement must not be the player's only
+/// influence source. Along an axis the shelf spans dx = 3..=5 at |dy| <= 1, all
+/// of it inside 5.2, so the 3x3 at (4, 0) is there by construction and
+/// `the_spawn_shelf_founds_satellites` keeps checking that it is.
+const SPAWN_SHELF_RADIUS_16: i32 = 83;
+
+/// How far the shelf's outer edge may wander outward, x16. Outward only: the
+/// fringe may add ground, never take it, so every guarantee above survives any
+/// seed.
+const SPAWN_FRINGE_16: i32 = 22;
+
+/// Outer radius of the submarine apron, x16 — where the seamount meets the
+/// ocean floor and stops being forced at all.
+///
+/// 11 cells, so the loop's reach is 12: exactly [`SPAWN_SURVEY_RADIUS`], which is
+/// the radius `spawn_platform_height` already assumes stays inside a face. Wider
+/// than the old three rings on purpose — the flank then drops about 33 units per
+/// cell instead of 56 and 96, and a slope that shallow reads as a seamount rather
+/// than as the top of a wall.
+const SPAWN_APRON_RADIUS_16: i32 = 176;
 
 /// How far around a spawn the local relief is surveyed before the platform
 /// height is chosen. Granular material only ever moves downhill, so a pile
@@ -359,10 +394,14 @@ pub const SPAWN_SHELF_OUTER: i32 = 5;
 /// cell this survey sees cannot be buried by anything the survey saw.
 const SPAWN_SURVEY_RADIUS: i32 = 12;
 
-/// Submarine apron targets by ring beyond the shelf (r = 6..=8), mirroring
-/// `CAUSEWAY_APRON`: a stepped rock ramp below the calm sea, so on wet maps
-/// the pedestal reads as a seamount instead of a sheer pillar.
-const SPAWN_APRON: [i16; 3] = [-8, -64, -160];
+/// The apron's height at the shelf edge and at its outer radius. Everything
+/// between is interpolated, so the flank is a slope rather than three terraces.
+///
+/// Both below the calm sea (0) by construction, which is the load-bearing part:
+/// the apron is geography the walkers cannot use, and an apron cell that dried
+/// out would be a free bridge off the spawn.
+const SPAWN_APRON_TOP: i32 = -8;
+const SPAWN_APRON_TOE: i32 = -200;
 
 /// The height this spawn's 5x5 platform is forced to: at least the documented
 /// 320, and always two terraces above the tallest natural cell the survey
@@ -386,8 +425,8 @@ fn spawn_platform_height(w: &World, face: usize, cx: i32, cy: i32) -> i16 {
     (aligned + 2 * t).min(i32::from(crate::world::HEIGHT_MAX)) as i16
 }
 
-/// Terrace the ground around one spawn platform: a flat rock shelf one
-/// terrace down, then a stepped submarine apron.
+/// Shape the ground around one spawn platform: a flat rock shelf one terrace
+/// down, then a submarine flank that slopes away to the sea floor.
 ///
 /// The shelf step is load-bearing twice over. The platform-to-shelf drop is
 /// `TERRACE`, which sits *at* the ash angle of repose and *below* the sand
@@ -397,17 +436,57 @@ fn spawn_platform_height(w: &World, face: usize, cx: i32, cy: i32) -> i16 {
 /// itself is rock: it never becomes ash (earthquake converts soil only),
 /// never rots, never slides. Raise-only below the shelf height, like
 /// `carve_cell` — it never digs.
+///
+/// # It used to be square, and that was the first thing anyone saw
+///
+/// The shelf was a Chebyshev ring (`r <= 5`) and the apron three more of them,
+/// so a spawn was a perfect square mesa inside a perfect square rock band
+/// inside three perfect square terraces — the most conspicuous piece of grid on
+/// the planet, and by some distance the most artificial thing in frame.
+///
+/// It is now round, with two changes that make it read as a hill:
+///
+/// - The outer edge is a **euclidean radius plus a coherent fringe**. The fringe
+///   is one octave of the terrain generator's own value noise sampled at the 3D
+///   cube point (`world::noise_at`, lattice spacing two cells), not a per-cell
+///   hash — a per-cell hash gives a speckled edge of orphaned cells, whereas a
+///   noise lattice gives an outline that wanders. It is applied **outward only**,
+///   so the shelf can gain ground and never lose it, and every guarantee that
+///   depends on the shelf's width holds for any seed rather than for the seeds
+///   that were tried.
+/// - The apron is a **slope**, not three terraces: its target height is
+///   interpolated from `SPAWN_APRON_TOP` at the shelf edge to `SPAWN_APRON_TOE`
+///   at the outer radius. Same argument as `CAUSEWAY_APRON` — the pedestal must
+///   rise out of the sea floor rather than stand on a sheer wall — but three
+///   steps of 56 and 96 units were doing the opposite of that in the shallows,
+///   where they are exactly the terraces the eye reads as construction.
+///
+/// The interpolation is in radius, not in squared radius, hence the `isqrt`: a
+/// ramp linear in `d2` falls slowly at the top and steeply at the toe, which is
+/// an upside-down seamount.
 fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: i16) {
     let shelf = platform - crate::world::TERRACE;
-    for dy in -SPAWN_SHELF_OUTER - 3..=SPAWN_SHELF_OUTER + 3 {
-        for dx in -SPAWN_SHELF_OUTER - 3..=SPAWN_SHELF_OUTER + 3 {
-            let r = dx.abs().max(dy.abs());
-            if r < SPAWN_SHELF_INNER {
+    let reach = SPAWN_APRON_RADIUS_16 / 16 + 1;
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            // The inner ring keeps the platform's shape: `detect_plateaus`
+            // measures square plateaus, so the ring that guards the 5x5 must be
+            // square too or it would clip a corner of what it is guarding.
+            if dx.abs().max(dy.abs()) < SPAWN_SHELF_INNER {
                 continue;
             }
-            let (x, y) = ((cx + dx) as usize, (cy + dy) as usize);
-            let c = idx(face, x, y);
-            if r <= SPAWN_SHELF_OUTER {
+            let (x, y) = (cx + dx, cy + dy);
+            // Radius x16, so the fringe and the ramp both have sub-cell
+            // resolution without a single float.
+            let r16 = ((dx * dx + dy * dy) * 256).isqrt();
+            // Outward only. `noise_at` returns 0..=65535.
+            let (px, py, pz) = crate::world::cube_point(face, x, y);
+            let fringe = crate::world::noise_at(px, py, pz, 8, w.cfg.seed ^ SPAWN_FRINGE_SALT)
+                * SPAWN_FRINGE_16
+                / 65535;
+            let shelf_edge = SPAWN_SHELF_RADIUS_16 + fringe;
+            if r16 <= shelf_edge {
+                let c = idx(face, x as usize, y as usize);
                 if w.height[c] < shelf {
                     w.height[c] = shelf;
                     w.material[c] = crate::world::MAT_ROCK;
@@ -417,14 +496,22 @@ fn carve_spawn_pedestal(w: &mut World, face: usize, cx: i32, cy: i32, platform: 
                     w.water[c] = 0;
                     w.lava[c] = 0;
                 }
-            } else {
-                raise_seabed(
-                    w,
-                    face,
-                    x as i32,
-                    y as i32,
-                    SPAWN_APRON[(r - SPAWN_SHELF_OUTER - 1) as usize],
-                );
+            } else if r16 <= SPAWN_APRON_RADIUS_16 {
+                // Height is a function of radius alone — of the *unjittered*
+                // radius, not of this cell's own shelf edge. Measuring the ramp
+                // from `shelf_edge` seemed the natural thing and was wrong twice:
+                // the fringe varies per cell, so adjacent flank cells sat at
+                // different points on the ramp and the slope came out lumpy by up
+                // to 50 units a cell, worse than the three terraces it replaced.
+                //
+                // Anchored here the flank is a clean 33 units per cell for every
+                // seed, and the fringe does only the job it is for: deciding where
+                // the shelf stops and the flank starts, which is the outline you
+                // can actually see from above.
+                const SPAN: i32 = SPAWN_APRON_RADIUS_16 - SPAWN_SHELF_RADIUS_16;
+                let t = r16 - SPAWN_SHELF_RADIUS_16;
+                let h = SPAWN_APRON_TOP + (SPAWN_APRON_TOE - SPAWN_APRON_TOP) * t / SPAN;
+                raise_seabed(w, face, x, y, h as i16);
             }
         }
     }
@@ -1166,6 +1253,82 @@ mod tests {
     /// The shelf is not scenery: the game's own founding loop must raise
     /// satellites on it within seconds, because those satellites are what
     /// makes sudden death mean "lost all ground" instead of "lost one cast".
+    #[test]
+    fn the_spawn_pedestal_is_round_and_its_flank_is_a_slope() {
+        // The pedestal used to be a Chebyshev square inside a Chebyshev square
+        // ring inside three more of them, and it was the most conspicuous piece
+        // of grid on the planet. Both halves of the fix are pinned here, because
+        // both are invisible to every other test: they all ask whether the shelf
+        // *works*, and a square one works fine.
+        //
+        // Carved onto a deep, uniform sea floor rather than onto generated
+        // terrain, and `carve_spawn_pedestal` is called directly. Both matter:
+        // the carve is raise-only, so on real terrain every cell that was
+        // already higher keeps its own height and the test would end up
+        // measuring the generator instead of the shape.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    w.height[c] = -600;
+                    w.water[c] = 600;
+                    w.lava[c] = 0;
+                }
+            }
+        }
+        let platform: i16 = 320;
+        let shelf = platform - crate::world::TERRACE;
+        let (face, cx, cy) = STARTS[0];
+        let (cx, cy) = (cx as i32, cy as i32);
+        carve_spawn_pedestal(&mut w, face, cx, cy, platform);
+        let at = |dx: i32, dy: i32| w.height[idx(face, (cx + dx) as usize, (cy + dy) as usize)];
+
+        // Round. The corner of the old Chebyshev-5 shelf sits at radius
+        // sqrt(50) = 7.07, and the shelf edge cannot reach past
+        // (83 + 22) / 16 = 6.56 for any seed, so a square corner is never
+        // forced — while the axis at the same Chebyshev distance still is.
+        // That pair is a statement about shape rather than about size.
+        assert!(
+            at(5, 5) < shelf,
+            "the shelf still reaches its Chebyshev corner (5,5) at {}, so it is still a square",
+            at(5, 5)
+        );
+        assert_eq!(at(5, 0), shelf, "the shelf does not reach (5,0) on the axis");
+        assert_eq!(at(0, -5), shelf, "the shelf does not reach (0,-5) on the axis");
+
+        // A slope. Walking outward along an axis, the flank must fall in small
+        // steps all the way to the toe: the three-ring apron dropped 56 and then
+        // 96 units at a stroke, which is exactly the terrace the eye reads as
+        // construction. 40 leaves headroom over the ~33 the ramp actually uses.
+        let mut previous: Option<i16> = None;
+        let mut flank_cells = 0;
+        for d in 4..=11i32 {
+            let h = at(d, 0);
+            if h == shelf {
+                continue; // still on the shelf; the fringe decides where it ends
+            }
+            assert!(h < 0, "flank cell at radius {d} stands at {h}, above the calm sea");
+            assert!(h > -600, "the flank stops before radius {d}: still at the sea floor");
+            if let Some(prev) = previous {
+                assert!(h <= prev, "the flank rises again at radius {d}: {h} after {prev}");
+                assert!(
+                    prev - h <= 40,
+                    "the flank drops {} units into radius {d} — that is a terrace, not a slope",
+                    prev - h
+                );
+            }
+            previous = Some(h);
+            flank_cells += 1;
+        }
+        assert!(flank_cells >= 4, "only {flank_cells} flank cells — the apron barely exists");
+
+        // And it stops. Beyond the apron the sea floor is untouched, which is
+        // what keeps the pedestal a feature rather than a continent.
+        assert_eq!(at(12, 0), -600, "the apron reaches past its own outer radius");
+    }
+
     #[test]
     fn the_spawn_shelf_founds_satellites() {
         let mut w = World::boxed();

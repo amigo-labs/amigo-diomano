@@ -99,6 +99,18 @@ const SKIRT_DROP: f32 = 0.0;
 /// rock 0.15, soil 0.40, sand 0.60, ash 0.55.
 const SMOOTH_WEIGHT: [i32; 5] = [38, 154, 102, 141, 128];
 
+/// Numerator over 256 for the *second* smoothing pass, i.e. half strength.
+///
+/// §7.1 specifies one pass, and one pass leaves a single terrace step visible as
+/// a step: the dual grid halves it and the Laplacian takes a fraction off the
+/// rest, so a hand-dug terrace edge still reads as a stair. A second pass at half
+/// weight takes the corner off without flattening anything — rock goes from an
+/// effective 0.15 to about 0.22 — so the deliberate contrast of §7.1, cliffs
+/// crisp against dunes soft, survives it. Doubling the *weights* instead would
+/// have dissolved that contrast, which is why this is a second pass and not a
+/// bigger first one.
+const SMOOTH_PASS2: i32 = 128;
+
 /// Vertex buffers, owned by Rust and read by TypeScript as typed-array views.
 ///
 /// Nothing is serialised across the boundary: the host wraps these in
@@ -149,6 +161,13 @@ pub struct Mesh {
     /// Smoothed cell heights, x256, including a ghost ring so corner vertices at
     /// a face boundary read the same values from both sides.
     smooth: [i32; CELLS],
+    /// Output of the first smoothing pass, input to the second.
+    ///
+    /// A Laplacian cannot run in place: the second pass would then read cells its
+    /// own pass had already written and the result would depend on iteration
+    /// order — which is exactly the class of bug the checkerboard passes in
+    /// `water.rs` exist to avoid. 105 KB of double buffer is the cheap way out.
+    smooth_pass1: [i32; CELLS],
     /// One chunk's true corner positions, including the ring *outside* the chunk
     /// that the normal pass differences against. See [`Mesh::build_normals`].
     ///
@@ -194,6 +213,7 @@ impl Mesh {
             water_attribs: [0; TOTAL_VERTS * 4],
             indices: [0; INDICES_PER_CHUNK],
             smooth: [0; CELLS],
+            smooth_pass1: [0; CELLS],
             scratch_corners: [0.0; VERTS_PER_CHUNK * 3],
             scratch_heights: [0.0; VERTS_PER_CHUNK],
             chunk_hash: [0; CHUNKS],
@@ -290,13 +310,20 @@ impl Mesh {
         self.update(w);
     }
 
-    /// Step 2 of §7.1: one material-weighted Laplacian pass, in cell space.
+    /// Step 2 of §7.1: two material-weighted Laplacian passes, in cell space.
     ///
     /// Done in cell space rather than on the vertex grid for a specific reason:
     /// a vertex-space Laplacian at a chunk border needs corner data two cells
     /// outside the face, and the ghost ring is one cell deep. In cell space it
     /// needs one, which the ghost ring already provides — and the result is
     /// ghost-copied so vertices on a face boundary still agree from both sides.
+    ///
+    /// The ghost ring is refreshed **between** the passes, for the same reason
+    /// the checkerboard passes in `water.rs` refresh it between halves: without
+    /// it the second pass would read a stale border and the two faces sharing a
+    /// corner would no longer average the same four numbers, so the colour and
+    /// height continuity that `face_boundary_vertices_coincide_exactly` pins
+    /// would quietly stop holding.
     fn smooth_heights(&mut self, w: &World) {
         for face in 0..6usize {
             for y in 0..N {
@@ -309,6 +336,25 @@ impl Mesh {
                     }
                     let mean = sum / 4;
                     let k = SMOOTH_WEIGHT[(w.material[c] as usize).min(4)];
+                    self.smooth_pass1[c] = h + (mean - h) * k / 256;
+                }
+            }
+        }
+        for k in 0..GHOST_ENTRIES {
+            self.smooth_pass1[GHOST_DST[k] as usize] = self.smooth_pass1[GHOST_SRC[k] as usize];
+        }
+
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    let h = self.smooth_pass1[c];
+                    let mut sum = 0i32;
+                    for dir in 0..4usize {
+                        sum += self.smooth_pass1[neighbour_flat(c, dir)];
+                    }
+                    let mean = sum / 4;
+                    let k = SMOOTH_WEIGHT[(w.material[c] as usize).min(4)] * SMOOTH_PASS2 / 256;
                     self.smooth[c] = h + (mean - h) * k / 256;
                 }
             }
