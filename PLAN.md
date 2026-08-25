@@ -582,6 +582,79 @@ Two problems reported from play, both fixed at the root:
       increased), and its armageddon pulse reads the manifest price instead of
       a mirrored 2500
 
+- [x] **A legible power menu.** Opened over a sunlit coast, or over the hand's
+      own cream palm and pale-gold footprint ring, the menu was unreadable:
+      a transparent backdrop, 13px labels on 78%-opaque boxes, and
+      `opacity: 0.38` on unaffordable slices, which took the box down with the
+      text so the price was the first thing to vanish. The backdrop now carries a
+      scrim anchored on the ring, the hand is hidden while the menu is open (its
+      target cell is already snapshotted), labels are 500-weight 15px, disabled
+      slices keep their contrast and turn the price muted red, and the ring grew
+      120 → 168px because six legible boxes on a 120px ring overlapped. The hub
+      says the mana total, so the prices have something to be compared against
+- [x] **A world that is not a grid.** Three unrelated causes, of which only the
+      first was where anyone would look:
+      - `attribs[0]` carried a material **id**, and the GPU interpolates vertex
+        attributes: between rock (0) and soil (2) the value passes through 1,
+        which is sand, and the shader thresholded it. Every rock/soil boundary
+        grew a one-cell sand stripe with two hard, cell-aligned edges.
+        `attribs3` carries **weights** instead, noise-sharpened so the boundary
+        follows the noise field and not the cell grid
+      - `carve_spawn_pedestal` used Chebyshev rings — a square mesa in a square
+        band in three square terraces, the most artificial thing in frame. Now a
+        euclidean radius with a coherent outward-only fringe, and a sloped apron
+      - the noise showed its lattice at cell scale. The per-octave swizzles are
+        isometries, and every isometry of the cubic lattice keeps axis planes
+        axis-parallel; at shift 8 that lattice is two cells wide. Each octave is
+        now sheared, and a second domain warp at shift 9 bends the fine octaves
+        the shift-11 warp could only translate
+      Plus a second Laplacian pass at half weight, so a terrace stops reading as
+      a terrace without dissolving §7.1's crisp-cliffs-soft-dunes contrast.
+      Fixtures, corpus and cross-build hashes regenerated (the terrain moved);
+      land fractions barely shifted, so no profile bias needed retuning
+- [x] **§8's "no HUD" is now a deviation, deliberately** (user decision). Played
+      through, the match could not answer four questions it constantly poses: how
+      much mana, which wave of seven, who is winning, and what just happened over
+      there. The palm's glow answers the first only as a feeling; §7.4's "the
+      planet is the scoreboard" does not survive a camera pointed at your own
+      coastline; and `effects.ts` draws applied verbs *in the world*, so a power
+      landing off screen or on the far side was indistinguishable from one that
+      never fired — the exact problem it exists to fix, solved for half a sphere.
+
+      `hud.ts` answers the first three: a panel with mana, wave and tide phase,
+      and a territory bar sampled from `influence`, plus a banner on every tide
+      phase change and three coaching lines that each retire the moment the
+      player does the thing. Nothing in it is interactive, nothing is a resource
+      bar to manage, and it hides for the title and end cards — what §8 was
+      protecting is a screen that is mostly planet and verbs you feel rather
+      than read, and that is intact
+- [ ] **KNOWN GAP: "what just happened, over there?"** still unanswered.
+      Screen-edge DOM markers for applied verbs were built and then withdrawn,
+      because they could not be shown to work: the element sat in the document
+      with the right rect, `visibility: visible`, `opacity: 1` and an opaque
+      background, and did not appear in a capture — and `waitForSelector` would
+      match one while the very next round-trip found it gone, which no
+      2.6 s lifetime explains. Node pooling, restricting them to the frame edge,
+      and casting on the far side each changed nothing; one early capture *did*
+      show one, which is worse than none, because the mechanism can paint and
+      nothing identified decides when. The next attempt should draw the
+      indicator in the 3D scene, where `effects.ts` already has the instancing
+      and the projection, instead of in a DOM layer over a WebGL canvas
+- [ ] **KNOWN DEFECT: the black ring around a spawn pedestal.** Two cells wide,
+      exactly `rgb(0, 0, 0)`, and pixel-identical on main, so it predates all of
+      the above. The terrain geometry is present (confirmed in wireframe, and
+      `side: DoubleSide` changes nothing), and the fragment output is a hard zero
+      for inputs that are dry, flat, pure rock three hundred units above sea
+      level. Something in the terrain shader produces a NaN or a zero for that
+      case. Gating the abyssal-floor colour on altitude — which was a real bug
+      of its own, dry rock painted as sea bed — does not touch it
+- [x] **The volume is settable.** `master.gain` was a hard-coded 0.5 with nothing
+      wired to it, on a game with a procedural surf bed running the whole match.
+      A slider on the title card (whose pointer events stop before the card can
+      read them as "start the match"), `+` / `-` / `M` in the match with the
+      banner as feedback, and both values remembered in `localStorage` behind a
+      try/catch, because storage that throws must not stop a game from starting
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on

@@ -11,11 +11,19 @@
     />
     <style>
       /*
-        There is no persistent HUD (HANDOFF §8). The god has no body, only a
-        hand — cursor, matter carrier and influence indicator in one. The one
-        transient in-match element is the radial power menu (.radial below),
-        which exists only while its right-click holds it open; everything else
-        here is a full-bleed canvas and a black page behind the planet.
+        The hand is the interface (HANDOFF §8): cursor, matter carrier and
+        influence indicator in one. §8 also says there is no HUD, and this file
+        no longer honours that literally — see the header of `src/hud.ts` for
+        what four questions the match could not answer without one, and PLAN.md
+        for the recorded deviation. What is here:
+
+          .overlay      the title and end cards, outside the match (§9.4)
+          .radial       the power menu, alive only while right-click holds it
+          .hud          three lines in a corner, plus transient markers
+          #fallback     an epitaph, if WebGL2 or WebAssembly is missing
+
+        Everything else is a full-bleed canvas and a black page behind the
+        planet. Nothing in .hud takes a pointer event.
       */
       html,
       body {
@@ -213,6 +221,143 @@
       .radial-hub .mana {
         color: #ffd75e;
         margin-top: 5px;
+      }
+      /*
+        The title card's one setting. The card starts the match on any
+        pointerdown — `ui.ts` stops the slider's events before they reach it —
+        so this control has to look like a control, or a player will drag the
+        planet instead of the handle.
+      */
+      .overlay .volume {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        margin: 0 0 22px;
+        color: #a8b0c0;
+      }
+      .overlay .volume input[type="range"] {
+        width: 160px;
+        accent-color: #ffe9c0;
+        cursor: pointer;
+      }
+      .overlay .volume output {
+        min-width: 3.4em;
+        text-align: left;
+        color: #c8cdd8;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /*
+        The readouts. Three lines top-left, transient markers wherever an applied
+        verb landed, a banner for the tide's phase changes and a coaching line at
+        the bottom. Below .radial (5) and .overlay (10) in the stack, because a
+        menu or a card owning the screen has to sit over this, and it never takes
+        a pointer event at any depth.
+      */
+      .hud {
+        position: fixed;
+        inset: 0;
+        z-index: 4;
+        pointer-events: none;
+        font:
+          13px/1.5 system-ui,
+          sans-serif;
+        transition: opacity 400ms ease;
+      }
+      .hud.hud-hidden {
+        opacity: 0;
+      }
+      .hud-panel {
+        position: absolute;
+        top: 18px;
+        left: 20px;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+      }
+      .hud-mana {
+        color: #a8b0c0;
+        letter-spacing: 0.02em;
+      }
+      .hud-mana b {
+        color: #ffd75e;
+        font-size: 17px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .hud-tide {
+        color: #a8b0c0;
+        margin-top: 1px;
+      }
+      /* The wave is coming, or landing. The one place the panel raises its voice. */
+      .hud-tide.warning {
+        color: #ff9d5e;
+      }
+      /*
+        Territory. The track is the opponent's colour and the fill is yours, so
+        the bar is the whole standing rather than a fraction of an abstract
+        maximum — the same warm/cool pair the terrain shader blends by influence
+        (uGodA / uGodB in planet.ts), so the bar and the planet agree.
+      */
+      .hud-bar {
+        width: 96px;
+        height: 4px;
+        margin-top: 7px;
+        border-radius: 2px;
+        background: #6e83ad;
+        overflow: hidden;
+      }
+      .hud-bar i {
+        display: block;
+        height: 100%;
+        width: 50%;
+        background: #ffe9c0;
+        transition: width 500ms ease;
+      }
+      /*
+        What just happened, once, in the middle of the screen. §8 forbids a
+        countdown and this is not one — it reports a phase change after the fact
+        and fades.
+      */
+      .hud-banner {
+        position: absolute;
+        top: 22%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #e6e2d8;
+        font-size: 21px;
+        font-weight: 300;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.95);
+        opacity: 0;
+        transition: opacity 500ms ease;
+      }
+      .hud-banner.shown {
+        opacity: 1;
+      }
+      /*
+        One coaching line, retired the moment the player does the thing. It needs
+        a carrier and not just a shadow: the bottom of the frame is where the
+        camera puts the ground nearest the player, which is the brightest, most
+        detailed part of the picture, and grey text with a drop shadow simply
+        disappeared into a sunlit meadow.
+      */
+      .hud-hint {
+        position: absolute;
+        bottom: 26px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: min(30em, 80vw);
+        padding: 6px 14px;
+        border-radius: 14px;
+        background: rgba(8, 11, 18, 0.72);
+        color: #c8cdd8;
+        text-align: center;
+        opacity: 0;
+        transition: opacity 600ms ease;
+      }
+      .hud-hint.shown {
+        opacity: 1;
       }
       /* Shown only if WebGL2 or WebAssembly is missing. Not UI: an epitaph. */
       #fallback {

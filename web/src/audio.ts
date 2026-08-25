@@ -14,6 +14,15 @@
  *   sound is the cheapest way to keep that from feeling unresponsive.
  *
  * The render PRNG (noise) never touches simulation state (§4.4).
+ *
+ * # Volume
+ *
+ * The master gain was a hard-coded 0.5 with no way to reach it — the one setting
+ * every game has, and this one had a procedural surf bed running the whole match
+ * and no way to turn it down. It is now settable, mutable and remembered in
+ * `localStorage`, and the desired value is held here rather than on the node,
+ * because the `AudioContext` is created lazily on the first sound: a change made
+ * from the title card happens *before* there is a gain node to write to.
  */
 
 import type { Sim } from "./main";
@@ -32,6 +41,45 @@ export interface Audio {
   sculpt(): void;
   /** Match-end sting. */
   sting(kind: "win" | "loss" | "draw"): void;
+  /** Master volume, 0..1. Unaffected by mute — this is the remembered level. */
+  volume(): number;
+  /** Set master volume, 0..1. Persisted, and unmutes if it is raised above zero. */
+  setVolume(v: number): void;
+  /** Flip mute. Returns the new state. Persisted. */
+  toggleMute(): boolean;
+  /** Whether sound is currently muted. */
+  muted(): boolean;
+}
+
+const VOLUME_KEY = "diomano.volume";
+const MUTED_KEY = "diomano.muted";
+/** What the master gain was hard-coded to before it could be changed. */
+const DEFAULT_VOLUME = 0.5;
+
+/**
+ * Read a remembered setting, or fall back.
+ *
+ * `localStorage` throws rather than returning null when storage is disabled —
+ * Safari's private mode, and any browser with site data blocked — and a game
+ * that fails to start because it could not read a volume level would be an
+ * absurd way to lose a player.
+ */
+function remembered<T>(key: string, parse: (raw: string) => T | null, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === null) return fallback;
+    return parse(raw) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function remember(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // A session that cannot persist its volume still has to be playable at it.
+  }
 }
 
 export function createAudio(): Audio {
@@ -43,6 +91,20 @@ export function createAudio(): Audio {
   let smoothedFlow = 0;
   /** Leaky integrator for the sculpt bed: work bumps it, `sync` drains it. */
   let sculptLevel = 0;
+  let volume = remembered(
+    VOLUME_KEY,
+    (raw) => {
+      const v = Number.parseFloat(raw);
+      return Number.isFinite(v) ? Math.min(Math.max(v, 0), 1) : null;
+    },
+    DEFAULT_VOLUME,
+  );
+  let isMuted = remembered(MUTED_KEY, (raw) => raw === "1", false);
+
+  /** Push `volume`/`isMuted` at the gain node, if one exists yet. */
+  const applyGain = (): void => {
+    if (master) master.gain.value = isMuted ? 0 : volume;
+  };
 
   const ensure = (): AudioContext | null => {
     if (ctx) return ctx;
@@ -53,8 +115,10 @@ export function createAudio(): Audio {
     ctx = new Ctor();
 
     master = ctx.createGain();
-    master.gain.value = 0.5;
     master.connect(ctx.destination);
+    // Whatever was chosen before the context existed applies from the first
+    // sample, so the title card's slider is not silently ignored.
+    applyGain();
 
     // Surf: pink-ish noise through a band-pass that opens as flow rises.
     const noise = ctx.createBufferSource();
@@ -205,6 +269,27 @@ export function createAudio(): Audio {
       ensure();
       sculptLevel = Math.min(sculptLevel + 0.18, 1);
     },
+
+    volume: () => volume,
+
+    setVolume(v: number): void {
+      volume = Math.min(Math.max(v, 0), 1);
+      // Raising the slider is an unambiguous "I want to hear this", so it lifts
+      // mute rather than leaving the player dragging a control that does nothing.
+      if (volume > 0) isMuted = false;
+      remember(VOLUME_KEY, String(volume));
+      remember(MUTED_KEY, isMuted ? "1" : "0");
+      applyGain();
+    },
+
+    toggleMute(): boolean {
+      isMuted = !isMuted;
+      remember(MUTED_KEY, isMuted ? "1" : "0");
+      applyGain();
+      return isMuted;
+    },
+
+    muted: () => isMuted,
 
     sting(kind: "win" | "loss" | "draw"): void {
       if (kind === "win") {

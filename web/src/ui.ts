@@ -8,9 +8,22 @@
  * comments stay English.
  */
 
+/**
+ * The one setting the shell offers, wired straight to `audio.ts`.
+ *
+ * Passed in rather than imported so this module keeps knowing nothing about the
+ * audio graph — it renders a control and reports what the player did with it.
+ */
+export interface VolumeControl {
+  /** Current level, 0..1. */
+  get(): number;
+  /** Apply and remember a new level. */
+  set(v: number): void;
+}
+
 export interface Ui {
   /** Show the title card. Resolves on the player's click, which is also the audio unlock. */
-  showTitle(): Promise<void>;
+  showTitle(volume: VolumeControl): Promise<void>;
   /** Show the end card: outcome, why it ended, per-wave score rows, restart buttons. */
   showGameOver(
     outcome: number,
@@ -41,6 +54,7 @@ const CONTROLS: [string, string][] = [
   ["Klick (rechts)", "Kraftmenü öffnen — Kräfte kosten Mana"],
   ["1 / 2 / 3", "Erde / Wasser / Lava greifen"],
   ["Umschalt / Alt / Strg", "geworfen / verstärkt / extrem"],
+  ["+ / − / M", "lauter / leiser / stumm"],
 ];
 
 export function createUi(): Ui {
@@ -60,16 +74,39 @@ export function createUi(): Ui {
   };
 
   return {
-    showTitle(): Promise<void> {
+    showTitle(volume: VolumeControl): Promise<void> {
       const el = make();
       const rows = CONTROLS.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+      const level = Math.round(volume.get() * 100);
       el.innerHTML = `
         <div>
           <h1>diomano</h1>
           <p class="premise">Zwei Götter, ein Planet. Wessen Volk übersteht die sieben Flutwellen?</p>
           <table>${rows}</table>
+          <p class="volume">
+            <label for="volume">Lautstärke</label>
+            <input id="volume" type="range" min="0" max="100" step="1" value="${level}" />
+            <output for="volume">${level}%</output>
+          </p>
           <p class="hint">Klicken, um zu beginnen</p>
         </div>`;
+
+      const slider = el.querySelector<HTMLInputElement>("#volume");
+      const readout = el.querySelector<HTMLOutputElement>("output");
+      if (slider) {
+        // The card starts the match on *any* pointerdown, so every event the
+        // slider needs has to stop before it gets there. Without this, grabbing
+        // the handle begins the match and the drag continues over a live planet.
+        for (const kind of ["pointerdown", "pointerup", "click"] as const) {
+          slider.addEventListener(kind, (ev) => ev.stopPropagation());
+        }
+        slider.addEventListener("input", () => {
+          const v = Number.parseInt(slider.value, 10) / 100;
+          volume.set(v);
+          if (readout) readout.textContent = `${slider.value}%`;
+        });
+      }
+
       return new Promise((resolve) => {
         el.addEventListener(
           "pointerdown",
