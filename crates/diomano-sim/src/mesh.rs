@@ -1030,7 +1030,7 @@ mod tests {
                             shared += 1;
                             assert_eq!(
                                 weights, prev,
-                                "corner at cube point {p:?} splats {weights:?} from face                                  {face} ({gx},{gy}) but {prev:?} from face {pf} ({pgx},{pgy})"
+                                "corner at cube point {p:?} splats {weights:?} from face {face} ({gx},{gy}) but {prev:?} from face {pf} ({pgx},{pgy})"
                             );
                         }
                     }
@@ -1061,12 +1061,17 @@ mod tests {
                         "face {face} ({gx},{gy}): weights {s:?} sum to {sum}, over 255"
                     );
                     // Generation makes no swamp, so every corner is fully
-                    // accounted for by the first four. `254` and not `255`
-                    // because `255 * 1 / 3` truncates to 84 and three of those
-                    // are 252 — the corner case, in both senses.
+                    // accounted for by the first four — but the floor is 252 and
+                    // not 255, because `255 * count / n` truncates. The worst
+                    // case is the four-cell corner where all four cells differ:
+                    // `255 * 1 / 4` is 63 rather than 63.75, four times over, so
+                    // three of 255 go missing. Every other split keeps more
+                    // (2+2 and 3+1 both give 254, a pure corner gives 255), and
+                    // the eight cube corners divide by 3 and lose nothing at all
+                    // — 255/3 is exact, so 1+1+1 is 85 three times.
                     assert!(
                         sum >= 252,
-                        "face {face} ({gx},{gy}): weights {s:?} sum to only {sum}, so                          {} of 255 leaks into swamp on ground that has none",
+                        "face {face} ({gx},{gy}): weights {s:?} sum to only {sum}, so {} of 255 leaks into swamp on ground that has none",
                         255 - sum
                     );
                 }
