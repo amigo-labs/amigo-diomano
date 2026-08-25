@@ -221,6 +221,12 @@ pub extern "C" fn dio_mesh_attribs2_ptr() -> *const u8 {
     mesh_buf().attribs2.as_ptr()
 }
 
+/// Per vertex: rock, sand, soil and ash weights. Swamp is `255 - sum`.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_mesh_attribs3_ptr() -> *const u8 {
+    mesh_buf().attribs3.as_ptr()
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_mesh_water_positions_ptr() -> *const f32 {
     mesh_buf().water_positions.as_ptr()

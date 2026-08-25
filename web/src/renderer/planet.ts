@@ -80,11 +80,13 @@ export interface Planet {
 const VERTEX_SHADER = /* glsl */ `
   attribute vec4 attrib;   // material / 255, vegetation, influence + 128, depth
   attribute vec4 attrib2;  // lava, fertility, sediment, spare
+  attribute vec4 attrib3;  // rock, sand, soil, ash weights (swamp = 1 - sum)
 
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying vec4 vAttrib;
   varying vec4 vAttrib2;
+  varying vec4 vAttrib3;
   varying float vAltitude;
 
   uniform float uSeaRadius;
@@ -100,6 +102,7 @@ const VERTEX_SHADER = /* glsl */ `
     vWorld = world.xyz;
     vAttrib = attrib;
     vAttrib2 = attrib2;
+    vAttrib3 = attrib3;
     // Metres above the current waterline, roughly. The wet-sand band and the
     // snowline both key off this, so both migrate as sea level moves.
     vAltitude = length(position) - uSeaRadius;
@@ -114,6 +117,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   varying vec3 vWorld;
   varying vec4 vAttrib;
   varying vec4 vAttrib2;
+  varying vec4 vAttrib3;
   varying float vAltitude;
 
   uniform vec3 uSunDirection;
@@ -153,21 +157,64 @@ const FRAGMENT_SHADER = /* glsl */ `
          + texture2D(t, p.xy * scale).rgb * w.z;
   }
 
-  // Material ids from world.rs: 0 rock, 1 sand, 2 soil, 3 ash, 4 swamp.
+  // The five materials of world.rs: rock, sand, soil, ash, swamp.
   // Saturated earth. Pale greys sit at the same value as the sea after ACES.
-  vec3 materialColour(float id) {
-    float m = id * 255.0;
-    vec3 rock  = vec3(0.42, 0.36, 0.28);
-    vec3 sand  = vec3(0.68, 0.54, 0.30);
-    vec3 soil  = vec3(0.32, 0.44, 0.14);
-    vec3 ash   = vec3(0.22, 0.20, 0.18);
-    vec3 swamp = vec3(0.16, 0.30, 0.14);
-    vec3 c = rock;
-    c = mix(c, sand,  step(0.5, m) * (1.0 - step(1.5, m)));
-    c = mix(c, soil,  step(1.5, m) * (1.0 - step(2.5, m)));
-    c = mix(c, ash,   step(2.5, m) * (1.0 - step(3.5, m)));
-    c = mix(c, swamp, step(3.5, m));
-    return c;
+  const vec3 MAT_ROCK = vec3(0.42, 0.36, 0.28);
+  const vec3 MAT_SAND = vec3(0.68, 0.54, 0.30);
+  const vec3 MAT_SOIL = vec3(0.32, 0.44, 0.14);
+  const vec3 MAT_ASH = vec3(0.22, 0.20, 0.18);
+  const vec3 MAT_SWAMP = vec3(0.16, 0.30, 0.14);
+
+  // How far a weight is pushed around before the boundary is decided, and how
+  // hard the decision then is. 0.42 / 3.0: enough spread that the winner in an
+  // overlap is genuinely the noise's choice, sharp enough that the transition
+  // is a fringe of a cell rather than a fade across one.
+  const float SPLAT_SPREAD = 0.42;
+  const float SPLAT_SHARP = 3.0;
+
+  /*
+    The material mixture at this fragment, as five weights.
+
+    attrib3 carries how much of the four cells behind each vertex is rock, sand,
+    soil and ash; swamp is the remainder. Interpolated across a quad those are a
+    real mixture, which is why they can be blended at all — the code this
+    replaced interpolated a material *id* and thresholded it, so every rock/soil
+    boundary on the planet grew a one-cell sand stripe with two hard,
+    cell-aligned edges. See docs/specs/rendering.md.
+
+    A plain weighted sum is correct and still wrong to look at: it fades linearly
+    over exactly one cell, which reads as an airbrushed grid instead of as
+    ground. So each weight is offset by its own band of the same 3D noise
+    everything else here uses and then raised to a power. The boundary becomes an
+    interlocking edge that follows the noise field rather than the cell grid,
+    which is the whole point — the grid was the complaint.
+  */
+  void dioMaterialSplat(vec4 raw, vec3 up, out vec4 w4, out float swamp) {
+    float sw = max(1.0 - (raw.x + raw.y + raw.z + raw.w), 0.0);
+    // One offset per material, so no two boundaries break up in the same place.
+    // 46 is a little over a cell at N = 64: fine enough to read as material,
+    // coarse enough that a texel still covers less than a noise cell.
+    float nr = dioNoise(up * 46.0);
+    float ns = dioNoise(up * 46.0 + vec3(31.7, 11.3, 57.1));
+    float no = dioNoise(up * 46.0 + vec3(-19.4, 63.2, 27.9));
+    float na = dioNoise(up * 46.0 + vec3(48.6, -37.1, 9.5));
+    float nw = dioNoise(up * 46.0 + vec3(7.2, 24.8, -51.3));
+    float r = pow(max(raw.x + (nr - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
+    float s = pow(max(raw.y + (ns - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
+    float o = pow(max(raw.z + (no - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
+    float a = pow(max(raw.w + (na - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
+    float m = pow(max(sw + (nw - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
+    float total = r + s + o + a + m;
+    // Every weight pushed below zero at once leaves nothing to blend. Fall back
+    // to the unsharpened mixture: a fragment with no material would come out
+    // black, and black holes in the ground are a worse artefact than a soft edge.
+    if (total < 1e-5) {
+      w4 = raw;
+      swamp = sw;
+      return;
+    }
+    w4 = vec4(r, s, o, a) / total;
+    swamp = m / total;
   }
 
   void main() {
@@ -177,7 +224,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // grass, high as snow. Avoids UV-mapping a quadsphere entirely.
     float slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
 
-    vec3 albedo = materialColour(vAttrib.r);
+    vec4 matW;
+    float matSwamp;
+    dioMaterialSplat(vAttrib3, up, matW, matSwamp);
+    vec3 albedo = MAT_ROCK * matW.x + MAT_SAND * matW.y + MAT_SOIL * matW.z
+                + MAT_ASH * matW.w + MAT_SWAMP * matSwamp;
 
     // Texture structure, keyed by the same material id and applied as a
     // modulation of the palette rather than a replacement for it — the colour
@@ -194,10 +245,10 @@ const FRAGMENT_SHADER = /* glsl */ `
       tGrass = dioTriplanar(uTexGrass, vWorld, n, 22.0);
       tSnow = dioTriplanar(uTexSnow, vWorld, n, 18.0);
       vec3 tDirt = dioTriplanar(uTexDirt, vWorld, n, 20.0);
-      float mId = vAttrib.r * 255.0;
-      float isR = 1.0 - step(0.5, mId);
-      float isS = step(0.5, mId) * (1.0 - step(1.5, mId));
-      vec3 t = tRock * isR + tSand * isS + tDirt * (1.0 - isR - isS);
+      // The same weights as the palette, so structure and colour never disagree
+      // about which material a fragment is. Soil, ash and swamp all take the
+      // dirt map, as they did when this was a step chain on the material id.
+      vec3 t = tRock * matW.x + tSand * matW.y + tDirt * (matW.z + matW.w + matSwamp);
       albedo *= mix(vec3(1.0), t * 2.1, uTexMix);
     }
 
@@ -466,15 +517,18 @@ export function createPlanet(sim: Sim, view: View): Planet {
   const normal = new THREE.BufferAttribute(sim.meshNormals, 3);
   const attrib = new THREE.BufferAttribute(sim.meshAttribs, 4, true);
   const attrib2 = new THREE.BufferAttribute(sim.meshAttribs2, 4, true);
+  const attrib3 = new THREE.BufferAttribute(sim.meshAttribs3, 4, true);
   position.setUsage(THREE.DynamicDrawUsage);
   normal.setUsage(THREE.DynamicDrawUsage);
   attrib.setUsage(THREE.DynamicDrawUsage);
   attrib2.setUsage(THREE.DynamicDrawUsage);
+  attrib3.setUsage(THREE.DynamicDrawUsage);
 
   geometry.setAttribute("position", position);
   geometry.setAttribute("normal", normal);
   geometry.setAttribute("attrib", attrib);
   geometry.setAttribute("attrib2", attrib2);
+  geometry.setAttribute("attrib3", attrib3);
   geometry.setIndex(new THREE.BufferAttribute(buildPlanetIndices(sim), 1));
   // The terrain deforms constantly, so a bounding sphere computed from the
   // vertices would be stale within a second. One that always contains the
@@ -493,6 +547,7 @@ export function createPlanet(sim: Sim, view: View): Planet {
       normal.clearUpdateRanges();
       attrib.clearUpdateRanges();
       attrib2.clearUpdateRanges();
+      attrib3.clearUpdateRanges();
       let dirty = 0;
       for (let chunk = 0; chunk < sim.chunks; chunk++) {
         if (sim.meshDirty[chunk] === 0) continue;
@@ -502,18 +557,20 @@ export function createPlanet(sim: Sim, view: View): Planet {
         normal.addUpdateRange(start * 3, sim.vertsPerChunk * 3);
         attrib.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
         attrib2.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
+        attrib3.addUpdateRange(start * 4, sim.vertsPerChunk * 4);
       }
       if (dirty > 0) {
         position.needsUpdate = true;
         normal.needsUpdate = true;
         attrib.needsUpdate = true;
         attrib2.needsUpdate = true;
+        attrib3.needsUpdate = true;
       }
       material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
     },
 
     refreshAll(): void {
-      for (const a of [position, normal, attrib, attrib2]) {
+      for (const a of [position, normal, attrib, attrib2, attrib3]) {
         a.clearUpdateRanges();
         a.needsUpdate = true;
       }

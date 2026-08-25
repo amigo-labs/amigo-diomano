@@ -71,6 +71,7 @@ interface RawExports {
   dio_mesh_attribs_ptr(): number;
   dio_mesh_water_positions_ptr(): number;
   dio_mesh_attribs2_ptr(): number;
+  dio_mesh_attribs3_ptr(): number;
   dio_mesh_water_attribs_ptr(): number;
   dio_mesh_indices_ptr(): number;
   dio_mesh_dirty_ptr(): number;
@@ -224,6 +225,8 @@ export interface Sim {
   readonly meshAttribs: Uint8Array;
   /** Per vertex: lava depth, fertility, sediment, spare. */
   readonly meshAttribs2: Uint8Array;
+  /** Per vertex: rock, sand, soil, ash weights. Swamp is the remainder. */
+  readonly meshAttribs3: Uint8Array;
   readonly waterPositions: Float32Array;
   readonly waterAttribs: Uint8Array;
   readonly meshIndices: Uint16Array;
@@ -335,6 +338,7 @@ export async function loadSim(
     meshNormals: new Float32Array(buf, e.dio_mesh_normals_ptr(), totalVerts * 3),
     meshAttribs: new Uint8Array(buf, e.dio_mesh_attribs_ptr(), totalVerts * 4),
     meshAttribs2: new Uint8Array(buf, e.dio_mesh_attribs2_ptr(), totalVerts * 4),
+    meshAttribs3: new Uint8Array(buf, e.dio_mesh_attribs3_ptr(), totalVerts * 4),
     waterPositions: new Float32Array(buf, e.dio_mesh_water_positions_ptr(), totalVerts * 3),
     waterAttribs: new Uint8Array(buf, e.dio_mesh_water_attribs_ptr(), totalVerts * 4),
     meshIndices: new Uint16Array(buf, e.dio_mesh_indices_ptr(), indicesPerChunk),

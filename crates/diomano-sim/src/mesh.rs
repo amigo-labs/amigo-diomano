@@ -118,6 +118,30 @@ pub struct Mesh {
     /// layer the simulation moves every tick and the renderer had no way to see
     /// it at all, so a volcano showed ash *afterwards* and never hot lava.
     pub attribs2: [u8; TOTAL_VERTS * 4],
+    /// Per vertex: how much of the four surrounding cells is rock, sand, soil
+    /// and ash. Swamp is the remainder, `255 - sum`.
+    ///
+    /// # Why a material *id* cannot be a vertex attribute
+    ///
+    /// `attribs[0]` carries the id of one cell, and the GPU interpolates vertex
+    /// attributes linearly across a quad. Between a rock cell (0) and a soil
+    /// cell (2) the interpolated value therefore passes through 1 — which is
+    /// *sand* — and the fragment shader, which thresholded the id with `step`,
+    /// painted a sand stripe with two hard edges along every rock/soil boundary
+    /// on the planet. Cell-aligned, one cell wide, on both the palette and the
+    /// texture selection. It was the single largest reason the world read as a
+    /// grid rather than as ground.
+    ///
+    /// Weights interpolate correctly because they are quantities, not labels: a
+    /// vertex where two of the four cells are rock genuinely *is* half rock, and
+    /// the value halfway to a pure-soil vertex is a real mixture rather than an
+    /// invented third material. The shader blends the five palettes by these and
+    /// never thresholds anything.
+    ///
+    /// `attribs[0]` stays: `corner_attribs2` documents that fertility and
+    /// sediment come from the same cell the material id does, and the id is
+    /// still the cheapest way for anything to ask "which cell is this".
+    pub attribs3: [u8; TOTAL_VERTS * 4],
     pub water_positions: [f32; TOTAL_VERTS * 3],
     /// Per vertex: depth / 8, influence + 128, foam (erosion), dry flag.
     pub water_attribs: [u8; TOTAL_VERTS * 4],
@@ -165,6 +189,7 @@ impl Mesh {
             normals: [0.0; TOTAL_VERTS * 3],
             attribs: [0; TOTAL_VERTS * 4],
             attribs2: [0; TOTAL_VERTS * 4],
+            attribs3: [0; TOTAL_VERTS * 4],
             water_positions: [0.0; TOTAL_VERTS * 3],
             water_attribs: [0; TOTAL_VERTS * 4],
             indices: [0; INDICES_PER_CHUNK],
@@ -349,6 +374,7 @@ impl Mesh {
                 let (surface, depth) = self.corner_water(w, face, gx, gy, terrain);
                 let (mat, veg, infl) = corner_attribs(w, face, gx, gy);
                 let (lava, fert, sed) = corner_attribs2(w, face, gx, gy);
+                let splat = corner_material_weights(w, face, gx, gy);
 
                 let dir = corner_direction(face, gx, gy);
 
@@ -374,6 +400,11 @@ impl Mesh {
                 self.attribs2[vi * 4 + 1] = fert;
                 self.attribs2[vi * 4 + 2] = sed;
                 self.attribs2[vi * 4 + 3] = 0;
+
+                self.attribs3[vi * 4] = splat[0];
+                self.attribs3[vi * 4 + 1] = splat[1];
+                self.attribs3[vi * 4 + 2] = splat[2];
+                self.attribs3[vi * 4 + 3] = splat[3];
 
                 let erode = w.erode[clamp_cell(face, gx, gy)];
                 self.water_attribs[vi * 4] = d8;
@@ -590,6 +621,50 @@ fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
         lava = lava.max(w.lava[n]);
     }
     (lava, w.fertility[c], w.sediment[c])
+}
+
+/// Material weights at a corner: rock, sand, soil, ash, on the same dual grid
+/// as [`Mesh::corner_height`]. Swamp is whatever is left of 255.
+///
+/// # The four cells must be the *same four* from both sides of a face boundary
+///
+/// This deliberately reads `idx_i(face, .., ..)` with the coordinate clamped to
+/// `-1 ..= N` — the ghost ring — exactly as `corner_height` and `corner_water`
+/// do, and emphatically *not* `clamp_cell`, which clamps to `0 ..= N - 1` and
+/// therefore reads a different cell at a face edge depending on which face is
+/// asking. Height already had this right and the weights have to match it: a
+/// corner vertex on a face boundary averages two live cells and two ghosts, and
+/// the face on the other side averages the same four, so integer addition being
+/// commutative both land on identical bytes and the seam cannot show as a colour
+/// discontinuity. `material_weights_agree_across_a_face_boundary` pins it.
+///
+/// `255 * count / n` rather than `64 * count`: n of a kind must come out as a
+/// full 255, because the shader normalises and a maximum of 256 would either
+/// overflow the byte or leave pure ground reading as 4/255 of something else.
+///
+/// The eight cube corners take the same escape hatch `corner_height` does: the
+/// diagonal ghost there is ambiguous (§3.5), so the three real cells that meet
+/// at the corner are counted instead — a set all three faces agree on.
+fn corner_material_weights(w: &World, face: usize, gx: i32, gy: i32) -> [u8; 4] {
+    let mut count = [0i32; 5];
+    let n = if let Some(cells) = cube_corner_cells(face, gx, gy) {
+        for &c in &cells {
+            count[(w.material[c] as usize).min(4)] += 1;
+        }
+        3
+    } else {
+        for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+            let c = idx_i(face, (gx + dx).clamp(-1, N as i32), (gy + dy).clamp(-1, N as i32));
+            count[(w.material[c] as usize).min(4)] += 1;
+        }
+        4
+    };
+    [
+        (255 * count[0] / n) as u8,
+        (255 * count[1] / n) as u8,
+        (255 * count[2] / n) as u8,
+        (255 * count[3] / n) as u8,
+    ]
 }
 
 /// The three live cells meeting at a cube corner, if `(gx, gy)` is one.
@@ -877,6 +952,80 @@ mod tests {
             shared >= 12 * (N - 1),
             "only {shared} shared corners found; the identity key is not matching"
         );
+    }
+
+    #[test]
+    fn material_weights_agree_across_a_face_boundary() {
+        // The colour twin of `face_boundary_vertices_coincide_exactly`. Weights
+        // replaced an interpolated material *id* precisely so that boundaries
+        // stop being cell-aligned, and a splat that disagreed across a cube edge
+        // would trade one grid for a different, worse artefact: a hard colour
+        // discontinuity along four great circles.
+        //
+        // Identified by the exact cube point, like the height test, and with no
+        // tolerance — the four cells behind a shared corner are the same four
+        // from both sides, so the bytes must be equal, not close.
+        let (w, _) = meshed();
+        let mut by_point: std::collections::BTreeMap<[u32; 3], ([u8; 4], usize, i32, i32)> =
+            std::collections::BTreeMap::new();
+        let mut shared = 0usize;
+
+        for face in 0..6usize {
+            for gy in 0..=N as i32 {
+                for gx in 0..=N as i32 {
+                    let p = corner_cube_point(face, gx, gy);
+                    let key = [p[0].to_bits(), p[1].to_bits(), p[2].to_bits()];
+                    let weights = corner_material_weights(&w, face, gx, gy);
+                    match by_point.get(&key) {
+                        None => {
+                            by_point.insert(key, (weights, face, gx, gy));
+                        }
+                        Some(&(prev, pf, pgx, pgy)) => {
+                            shared += 1;
+                            assert_eq!(
+                                weights, prev,
+                                "corner at cube point {p:?} splats {weights:?} from face                                  {face} ({gx},{gy}) but {prev:?} from face {pf} ({pgx},{pgy})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            shared >= 12 * (N - 1),
+            "only {shared} shared corners found; the identity key is not matching"
+        );
+    }
+
+    #[test]
+    fn material_weights_are_a_partition_of_the_four_cells() {
+        // Weights are quantities, and the shader treats swamp as `255 - sum`.
+        // A sum over 255 would make swamp negative; a sum that never reaches 255
+        // on uniform ground would tint every cell with a material that is not
+        // there. Both are silent in the picture and loud here.
+        let (w, _) = meshed();
+        for face in 0..6usize {
+            for gy in 0..=N as i32 {
+                for gx in 0..=N as i32 {
+                    let s = corner_material_weights(&w, face, gx, gy);
+                    let sum = i32::from(s[0]) + i32::from(s[1]) + i32::from(s[2]) + i32::from(s[3]);
+                    assert!(
+                        sum <= 255,
+                        "face {face} ({gx},{gy}): weights {s:?} sum to {sum}, over 255"
+                    );
+                    // Generation makes no swamp, so every corner is fully
+                    // accounted for by the first four. `254` and not `255`
+                    // because `255 * 1 / 3` truncates to 84 and three of those
+                    // are 252 — the corner case, in both senses.
+                    assert!(
+                        sum >= 252,
+                        "face {face} ({gx},{gy}): weights {s:?} sum to only {sum}, so                          {} of 255 leaks into swamp on ground that has none",
+                        255 - sum
+                    );
+                }
+            }
+        }
     }
 
     #[test]

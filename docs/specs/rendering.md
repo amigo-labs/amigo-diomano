@@ -441,6 +441,56 @@ Two details that are easy to get wrong:
   `mesh::lava_reaches_the_vertex_buffer_and_dirties_its_chunk` asserts the flow in
   both directions, including that a cooled flow stops glowing.
 
+## A material id is not a vertex attribute
+
+The world reads as a grid, and this was the largest single reason.
+
+`attribs[0]` carried the **material id** of one cell, and the GPU interpolates
+vertex attributes linearly across a quad. Between a rock cell (0) and a soil cell
+(2) the interpolated value therefore passes through 1 — which is *sand* — and the
+fragment shader thresholded it with `step`. Every rock/soil boundary on the planet
+grew a one-cell sand stripe with two hard edges, aligned to the cell grid, in both
+the palette and the texture selection. An id is a label; interpolating labels
+produces the labels in between.
+
+`attribs3` carries **weights** instead: how much of the four cells behind a vertex
+is rock, sand, soil and ash, with swamp as `255 - sum`. Weights are quantities, so
+interpolation means what it says — a vertex where two of four cells are rock
+genuinely is half rock, and halfway to a pure-soil vertex is a real mixture rather
+than an invented third material. The shader blends the five palettes by these and
+thresholds nothing.
+
+### The weights are noise-sharpened, not merely blended
+
+A plain weighted sum is correct and still wrong to look at: it fades linearly over
+exactly one cell, which reads as an airbrushed grid rather than as ground. Each
+weight is therefore offset by its own band of the 3D noise the rest of the shader
+already uses and then raised to a power (`SPLAT_SPREAD` 0.42, `SPLAT_SHARP` 3.0).
+The boundary becomes an interlocking fringe that follows the noise field instead
+of the cell grid — which was the point, since the grid was the complaint.
+
+The fallback matters: if every weight is pushed below zero at once the shader
+returns the unsharpened mixture. A fragment with no material sums to black, and
+black holes in the ground would be a worse artefact than a soft edge.
+
+### The four cells must be the same four from both sides of a seam
+
+`corner_material_weights` reads `idx_i` with the coordinate clamped to `-1 ..= N`
+— the ghost ring — exactly as `corner_height` and `corner_water` do, and
+deliberately **not** `clamp_cell`, which clamps to `0 ..= N - 1` and so reads a
+different cell at a face edge depending on which face is asking. Integer addition
+being commutative, both faces then land on identical bytes and a shared corner
+cannot show as a colour discontinuity along the twelve cube edges. The eight cube
+corners take the same escape hatch as height: the ambiguous diagonal ghost (§3.5)
+is skipped and the three real cells that meet there are counted instead.
+
+`mesh::material_weights_agree_across_a_face_boundary` asserts it over every shared
+corner with no tolerance, and
+`mesh::material_weights_are_a_partition_of_the_four_cells` pins the sum, because
+the shader derives swamp from it: a sum over 255 makes swamp negative, and a sum
+that never reaches 255 tints every cell with a material that is not there. Both
+are silent in the picture.
+
 ## Verb effects
 
 Flood, volcano, swamp, earthquake and armageddon had no visual of any kind — the
