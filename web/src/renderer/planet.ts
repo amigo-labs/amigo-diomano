@@ -22,6 +22,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL, SKY_GLSL } from "./atmosphere";
+import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
 
 /** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
@@ -128,6 +129,8 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uCloudFade;
   uniform float uTier;
   uniform float uWarning;
+  uniform float uTime;
+  uniform float uSurge;
 
   // CC0 surface textures (docs/ASSETS.md). uTexMix is 0 until every map has
   // arrived, so the purely procedural shading below is the fallback, not a
@@ -141,6 +144,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   ${CLOUD_NOISE_GLSL}
   ${SKY_GLSL}
+  ${SURF_GLSL}
 
   // Triplanar sample: the quadsphere has no UV atlas (slope/height texturing
   // exists precisely to avoid one), so textures are projected along the three
@@ -355,6 +359,21 @@ const FRAGMENT_SHADER = /* glsl */ `
     beachCol *= mix(1.0, dot(tSand, vec3(0.299, 0.587, 0.114)) * 1.9, uTexMix);
     albedo = mix(albedo, beachCol, beach);
 
+    // The landward half of the surf. dioSurf is the *same* function the water
+    // shader evaluates on the seaward side, over the same signed coordinate —
+    // height units below the current sea level — so a set that breaks offshore
+    // is the one that runs up this sand. Two private phases would have put a
+    // white line on a beach that was already wet, which reads as a lighting bug
+    // rather than as the copy-paste it would be. See surf.ts.
+    //
+    // vAltitude is in radii; HEIGHT_TO_RADIUS is 8e-5, so 12500 converts back.
+    float swash = dioSurf(-vAltitude * 12500.0, uTime, uSurge, dioNoise(up * 240.0) * 2.0 - 1.0);
+    swash *= beach;
+    // Wet sand first — the water arrives before the foam does — then the foam
+    // edge on top of it.
+    albedo = mix(albedo, wetSand * 0.86, swash * 0.65);
+    albedo = mix(albedo, vec3(0.90, 0.94, 0.96), smoothstep(0.45, 0.95, swash) * 0.75);
+
     // Standing water darkens the ground it sits on. Not a cyan wash.
     albedo *= 1.0 - clamp(vAttrib.a * 4.0, 0.0, 1.0) * 0.35;
 
@@ -412,7 +431,9 @@ const FRAGMENT_SHADER = /* glsl */ `
     // and grass is the other precise signature of plastic, which is why there
     // is deliberately none.
     float wet = beach * (1.0 - smoothstep(0.0, 0.003, vAltitude));
-    float glossMask = snow * 0.30 + wet * 0.35;
+    // The gloss follows the water up the beach rather than sitting at a fixed
+    // altitude: a wet band that never moves is the tell that it is painted on.
+    float glossMask = snow * 0.30 + max(wet, swash) * 0.35;
     if (glossMask > 0.001) {
       vec3 h = normalize(uSunDirection + viewDir);
       float spec = pow(max(dot(n, h), 0.0), 56.0) * lambert;
@@ -506,6 +527,8 @@ export function createPlanet(sim: Sim, view: View): Planet {
       uSunDirection: view.sunDirection,
       uCameraPosition: view.cameraPosition,
       uCloudTime: view.cloudTime,
+      uTime: view.time,
+      uSurge: view.surge,
       uCloudFade: view.cloudFade,
       uWarning: view.warning,
       uSeaRadius: { value: BASE_RADIUS },

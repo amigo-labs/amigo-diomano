@@ -79,6 +79,17 @@ export interface View {
    * exact class of split-brain drift this file exists to make unrepresentable.
    */
   readonly warning: { value: number };
+  /**
+   * The sea's own answer to the tide, 0 calm to 1 at the peak of a wave.
+   *
+   * `warning` is the *air* — the sky reddens, the sun dims — and it is already
+   * hot through the whole telegraph, when the sea is drawn back and unnaturally
+   * flat. This is the water: it tracks the actual signed tide offset, so the
+   * swell builds as the wave lands and settles as it recedes. Written by
+   * `atmosphere.sync` beside `warning`, for the same reason `warning` lives here
+   * rather than in one material.
+   */
+  readonly surge: { value: number };
   sync(camera: THREE.Camera, tick: number, dtMs: number): void;
 }
 
@@ -93,6 +104,7 @@ export function createView(): View {
   const cameraDistance = { value: 3 };
   const cloudFade = { value: 1 };
   const warning = { value: 0 };
+  const surge = { value: 0 };
 
   return {
     cameraPosition,
@@ -102,6 +114,7 @@ export function createView(): View {
     cameraDistance,
     cloudFade,
     warning,
+    surge,
     sync(camera: THREE.Camera, tick: number, dtMs: number): void {
       // `matrixWorld` rather than `position`, so this stays correct if the
       // camera is ever parented to something.

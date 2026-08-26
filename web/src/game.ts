@@ -274,7 +274,12 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       hud.sync(fired.events);
       if (radial.open && !menuWasOpen) hud.noteMenuOpened();
       menuWasOpen = radial.open;
-      atmosphere.sync(sim.e.dio_tide_phase(), sim.e.dio_ticks_to_impact());
+      atmosphere.sync(
+        sim.e.dio_tide_phase(),
+        sim.e.dio_ticks_to_impact(),
+        sim.e.dio_tide_offset(),
+        sim.e.dio_tide_strength(),
+      );
       audio.sync(sim, dtMs);
 
       // The match result, finally read by someone. The sim freezes itself

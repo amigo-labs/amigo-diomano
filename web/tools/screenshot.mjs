@@ -157,6 +157,18 @@ async function main() {
     await page.keyboard.press("Escape");
     await page.waitForTimeout(300);
 
+    // The wave landing, which is the one moment the sea is supposed to look
+    // like weather rather than like a level. Ticked forward from the console
+    // rather than waited out: the calm before the first wave is minutes long.
+    const phase = await page.evaluate(() => {
+      const sim = window.diomano.sim;
+      for (let i = 0; i < 60000 && sim.e.dio_tide_phase() !== 2; i++) sim.tick();
+      return sim.e.dio_tide_phase();
+    });
+    if (phase !== 2) fail("the tide never reached impact");
+    await page.waitForTimeout(700);
+    await shoot("4d-surge");
+
     for (let i = 0; i < 14; i++) {
       await page.mouse.wheel(0, 400);
       await page.waitForTimeout(60);
