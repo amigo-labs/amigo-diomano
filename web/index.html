@@ -359,6 +359,53 @@
       .hud-hint.shown {
         opacity: 1;
       }
+      /*
+        The controls, on demand. §8's "no HUD" already carries a recorded
+        deviation for the panel above; this is deliberately *not* a second
+        permanent readout — it starts hidden, it is one keystroke away, and it
+        remembers whichever the player chose. It is a reference card, not an
+        instrument.
+
+        Bottom-right rather than centre: the player asks for it mid-match, with
+        a hand on the planet, and a centred panel would cover the ground they
+        are working.
+      */
+      .hud-controls {
+        position: absolute;
+        right: 20px;
+        bottom: 20px;
+        padding: 12px 16px 13px;
+        border-radius: 8px;
+        background: rgba(8, 11, 18, 0.82);
+        color: #c8cdd8;
+        opacity: 0;
+        transform: translateY(6px);
+        transition:
+          opacity 220ms ease,
+          transform 220ms ease;
+      }
+      .hud-controls.shown {
+        opacity: 1;
+        transform: none;
+      }
+      .hud-controls table {
+        border-collapse: collapse;
+      }
+      .hud-controls td {
+        padding: 2px 0;
+        vertical-align: baseline;
+      }
+      .hud-controls td:first-child {
+        color: #ffe9c0;
+        text-align: right;
+        white-space: nowrap;
+        padding-right: 12px;
+      }
+      .hud-controls .hud-controls-close {
+        margin: 8px 0 0;
+        color: #8a93a8;
+        font-size: 12px;
+      }
       /* Shown only if WebGL2 or WebAssembly is missing. Not UI: an epitaph. */
       #fallback {
         position: fixed;
@@ -375,6 +422,26 @@
   </head>
   <body>
     <canvas id="stage"></canvas>
+    <!--
+      The title card is markup, not `innerHTML`, so it is on screen the moment
+      the document parses — before the entry module runs, let alone the wasm or
+      the three.js chunk. `ui.ts` adopts this element rather than building one;
+      it fills the controls table from the single `CONTROLS` table in `verbs.ts`
+      and swaps the hint once the game behind it is ready to start.
+    -->
+    <div class="overlay" id="title">
+      <div>
+        <h1>diomano</h1>
+        <p class="premise">Zwei Götter, ein Planet. Wessen Volk übersteht die Flutwellen?</p>
+        <table id="title-controls"></table>
+        <p class="volume">
+          <label for="volume">Lautstärke</label>
+          <input id="volume" type="range" min="0" max="100" step="1" value="50" />
+          <output for="volume">50%</output>
+        </p>
+        <p class="hint" id="title-hint">Lädt …</p>
+      </div>
+    </div>
     <div id="fallback"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

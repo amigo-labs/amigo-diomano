@@ -47,13 +47,24 @@
  * else that must be seen is already drawn (`effects.ts` has the instancing and
  * the projection), rather than in a DOM layer over a WebGL canvas.
  *
+ * # The controls card
+ *
+ * The title card lists the bindings once, thirty seconds before the player
+ * needs any of them. `F1` (or `?`) puts the same table back on screen during
+ * the match and takes it away again, and the choice is remembered. It is off by
+ * default, so nothing about the resting screen changes: this is a reference
+ * card the player asks for, not a fourth readout. Both it and the title card
+ * render the one `CONTROLS` table in `verbs.ts` — they used to keep separate
+ * copies, and the copies drifted.
+ *
  * Plain DOM over the canvas, system fonts, no assets, `pointer-events: none`
  * throughout, like the rest of the shell. Player-facing strings are German
  * (Phase 9); code and comments stay English.
  */
 
 import type { Sim, VerbEventView } from "./main";
-import { VERB } from "./verbs";
+import { KEY, remember, rememberedFlag } from "./storage";
+import { CONTROLS, VERB } from "./verbs";
 
 /**
  * Tide phase names, indexed by `dio_tide_phase()`. Mirrors `TIDE` in main.ts,
@@ -113,18 +124,40 @@ export function createHud(sim: Sim, player: number): Hud {
   root.innerHTML = `
     <div class="hud-panel">
       <div class="hud-mana"><b>0</b> Mana</div>
-      <div class="hud-tide">Welle 1 / 7 · Ruhig</div>
+      <div class="hud-tide">Welle 1 · Ruhig</div>
       <div class="hud-bar"><i></i></div>
     </div>
     <div class="hud-banner"></div>
-    <div class="hud-hint"></div>`;
+    <div class="hud-hint"></div>
+    <div class="hud-controls">
+      <table></table>
+      <p class="hud-controls-close">F1 schließt diese Übersicht</p>
+    </div>`;
   document.body.append(root);
+
+  // Built from `CONTROLS` rather than written into the template above, so the
+  // table has exactly one source and adding a key needs one edit.
+  const controlsTable = root.querySelector<HTMLTableElement>(".hud-controls table");
+  if (controlsTable) {
+    for (const [key, verb] of CONTROLS) {
+      const row = controlsTable.insertRow();
+      row.insertCell().textContent = key;
+      row.insertCell().textContent = verb;
+    }
+  }
 
   const manaValue = root.querySelector<HTMLElement>(".hud-mana b")!;
   const tideLine = root.querySelector<HTMLElement>(".hud-tide")!;
   const bar = root.querySelector<HTMLElement>(".hud-bar i")!;
   const bannerEl = root.querySelector<HTMLElement>(".hud-banner")!;
   const hintEl = root.querySelector<HTMLElement>(".hud-hint")!;
+  const controlsEl = root.querySelector<HTMLElement>(".hud-controls")!;
+
+  let controlsShown = rememberedFlag(KEY.controls, false);
+  const applyControls = (): void => {
+    controlsEl.classList.toggle("shown", controlsShown);
+  };
+  applyControls();
 
   // Last written values, so a frame that changed nothing touches no DOM. Sixty
   // layout invalidations a second for a number that moves once a tick is the
@@ -143,9 +176,21 @@ export function createHud(sim: Sim, player: number): Hud {
     { text: "Links ziehen hebt und senkt Land.", done: false },
     { text: "Linksklick setzt den Magneten — dein Volk folgt ihm.", done: false },
     { text: "Rechtsklick öffnet das Kraftmenü.", done: false },
+    { text: "F1 zeigt die ganze Steuerung.", done: false },
   ];
   /** When the hud first became visible, which is when the match actually began. */
   let armedAt = 0;
+
+  // F1 is the key everybody tries; `?` is the one everybody else tries. F1 also
+  // opens the browser's own help, so it has to be claimed explicitly.
+  addEventListener("keydown", (ev) => {
+    if (ev.key !== "F1" && ev.key !== "?") return;
+    ev.preventDefault();
+    controlsShown = !controlsShown;
+    remember(KEY.controls, controlsShown ? "1" : "0");
+    applyControls();
+    hints[3]!.done = true;
+  });
 
   /**
    * Share of claimed ground that is ours, 0..1.

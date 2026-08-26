@@ -26,6 +26,7 @@
  */
 
 import type { Sim } from "./main";
+import { DEFAULT_VOLUME, KEY, remember, rememberedFlag, rememberedLevel } from "./storage";
 import { VERB } from "./verbs";
 
 export interface Audio {
@@ -51,37 +52,6 @@ export interface Audio {
   muted(): boolean;
 }
 
-const VOLUME_KEY = "diomano.volume";
-const MUTED_KEY = "diomano.muted";
-/** What the master gain was hard-coded to before it could be changed. */
-const DEFAULT_VOLUME = 0.5;
-
-/**
- * Read a remembered setting, or fall back.
- *
- * `localStorage` throws rather than returning null when storage is disabled —
- * Safari's private mode, and any browser with site data blocked — and a game
- * that fails to start because it could not read a volume level would be an
- * absurd way to lose a player.
- */
-function remembered<T>(key: string, parse: (raw: string) => T | null, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw === null) return fallback;
-    return parse(raw) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function remember(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    // A session that cannot persist its volume still has to be playable at it.
-  }
-}
-
 export function createAudio(): Audio {
   let ctx: AudioContext | null = null;
   let master: GainNode | null = null;
@@ -91,15 +61,8 @@ export function createAudio(): Audio {
   let smoothedFlow = 0;
   /** Leaky integrator for the sculpt bed: work bumps it, `sync` drains it. */
   let sculptLevel = 0;
-  let volume = remembered(
-    VOLUME_KEY,
-    (raw) => {
-      const v = Number.parseFloat(raw);
-      return Number.isFinite(v) ? Math.min(Math.max(v, 0), 1) : null;
-    },
-    DEFAULT_VOLUME,
-  );
-  let isMuted = remembered(MUTED_KEY, (raw) => raw === "1", false);
+  let volume = rememberedLevel(KEY.volume, DEFAULT_VOLUME);
+  let isMuted = rememberedFlag(KEY.muted, false);
 
   /** Push `volume`/`isMuted` at the gain node, if one exists yet. */
   const applyGain = (): void => {
@@ -277,14 +240,14 @@ export function createAudio(): Audio {
       // Raising the slider is an unambiguous "I want to hear this", so it lifts
       // mute rather than leaving the player dragging a control that does nothing.
       if (volume > 0) isMuted = false;
-      remember(VOLUME_KEY, String(volume));
-      remember(MUTED_KEY, isMuted ? "1" : "0");
+      remember(KEY.volume, String(volume));
+      remember(KEY.muted, isMuted ? "1" : "0");
       applyGain();
     },
 
     toggleMute(): boolean {
       isMuted = !isMuted;
-      remember(MUTED_KEY, isMuted ? "1" : "0");
+      remember(KEY.muted, isMuted ? "1" : "0");
       applyGain();
       return isMuted;
     },

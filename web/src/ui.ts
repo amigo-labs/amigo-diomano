@@ -6,7 +6,17 @@
  * renders nothing but the world. Plain DOM over the canvas, system fonts, no
  * frameworks, no assets. Player-facing strings are German (Phase 9); code and
  * comments stay English.
+ *
+ * # The title card is adopted, not built
+ *
+ * It is in `index.html` as markup, so it paints when the document parses rather
+ * than when a module finishes running. `showTitle` therefore fills in the parts
+ * that come from code — the controls table, the remembered volume — and gates
+ * the click: until `markReady()` says the world behind the card is standing,
+ * clicking it does nothing and the hint says so.
  */
+
+import { CONTROLS } from "./verbs";
 
 /**
  * The one setting the shell offers, wired straight to `audio.ts`.
@@ -21,9 +31,23 @@ export interface VolumeControl {
   set(v: number): void;
 }
 
+/**
+ * The title card, once it is on screen.
+ *
+ * Two-step because the card is up long before the match can start: the click
+ * that begins play is also the browsers' audio-activation gesture, so it must
+ * not be spent while the wasm is still arriving.
+ */
+export interface TitleCard {
+  /** The world behind the card is standing. Arms the click and swaps the hint. */
+  markReady(): void;
+  /** Resolves on the click that starts the match — never before `markReady`. */
+  readonly started: Promise<void>;
+}
+
 export interface Ui {
-  /** Show the title card. Resolves on the player's click, which is also the audio unlock. */
-  showTitle(volume: VolumeControl): Promise<void>;
+  /** Adopt the card already in the document and fill in what comes from code. */
+  showTitle(volume: VolumeControl): TitleCard;
   /** Show the end card: outcome, why it ended, per-wave score rows, restart buttons. */
   showGameOver(
     outcome: number,
@@ -47,16 +71,6 @@ export interface EndCause {
   wave: number;
 }
 
-const CONTROLS: [string, string][] = [
-  ["Ziehen (links)", "Land heben / senken — die Hand füllt und leert sich"],
-  ["Klick (links)", "Magnet setzen: dein Volk folgt ihm"],
-  ["Ziehen (rechts)", "Planet drehen · Mausrad: Zoom"],
-  ["Klick (rechts)", "Kraftmenü öffnen — Kräfte kosten Mana"],
-  ["1 / 2 / 3", "Erde / Wasser / Lava greifen"],
-  ["Umschalt / Alt / Strg", "geworfen / verstärkt / extrem"],
-  ["+ / − / M", "lauter / leiser / stumm"],
-];
-
 export function createUi(): Ui {
   let overlay: HTMLDivElement | null = null;
 
@@ -74,26 +88,30 @@ export function createUi(): Ui {
   };
 
   return {
-    showTitle(volume: VolumeControl): Promise<void> {
-      const el = make();
-      const rows = CONTROLS.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
-      const level = Math.round(volume.get() * 100);
-      el.innerHTML = `
-        <div>
-          <h1>diomano</h1>
-          <p class="premise">Zwei Götter, ein Planet. Wessen Volk übersteht die sieben Flutwellen?</p>
-          <table>${rows}</table>
-          <p class="volume">
-            <label for="volume">Lautstärke</label>
-            <input id="volume" type="range" min="0" max="100" step="1" value="${level}" />
-            <output for="volume">${level}%</output>
-          </p>
-          <p class="hint">Klicken, um zu beginnen</p>
-        </div>`;
+    showTitle(volume: VolumeControl): TitleCard {
+      const el = document.querySelector<HTMLDivElement>("#title");
+      if (!el) throw new Error("page is missing its title card");
+      overlay = el;
 
+      const table = el.querySelector<HTMLTableElement>("#title-controls");
+      if (table) {
+        // `CONTROLS` is a fixed table of literals in `verbs.ts`, but building
+        // rows with `createElement`/`textContent` keeps that true rather than
+        // trusting it.
+        for (const [key, verb] of CONTROLS) {
+          const row = table.insertRow();
+          row.insertCell().textContent = key;
+          row.insertCell().textContent = verb;
+        }
+      }
+
+      const level = Math.round(volume.get() * 100);
       const slider = el.querySelector<HTMLInputElement>("#volume");
       const readout = el.querySelector<HTMLOutputElement>("output");
+      const hint = el.querySelector<HTMLElement>("#title-hint");
       if (slider) {
+        slider.value = String(level);
+        if (readout) readout.textContent = `${level}%`;
         // The card starts the match on *any* pointerdown, so every event the
         // slider needs has to stop before it gets there. Without this, grabbing
         // the handle begins the match and the drag continues over a live planet.
@@ -107,18 +125,28 @@ export function createUi(): Ui {
         });
       }
 
-      return new Promise((resolve) => {
-        el.addEventListener(
-          "pointerdown",
-          () => {
-            el.classList.add("overlay-hidden");
-            // Remove after the fade so the canvas gets the pointer back.
-            setTimeout(clear, 650);
-            resolve();
-          },
-          { once: true },
-        );
+      // A click before the world is standing is not queued and replayed later:
+      // it does nothing, and the card still says "Lädt …" so the player can see
+      // why. Spending the activation gesture on a game that cannot start yet
+      // would cost the audio unlock for nothing.
+      let ready = false;
+      const started = new Promise<void>((resolve) => {
+        el.addEventListener("pointerdown", () => {
+          if (!ready) return;
+          el.classList.add("overlay-hidden");
+          // Remove after the fade so the canvas gets the pointer back.
+          setTimeout(clear, 650);
+          resolve();
+        });
       });
+
+      return {
+        markReady(): void {
+          ready = true;
+          if (hint) hint.textContent = "Klicken, um zu beginnen";
+        },
+        started,
+      };
     },
 
     showGameOver(

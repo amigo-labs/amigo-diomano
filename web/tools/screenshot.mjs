@@ -115,6 +115,24 @@ async function main() {
     await page.waitForTimeout(4000);
     await shoot("4-gameplay");
 
+    // The controls overlay: off by default, one key away, and off again. It is
+    // asserted rather than only photographed — a card that never appeared makes
+    // exactly as plausible a PNG as one that did.
+    if (await page.locator(".hud-controls.shown").count()) {
+      fail("the controls overlay is up before anyone asked for it");
+    }
+    await page.keyboard.press("F1");
+    await page.waitForTimeout(400);
+    if (!(await page.locator(".hud-controls.shown").count())) {
+      fail("F1 did not open the controls overlay");
+    }
+    await shoot("4a-controls");
+    await page.keyboard.press("F1");
+    await page.waitForTimeout(400);
+    if (await page.locator(".hud-controls.shown").count()) {
+      fail("F1 did not close the controls overlay again");
+    }
+
     // Close working view: zoom to the floor. The clouds must dissolve on the
     // way in (view.ts, cloudFade) so the terrain under the hand is readable.
     await page.mouse.move(640, 400);
