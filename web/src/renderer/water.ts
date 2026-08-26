@@ -246,7 +246,20 @@ const FRAGMENT_SHADER = /* glsl */ `
     float limb = 1.0 - smoothstep(0.12, 0.62, max(dot(up, viewDir), 0.0));
     colour = mix(colour, air.rgb, air.a * limb * 0.50);
 
-    float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995);
+    // Fade out over the last terrace of depth.
+    //
+    // The dry flag is 0 or 255 *per vertex*, so the discard boundary is a
+    // polyline with one segment per cell: the sea used to end in flat angular
+    // plates with 45-degree edges, which was the single most cell-shaped thing
+    // left in the picture once the terrain stopped being one. Fading the alpha
+    // to zero as the water shallows hides that boundary behind water you can
+    // already see through, and hands the shoreline over to the terrain's own
+    // beach band and the surf line, both of which are smooth fields.
+    float edge = smoothstep(0.0, 16.0, depth);
+    float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995) * edge;
+    // Foam is the exception: a breaker is opaque white whatever the depth under
+    // it, and it is what the eye reads the waterline from.
+    alpha = max(alpha, surf * 0.85);
     gl_FragColor = vec4(colour, alpha);
   }
 `;

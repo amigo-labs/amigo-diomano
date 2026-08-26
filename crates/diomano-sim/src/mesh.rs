@@ -96,20 +96,34 @@ pub const HEIGHT_TO_RADIUS: f32 = 0.000_08;
 const SKIRT_DROP: f32 = 0.0;
 
 /// Material-weighted Laplacian strengths, x256 (§7.1 `[START]`).
-/// rock 0.15, soil 0.40, sand 0.60, ash 0.55.
-const SMOOTH_WEIGHT: [i32; 5] = [38, 154, 102, 141, 128];
-
-/// Numerator over 256 for the *second* smoothing pass, i.e. half strength.
 ///
-/// §7.1 specifies one pass, and one pass leaves a single terrace step visible as
-/// a step: the dual grid halves it and the Laplacian takes a fraction off the
-/// rest, so a hand-dug terrace edge still reads as a stair. A second pass at half
-/// weight takes the corner off without flattening anything — rock goes from an
-/// effective 0.15 to about 0.22 — so the deliberate contrast of §7.1, cliffs
-/// crisp against dunes soft, survives it. Doubling the *weights* instead would
-/// have dissolved that contrast, which is why this is a second pass and not a
-/// bigger first one.
-const SMOOTH_PASS2: i32 = 128;
+/// rock 0.36, soil 0.70, sand 0.59, ash 0.66, swamp 0.63 — up from
+/// 0.15 / 0.60 / 0.40 / 0.55 / 0.50 by user decision: **the world must read as
+/// rounded, not as cells.** The original numbers kept §7.1's crisp-cliffs
+/// contrast and the price was that every coastline was a flat cut-out dropping
+/// vertically into the sea along cell edges. Rock moves furthest because rock
+/// is what a coast and a plateau rim are made of, and rock at 0.15 was the one
+/// material that could not shelve at all.
+///
+/// The contrast §7.1 asks for survives in the *ordering*: rock still smooths
+/// least and soil most, so a cliff is still crisper than a dune. It is a
+/// narrower spread than the spec's, deliberately.
+const SMOOTH_WEIGHT: [i32; 5] = [92, 180, 150, 170, 160];
+
+/// Strength of each smoothing pass, over 256. One entry per pass.
+///
+/// §7.1 specifies one pass, and one pass leaves a terrace step visible as a
+/// step: the dual grid halves it and the Laplacian takes a fraction off the
+/// rest, so a hand-dug edge still reads as a stair. Later passes at falling
+/// strength take the corner off without flattening the large features —
+/// a Laplacian attenuates by wavelength, so cell-scale steps go and a hillside
+/// stays a hillside.
+///
+/// Three of them rather than one bigger first pass, for the reason the second
+/// one was added: raising the *weights* far enough to do this in one pass
+/// dissolves the material contrast entirely, because every material saturates
+/// at the same place.
+const SMOOTH_PASSES: [i32; 3] = [256, 176, 112];
 
 /// Vertex buffers, owned by Rust and read by TypeScript as typed-array views.
 ///
@@ -325,43 +339,43 @@ impl Mesh {
     /// height continuity that `face_boundary_vertices_coincide_exactly` pins
     /// would quietly stop holding.
     fn smooth_heights(&mut self, w: &World) {
-        for face in 0..6usize {
-            for y in 0..N {
-                for x in 0..N {
-                    let c = idx(face, x, y);
-                    let h = i32::from(w.height[c]) * 256;
-                    let mut sum = 0i32;
-                    for dir in 0..4usize {
-                        sum += i32::from(w.height[neighbour_flat(c, dir)]) * 256;
+        for (pass, &strength) in SMOOTH_PASSES.iter().enumerate() {
+            for face in 0..6usize {
+                for y in 0..N {
+                    for x in 0..N {
+                        let c = idx(face, x, y);
+                        // The first pass reads the world; every later one reads
+                        // what the previous pass wrote.
+                        let h = if pass == 0 {
+                            i32::from(w.height[c]) * 256
+                        } else {
+                            self.smooth_pass1[c]
+                        };
+                        let mut sum = 0i32;
+                        for dir in 0..4usize {
+                            let n = neighbour_flat(c, dir);
+                            sum += if pass == 0 {
+                                i32::from(w.height[n]) * 256
+                            } else {
+                                self.smooth_pass1[n]
+                            };
+                        }
+                        let mean = sum / 4;
+                        let k = SMOOTH_WEIGHT[(w.material[c] as usize).min(4)] * strength / 256;
+                        self.smooth[c] = h + (mean - h) * k / 256;
                     }
-                    let mean = sum / 4;
-                    let k = SMOOTH_WEIGHT[(w.material[c] as usize).min(4)];
-                    self.smooth_pass1[c] = h + (mean - h) * k / 256;
                 }
             }
-        }
-        for k in 0..GHOST_ENTRIES {
-            self.smooth_pass1[GHOST_DST[k] as usize] = self.smooth_pass1[GHOST_SRC[k] as usize];
-        }
-
-        for face in 0..6usize {
-            for y in 0..N {
-                for x in 0..N {
-                    let c = idx(face, x, y);
-                    let h = self.smooth_pass1[c];
-                    let mut sum = 0i32;
-                    for dir in 0..4usize {
-                        sum += self.smooth_pass1[neighbour_flat(c, dir)];
-                    }
-                    let mean = sum / 4;
-                    let k = SMOOTH_WEIGHT[(w.material[c] as usize).min(4)] * SMOOTH_PASS2 / 256;
-                    self.smooth[c] = h + (mean - h) * k / 256;
-                }
+            // Ghost-copy between passes, for the same reason the checkerboard
+            // halves in `water.rs` do it: without it the next pass reads a stale
+            // border, the two faces sharing a corner stop averaging the same
+            // four numbers, and the continuity
+            // `face_boundary_vertices_coincide_exactly` pins quietly stops
+            // holding. The last copy is the one the corner grid reads.
+            for k in 0..GHOST_ENTRIES {
+                self.smooth[GHOST_DST[k] as usize] = self.smooth[GHOST_SRC[k] as usize];
             }
-        }
-        // Ghost-copy the smoothed field so face-boundary corners are continuous.
-        for k in 0..GHOST_ENTRIES {
-            self.smooth[GHOST_DST[k] as usize] = self.smooth[GHOST_SRC[k] as usize];
+            self.smooth_pass1.copy_from_slice(&self.smooth);
         }
     }
 
@@ -603,18 +617,55 @@ impl Mesh {
         [self.positions[vi * 3], self.positions[vi * 3 + 1], self.positions[vi * 3 + 2]]
     }
 
-    /// Step 1 of §7.1: the dual grid. Handles the eight ambiguous cube corners.
+    /// Step 1 of §7.1: the dual grid, plus the domain warp of step 1b.
+    ///
+    /// The eight ambiguous cube corners are handled first and are never warped:
+    /// they are the one place where three faces have to agree on a value, and
+    /// the fade below has already reached zero there anyway.
     #[must_use]
     pub fn corner_height(&self, face: usize, gx: i32, gy: i32) -> f32 {
         if let Some(cells) = cube_corner_cells(face, gx, gy) {
             let sum: i32 = cells.iter().map(|&c| self.smooth[c]).sum();
             return (sum / 3) as f32 / 256.0;
         }
+        let fade = warp_fade(gx, gy);
+        if fade <= 0.0 {
+            return self.dual_height(face, gx, gy);
+        }
+        let (dx, dy) = lattice_warp(face, gx, gy);
+        self.dual_height_at(face, gx as f32 + dx * fade, gy as f32 + dy * fade)
+    }
+
+    /// The dual grid itself: the mean of the four cells around a corner.
+    fn dual_height(&self, face: usize, gx: i32, gy: i32) -> f32 {
         let a = self.smooth[idx_i(face, gx - 1, gy - 1)];
         let b = self.smooth[idx_i(face, gx, gy - 1)];
         let c = self.smooth[idx_i(face, gx - 1, gy)];
         let d = self.smooth[idx_i(face, gx, gy)];
         ((a + b + c + d) / 4) as f32 / 256.0
+    }
+
+    /// The dual grid sampled bilinearly at a continuous corner coordinate.
+    ///
+    /// Clamped to the corners the one-deep ghost ring can support — `0 ..= N`,
+    /// the same bound `build_chunk` states — so a warp near a face edge can
+    /// never reach past the ghosts. In practice `warp_fade` has already brought
+    /// the offset to zero by then; the clamp is the belt.
+    fn dual_height_at(&self, face: usize, fx: f32, fy: f32) -> f32 {
+        let last = N as i32;
+        let cx = fx.clamp(0.0, last as f32);
+        let cy = fy.clamp(0.0, last as f32);
+        let x0 = (cx as i32).clamp(0, last - 1);
+        let y0 = (cy as i32).clamp(0, last - 1);
+        let tx = cx - x0 as f32;
+        let ty = cy - y0 as f32;
+        let h00 = self.dual_height(face, x0, y0);
+        let h10 = self.dual_height(face, x0 + 1, y0);
+        let h01 = self.dual_height(face, x0, y0 + 1);
+        let h11 = self.dual_height(face, x0 + 1, y0 + 1);
+        let top = h00 + (h10 - h00) * tx;
+        let bottom = h01 + (h11 - h01) * tx;
+        top + (bottom - top) * ty
     }
 
     /// Water surface altitude and depth at a corner, on the same dual grid.
@@ -629,6 +680,134 @@ impl Mesh {
         let d = (depth / n.max(1)) as f32;
         (terrain + d, d)
     }
+}
+
+/// How far a mesh corner samples away from its own grid slot, in cells.
+///
+/// The single most visible thing about the old mesh was that it was *made of
+/// cells*: every shoreline ran in axis-aligned stretches with square notches,
+/// every plateau edge was a staircase along one of two directions, and the
+/// smoothing could not help because a four-neighbour Laplacian preserves
+/// axis-aligned structure by construction — it averages along the axes and
+/// leaves a diagonal staircase exactly where it was.
+///
+/// So the fix is not more smoothing, it is to stop sampling on the lattice. Each
+/// corner reads the height field a fraction of a cell away, in a direction that
+/// varies coherently over a few cells, and the coastline stops being able to
+/// follow the grid. It is the standard domain warp, and it is the same
+/// mechanism `world.rs` already uses on its noise octaves for the same
+/// complaint — this is the render half of it.
+///
+/// **Nothing simulated moves.** `corner_height` reads `smooth`, which is a
+/// render-only field; the warp changes where the surface is *drawn* and not one
+/// byte of `height`, `water` or `material`. The state hash cannot see it, which
+/// is why the fixtures do not move.
+///
+/// 0.85 of a cell. The first attempt used 0.42 and it was not enough to be
+/// worth having: a coastline notch is a whole cell, so half a cell of warp made
+/// the notches irregular without making them stop being notches. What matters
+/// is the *gradient* of the warp field, `amplitude * 2pi / period`, which has
+/// to stay under 1 or the mesh folds over itself — at 0.85 cells over an
+/// eight-cell period that is 0.67, with room to spare.
+const WARP_CELLS: f32 = 0.85;
+
+/// Cells over which the warp fades to nothing at a face boundary.
+///
+/// The seam argument in this module's header rests on both faces averaging the
+/// *same four cells* at a shared corner. A warp would have each face sampling
+/// its own way off that corner, and the two would no longer agree — a crack
+/// along all twelve cube edges. Fading to exactly zero at the boundary keeps
+/// the guarantee: the shared corners are unwarped and therefore still
+/// bit-identical, and a vertex one cell inside face A is not a vertex of face B
+/// at all, so there is nothing for it to disagree with.
+///
+/// It also keeps the warped sampling inside the one-deep ghost ring, which is
+/// all `idx_i` can address.
+const WARP_FADE_CELLS: f32 = 3.0;
+
+/// The warp's spatial period, in cells. Long enough to read as a bend in the
+/// coast rather than as noise on it, and long enough to carry the amplitude
+/// above without folding.
+const WARP_PERIOD_CELLS: f32 = 8.0;
+
+/// Zero within `WARP_FADE_CELLS` of a face boundary, one in the interior.
+fn warp_fade(gx: i32, gy: i32) -> f32 {
+    let last = N as i32;
+    let edge = gx.min(gy).min(last - gx).min(last - gy);
+    if edge <= 0 {
+        return 0.0;
+    }
+    (edge as f32 / WARP_FADE_CELLS).min(1.0)
+}
+
+/// A deterministic hash of three integers to `0..1`.
+///
+/// Integer mixing rather than a trigonometric trick, for the reason the whole
+/// crate gives: owning the math stack is the point, and a hash with visible
+/// structure would put that structure straight into the coastline.
+fn hash3(x: i32, y: i32, z: i32) -> f32 {
+    let mut h = (x as u32).wrapping_mul(0x1657_6b1b);
+    h ^= (y as u32).wrapping_mul(0x68e3_1da4);
+    h ^= (z as u32).wrapping_mul(0xb579_7d0d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2c1b_3c6d);
+    h ^= h >> 12;
+    h = h.wrapping_mul(0x2971_9d0d);
+    h ^= h >> 16;
+    (h >> 8) as f32 / 16_777_216.0
+}
+
+/// Trilinear value noise on `0..1`, over a cell-scale lattice of its own.
+fn value_noise3(p: [f32; 3]) -> f32 {
+    let fx = floorf(p[0]);
+    let fy = floorf(p[1]);
+    let fz = floorf(p[2]);
+    let (ix, iy, iz) = (fx as i32, fy as i32, fz as i32);
+    // Smoothstep on each axis, so the field is continuous in its first
+    // derivative and the warp does not kink.
+    let sx = smooth01(p[0] - fx);
+    let sy = smooth01(p[1] - fy);
+    let sz = smooth01(p[2] - fz);
+
+    let mut acc = 0.0;
+    for dz in 0..2i32 {
+        let wz = if dz == 0 { 1.0 - sz } else { sz };
+        for dy in 0..2i32 {
+            let wy = if dy == 0 { 1.0 - sy } else { sy };
+            for dx in 0..2i32 {
+                let wx = if dx == 0 { 1.0 - sx } else { sx };
+                acc += hash3(ix + dx, iy + dy, iz + dz) * wx * wy * wz;
+            }
+        }
+    }
+    acc
+}
+
+fn smooth01(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// `floor`, hand-rolled: this crate is `no_std` and owns its math.
+fn floorf(x: f32) -> f32 {
+    let t = x as i32 as f32;
+    if t > x { t - 1.0 } else { t }
+}
+
+/// The warp offset at a corner, in cells.
+///
+/// Sampled from the corner's **cube point**, not from `(face, gx, gy)`: two
+/// faces meeting at an edge produce the same cube point for the same corner, so
+/// sampling from it is what would make the two sides agree if the fade ever let
+/// them warp at all. It also means the field is continuous across a face
+/// boundary rather than restarting per face.
+fn lattice_warp(face: usize, gx: i32, gy: i32) -> (f32, f32) {
+    let p = corner_cube_point(face, gx, gy);
+    // One noise period every `WARP_PERIOD_CELLS` cells. A cube face spans two
+    // units over N cells.
+    let s = (N as f32) / (WARP_PERIOD_CELLS * 2.0);
+    let a = value_noise3([p[0] * s, p[1] * s, p[2] * s]) - 0.5;
+    let b = value_noise3([p[0] * s + 41.7, p[1] * s - 13.9, p[2] * s + 77.3]) - 0.5;
+    (a * 2.0 * WARP_CELLS, b * 2.0 * WARP_CELLS)
 }
 
 fn normalize(v: [f32; 3]) -> [f32; 3] {

@@ -161,6 +161,30 @@ const FRAGMENT_SHADER = /* glsl */ `
          + texture2D(t, p.xy * scale).rgb * w.z;
   }
 
+  /*
+    A surface map, as *structure* rather than as brightness.
+
+    This is the fix for the black ring that had been sitting around every spawn
+    pedestal since the textures landed, and it was never a NaN: the five maps
+    have wildly different mean brightness — measured over the shipped files,
+    rock is 0.092 where sand is 0.551, grass 0.556, dirt 0.409 and snow 0.924 —
+    and the shader multiplied the authored palette by the raw sample times a
+    single constant tuned for the bright ones. Rock therefore came out at about
+    a fifth of the colour §7.3 specifies, and where a fragment was *pure* rock
+    with nothing to blend against, a fifth of a dark palette entry rounded to
+    black. Every rock surface on the planet was affected; the pedestal shelf was
+    just the only place with no other material to hide it.
+
+    So each map is divided by its own mean first, which leaves a field centred
+    on 1.0, and then pulled back toward 1.0 so it modulates the palette instead
+    of competing with it. The clamp bounds what a very dark map's brightest
+    speck can do once it has been scaled up by ten.
+  */
+  const float DIO_TEX_CONTRAST = 0.62;
+  vec3 dioTexDetail(vec3 texel, float invMean) {
+    return mix(vec3(1.0), clamp(texel * invMean, 0.22, 2.4), DIO_TEX_CONTRAST);
+  }
+
   // The five materials of world.rs: rock, sand, soil, ash, swamp.
   // Saturated earth. Pale greys sit at the same value as the sea after ACES.
   const vec3 MAT_ROCK = vec3(0.42, 0.36, 0.28);
@@ -239,21 +263,27 @@ const FRAGMENT_SHADER = /* glsl */ `
     // script (saturated earth, §7.3's ACES note) stays authored, the textures
     // supply what noise octaves cannot: photographic micro-structure. Sampled
     // against the geometric normal, before the bump perturbs it.
-    vec3 tRock = vec3(0.48);
-    vec3 tSand = vec3(0.55);
-    vec3 tGrass = vec3(0.45);
-    vec3 tSnow = vec3(0.9);
+    // Neutral until the maps arrive: dioTexDetail returns a modulation around
+    // 1.0, so "no texture yet" is exactly 1.0 and the authored palette stands
+    // on its own. These used to be mid greys because the samples were absolute
+    // brightness rather than a modulation.
+    vec3 tRock = vec3(1.0);
+    vec3 tSand = vec3(1.0);
+    vec3 tGrass = vec3(1.0);
+    vec3 tSnow = vec3(1.0);
     if (uTexMix > 0.001) {
-      tRock = dioTriplanar(uTexRock, vWorld, n, 16.0);
-      tSand = dioTriplanar(uTexSand, vWorld, n, 26.0);
-      tGrass = dioTriplanar(uTexGrass, vWorld, n, 22.0);
-      tSnow = dioTriplanar(uTexSnow, vWorld, n, 18.0);
-      vec3 tDirt = dioTriplanar(uTexDirt, vWorld, n, 20.0);
+      // The reciprocal of each map's own mean colour, measured over the files
+      // in web/public/tex and recorded in docs/ASSETS.md. See dioTexDetail.
+      tRock = dioTexDetail(dioTriplanar(uTexRock, vWorld, n, 16.0), 10.90);
+      tSand = dioTexDetail(dioTriplanar(uTexSand, vWorld, n, 26.0), 1.81);
+      tGrass = dioTexDetail(dioTriplanar(uTexGrass, vWorld, n, 22.0), 1.80);
+      tSnow = dioTexDetail(dioTriplanar(uTexSnow, vWorld, n, 18.0), 1.08);
+      vec3 tDirt = dioTexDetail(dioTriplanar(uTexDirt, vWorld, n, 20.0), 2.44);
       // The same weights as the palette, so structure and colour never disagree
       // about which material a fragment is. Soil, ash and swamp all take the
       // dirt map, as they did when this was a step chain on the material id.
       vec3 t = tRock * matW.x + tSand * matW.y + tDirt * (matW.z + matW.w + matSwamp);
-      albedo *= mix(vec3(1.0), t * 2.1, uTexMix);
+      albedo *= mix(vec3(1.0), t, uTexMix);
     }
 
     // Multi-octave ground grain, and a bump from the same field so the
@@ -328,9 +358,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // is what stops a green area reading as a decal.
     float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 52.0) * 0.65 + fert * 0.35);
     // Grass keeps its authored hue and takes only the texture's *luminance*
-    // as structure: green photo times green palette oversaturates.
+    // as structure: green photo times green palette oversaturates. The gain is
+    // gone with the rest of them — dioTexDetail already centres the map on
+    // 1.0, so a second brightening here would double-count it.
     float gLum = dot(tGrass, vec3(0.299, 0.587, 0.114));
-    vec3 grassCol = mix(dryGrass, meadow, meadowPatch) * mix(1.0, gLum * 2.3, uTexMix);
+    vec3 grassCol = mix(dryGrass, meadow, meadowPatch) * mix(1.0, gLum, uTexMix);
     albedo = mix(albedo, grassCol, grassMask * 0.90);
     albedo = mix(albedo, canopy, veg * above * (1.0 - beach) * 0.95);
     albedo = mix(albedo, vec3(0.48, 0.40, 0.24), vAttrib2.b * 0.30);
@@ -350,13 +382,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
     vec3 snowCol =
       mix(vec3(0.62, 0.70, 0.84), vec3(0.93, 0.95, 0.98), clamp(0.25 + grain * 0.7 + (micro - 0.5) * 0.5 * detail, 0.0, 1.0));
-    snowCol *= mix(1.0, dot(tSnow, vec3(0.299, 0.587, 0.114)) * 1.35, uTexMix);
+    snowCol *= mix(1.0, dot(tSnow, vec3(0.299, 0.587, 0.114)), uTexMix);
     albedo = mix(albedo, snowCol, snow);
 
     vec3 beachSand = vec3(0.78, 0.64, 0.38);
     vec3 wetSand = vec3(0.52, 0.40, 0.24);
     vec3 beachCol = mix(beachSand, wetSand, 1.0 - smoothstep(0.0, 0.003, vAltitude));
-    beachCol *= mix(1.0, dot(tSand, vec3(0.299, 0.587, 0.114)) * 1.9, uTexMix);
+    beachCol *= mix(1.0, dot(tSand, vec3(0.299, 0.587, 0.114)), uTexMix);
     albedo = mix(albedo, beachCol, beach);
 
     // The landward half of the surf. dioSurf is the *same* function the water
