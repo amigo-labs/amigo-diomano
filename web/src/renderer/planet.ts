@@ -181,8 +181,30 @@ const FRAGMENT_SHADER = /* glsl */ `
     speck can do once it has been scaled up by ten.
   */
   const float DIO_TEX_CONTRAST = 0.62;
-  vec3 dioTexDetail(vec3 texel, float invMean) {
-    return mix(vec3(1.0), clamp(texel * invMean, 0.22, 2.4), DIO_TEX_CONTRAST);
+
+  /**
+    A surface map at two scales: the material, and its grain.
+
+    A 512-pixel map projected over a whole planet has one texel to a couple of
+    metres of ground, so up close it is a smooth wash and the only structure
+    left is the procedural noise. Sampling the *same* map again seven times
+    finer and folding it in as the camera approaches costs one extra fetch on
+    the close half of the zoom range and nothing at all on the far half, where
+    the branch is not taken — no new asset, no payload, no second set of means
+    to keep in step.
+
+    Both layers are normalised before they meet, so the fine one modulates the
+    coarse one around 1.0 rather than multiplying two absolute brightnesses
+    together and squaring the contrast.
+  */
+  const float DIO_DETAIL_SCALE = 7.0;
+  vec3 dioSurfaceMap(sampler2D t, vec3 p, vec3 nrm, float scale, float invMean, float detail) {
+    vec3 coarse = clamp(dioTriplanar(t, p, nrm, scale) * invMean, 0.22, 2.4);
+    if (detail > 0.004) {
+      vec3 fine = clamp(dioTriplanar(t, p, nrm, scale * DIO_DETAIL_SCALE) * invMean, 0.35, 1.9);
+      coarse *= mix(vec3(1.0), fine, detail * 0.7);
+    }
+    return mix(vec3(1.0), coarse, DIO_TEX_CONTRAST);
   }
 
   // The five materials of world.rs: rock, sand, soil, ash, swamp.
@@ -252,6 +274,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     // grass, high as snow. Avoids UV-mapping a quadsphere entirely.
     float slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
 
+    // How close the eye is, 0 at orbit and 1 under the hand. Computed here
+    // rather than beside the noise octaves that used to be its only reader:
+    // the surface maps want it too, and sampling a texture needs to know how
+    // close the camera is *before* the sample, not after.
+    float eyeDist = distance(uCameraPosition, vWorld);
+    float detail = 1.0 - smoothstep(0.45, 1.30, eyeDist);
+
     vec4 matW;
     float matSwamp;
     dioMaterialSplat(vAttrib3, up, matW, matSwamp);
@@ -263,7 +292,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     // script (saturated earth, §7.3's ACES note) stays authored, the textures
     // supply what noise octaves cannot: photographic micro-structure. Sampled
     // against the geometric normal, before the bump perturbs it.
-    // Neutral until the maps arrive: dioTexDetail returns a modulation around
+    // Neutral until the maps arrive: dioSurfaceMap returns a modulation around
     // 1.0, so "no texture yet" is exactly 1.0 and the authored palette stands
     // on its own. These used to be mid greys because the samples were absolute
     // brightness rather than a modulation.
@@ -273,12 +302,12 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 tSnow = vec3(1.0);
     if (uTexMix > 0.001) {
       // The reciprocal of each map's own mean colour, measured over the files
-      // in web/public/tex and recorded in docs/ASSETS.md. See dioTexDetail.
-      tRock = dioTexDetail(dioTriplanar(uTexRock, vWorld, n, 16.0), 10.90);
-      tSand = dioTexDetail(dioTriplanar(uTexSand, vWorld, n, 26.0), 1.81);
-      tGrass = dioTexDetail(dioTriplanar(uTexGrass, vWorld, n, 22.0), 1.80);
-      tSnow = dioTexDetail(dioTriplanar(uTexSnow, vWorld, n, 18.0), 1.08);
-      vec3 tDirt = dioTexDetail(dioTriplanar(uTexDirt, vWorld, n, 20.0), 2.44);
+      // in web/public/tex and recorded in docs/ASSETS.md. See dioSurfaceMap.
+      tRock = dioSurfaceMap(uTexRock, vWorld, n, 16.0, 10.90, detail);
+      tSand = dioSurfaceMap(uTexSand, vWorld, n, 26.0, 1.81, detail);
+      tGrass = dioSurfaceMap(uTexGrass, vWorld, n, 22.0, 1.80, detail);
+      tSnow = dioSurfaceMap(uTexSnow, vWorld, n, 18.0, 1.08, detail);
+      vec3 tDirt = dioSurfaceMap(uTexDirt, vWorld, n, 20.0, 2.44, detail);
       // The same weights as the palette, so structure and colour never disagree
       // about which material a fragment is. Soil, ash and swamp all take the
       // dirt map, as they did when this was a step chain on the material id.
@@ -298,8 +327,6 @@ const FRAGMENT_SHADER = /* glsl */ `
     // with proximity (and only cost anything when the branch is taken); the
     // fade keeps them from shimmering at orbit distance, where a texel would
     // cover many noise cells.
-    float eyeDist = distance(uCameraPosition, vWorld);
-    float detail = 1.0 - smoothstep(0.45, 1.30, eyeDist);
     float mid = dioNoise(up * 230.0);
     float mc = 0.5;
     float micro = 0.5;
@@ -359,7 +386,7 @@ const FRAGMENT_SHADER = /* glsl */ `
     float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 52.0) * 0.65 + fert * 0.35);
     // Grass keeps its authored hue and takes only the texture's *luminance*
     // as structure: green photo times green palette oversaturates. The gain is
-    // gone with the rest of them — dioTexDetail already centres the map on
+    // gone with the rest of them — dioSurfaceMap already centres the map on
     // 1.0, so a second brightening here would double-count it.
     float gLum = dot(tGrass, vec3(0.299, 0.587, 0.114));
     vec3 grassCol = mix(dryGrass, meadow, meadowPatch) * mix(1.0, gLum, uTexMix);

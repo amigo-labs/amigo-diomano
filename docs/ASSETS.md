@@ -28,7 +28,7 @@ fifth of its authored colour. Where a fragment was *pure* rock with nothing to
 blend against, that rounded to black — the black ring around every spawn
 pedestal, which had been recorded as a suspected NaN for several phases and was
 this all along. **Replacing a map means re-measuring its mean and updating both
-this table and `dioTexDetail`'s constants in `planet.ts`.**
+this table and `dioSurfaceMap`'s constants in `planet.ts`.**
 
 The means are the average of the decoded RGB over the whole file, weighted
 0.299 / 0.587 / 0.114.
