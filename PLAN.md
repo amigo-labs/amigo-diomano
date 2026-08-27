@@ -671,3 +671,10 @@ causeway invites a dig-and-turtle counter whose price (your own expansion) is
 asserted nowhere, and the §5.5 target of "roughly 15 minutes" per match has not
 been measured against a human. Phase 8's playtesting can finally begin, because
 there is finally a game to playtest.
+
+The first of those three is now designed rather than only observed:
+`docs/specs/pacing.md` carries the five rule changes that stop a passive player
+losing to the marching army — a siege that subdues instead of razing, an
+influence floor at the spawn pedestal, a 90-second grace window before sudden
+death, sudden death armed only by the first wave, and an opponent whose war
+phase waits for that same wave. Not implemented; the fixtures move when it is.
