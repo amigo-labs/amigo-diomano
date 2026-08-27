@@ -565,7 +565,12 @@ function boot(): void {
       fallback.style.display = "grid";
       fallback.textContent =
         err instanceof Error ? `diomano could not start.\n\n${err.message}` : String(err);
-      throw err;
+      // Logged, not rethrown. Nothing is awaiting this promise — the whole point
+      // is that the card is already on screen — so a rethrow here is an
+      // *unhandled* rejection: noise in a player's console, and a failure in any
+      // harness that treats one as an error, including this project's own
+      // Playwright smoke test. The epitaph in `#fallback` is the report.
+      console.error("diomano could not start", err);
     }
   })();
 }

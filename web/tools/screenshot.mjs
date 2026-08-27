@@ -217,6 +217,33 @@ async function main() {
     });
     if (!running) fail("restart did not produce a running match");
     console.log("  restart: running match confirmed");
+
+    // The failure path, on its own page: starve the loader of its wasm and the
+    // epitaph in `#fallback` must appear *without* an unhandled rejection.
+    //
+    // Worth a step of its own because this file is the thing that catches it —
+    // `page.on("pageerror")` above fails the run on one — and because the
+    // rejection was real: `boot()` used to rethrow after showing the fallback,
+    // which is noise in a player's console and a failed run here, for an error
+    // that had already been reported on screen.
+    const failPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    const rejections = [];
+    failPage.on("pageerror", (err) => rejections.push(err.message));
+    await failPage.route("**/diomano.wasm", (r) => r.abort());
+    await failPage.goto(`http://127.0.0.1:${port}/`, { waitUntil: "load" });
+    await failPage.waitForTimeout(2500);
+    const epitaph = await failPage.evaluate(() => {
+      const el = document.querySelector("#fallback");
+      return { shown: getComputedStyle(el).display !== "none", text: el.textContent ?? "" };
+    });
+    if (!epitaph.shown || !epitaph.text.includes("could not start")) {
+      fail(`a boot failure did not show the epitaph: ${JSON.stringify(epitaph)}`);
+    }
+    if (rejections.length > 0) {
+      fail(`a boot failure left an unhandled rejection: ${rejections.join(", ")}`);
+    }
+    await failPage.close();
+    console.log("  failed boot: epitaph shown, no unhandled rejection");
   } finally {
     await browser.close();
     server.close();

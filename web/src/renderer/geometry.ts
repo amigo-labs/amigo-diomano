@@ -99,6 +99,15 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
   while (offset + 8 <= buffer.byteLength) {
     const length = view.getUint32(offset, true);
     const kind = view.getUint32(offset + 4, true);
+    // The length is a claim the file makes about itself, so it is checked
+    // rather than trusted: a truncated download would otherwise fail as a
+    // `RangeError` out of the `Uint8Array` constructor, which says nothing
+    // about GLBs and sends whoever reads it looking in the wrong place.
+    if (offset + 8 + length > buffer.byteLength) {
+      throw new Error(
+        `GLB chunk at ${offset} claims ${length} bytes, past the end of a ${buffer.byteLength}-byte file`,
+      );
+    }
     const body = new Uint8Array(buffer, offset + 8, length);
     if (kind === 0x4e4f534a) json = JSON.parse(new TextDecoder().decode(body)) as GlbJson;
     else if (kind === 0x004e4942) bin = body;

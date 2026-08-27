@@ -54,7 +54,16 @@ export function rememberedLevel(key: string, fallback: number): number {
   );
 }
 
-/** A remembered flag, written as "1" / "0". */
+/**
+ * A remembered flag, written as "1" / "0".
+ *
+ * Anything else is `null` and takes the fallback, rather than being read as
+ * false. `raw === "1"` looks equivalent and is not: it answers *false* for a
+ * corrupted or legacy value, which silently flips a `true` default off and
+ * cannot be told apart from a genuine "0". Every flag stored here happens to
+ * default to false today, so the difference is latent — which is exactly when
+ * to fix it.
+ */
 export function rememberedFlag(key: string, fallback: boolean): boolean {
-  return remembered(key, (raw) => raw === "1", fallback);
+  return remembered(key, (raw) => (raw === "1" ? true : raw === "0" ? false : null), fallback);
 }
