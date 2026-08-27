@@ -33,6 +33,7 @@ import * as THREE from "three";
 import type { Sim } from "../main";
 import type { QualityTier } from "../main";
 import { SKY_GLSL } from "./atmosphere";
+import { mergeGeometries, withTransform } from "./geometry";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
 import type { View } from "./view";
 
@@ -127,52 +128,6 @@ function hash01(a: number, b: number, c: number, d: number): number {
   h = (h ^ (h >>> 13)) >>> 0;
   h = Math.imul(h, 1274126177) >>> 0;
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
-
-/**
- * Apply transforms to a geometry and hand it back, so a merge list reads as a
- * list of parts rather than as a sequence of statements with a variable each.
- */
-function withTransform(
-  geometry: THREE.BufferGeometry,
-  edit: (g: THREE.BufferGeometry) => void,
-): THREE.BufferGeometry {
-  edit(geometry);
-  return geometry;
-}
-
-/**
- * Concatenate geometries into one, positions and normals only.
- *
- * `three/examples/jsm/utils/BufferGeometryUtils` does this and more, but the
- * only non-core three.js imports in this project are the four post-processing
- * passes, and that is worth keeping: every one of them is a dependency on a
- * directory three explicitly does not treat as API. Twenty lines here buys the
- * two attributes an instanced Lambert mesh actually consumes.
- *
- * Non-indexed throughout. These are a few dozen triangles built once at load;
- * an index buffer would save nothing and would have to be rebased per part.
- */
-function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
-  const flat = parts.map((g) => (g.index ? g.toNonIndexed() : g));
-  let total = 0;
-  for (const g of flat) total += g.getAttribute("position").count;
-
-  const position = new Float32Array(total * 3);
-  const normal = new Float32Array(total * 3);
-  let at = 0;
-  for (const g of flat) {
-    const p = g.getAttribute("position");
-    const n = g.getAttribute("normal");
-    position.set(p.array as Float32Array, at * 3);
-    normal.set(n.array as Float32Array, at * 3);
-    at += p.count;
-  }
-
-  const merged = new THREE.BufferGeometry();
-  merged.setAttribute("position", new THREE.BufferAttribute(position, 3));
-  merged.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
-  return merged;
 }
 
 export function createVegetation(sim: Sim, tier: QualityTier, view: View): Vegetation {
