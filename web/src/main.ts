@@ -160,6 +160,8 @@ const SETTLEMENT = {
 };
 
 export interface WalkerView {
+  /** Stable across ticks, which is what lets the renderer track one figure. */
+  id: number;
   /** Q16.16 position within the face, already converted to cells. */
   x: number;
   y: number;
@@ -313,6 +315,15 @@ export async function loadSim(
     verbEventCapacity * verbEventStride,
   );
 
+  /**
+   * Reused `WalkerView` objects. See `walkers()` for why.
+   *
+   * `walkerPool` grows to the high-water mark and never shrinks; `walkerLive` is
+   * the array handed back, refilled on each call so its length is the live count.
+   */
+  const walkerPool: WalkerView[] = [];
+  const walkerLive: WalkerView[] = [];
+
   const sim: Sim = {
     e,
     N,
@@ -352,22 +363,40 @@ export async function loadSim(
       e.dio_push_command(player, verb, face, x, y, modifier),
 
     walkers(): WalkerView[] {
-      const out: WalkerView[] = [];
+      // Written into a pool rather than allocated.
+      //
+      // This used to build up to 1,024 object literals *every tick* — 30,000
+      // short-lived objects a second, for data that is already sitting in wasm
+      // memory in exactly the layout wanted. The views are read and discarded by
+      // the caller within the same frame, so reusing them costs nothing and the
+      // garbage costs a collection. It is the same argument `cellDirectionInto`
+      // makes for vectors.
+      //
+      // The returned array is *live*: the next call rewrites it. No caller keeps
+      // one past the frame it asked for.
+      let n = 0;
       for (let i = 0; i < maxWalkers; i++) {
         const o = i * walkerStride;
         const flags = walkerBytes.getUint8(o + WALKER.FLAGS);
         if ((flags & 1) === 0) continue;
-        out.push({
-          x: walkerBytes.getInt32(o + WALKER.X, true) / 65536,
-          y: walkerBytes.getInt32(o + WALKER.Y, true) / 65536,
-          hp: walkerBytes.getInt16(o + WALKER.HP, true),
-          face: walkerBytes.getUint8(o + WALKER.FACE),
-          owner: walkerBytes.getUint8(o + WALKER.OWNER),
-          strength: walkerBytes.getUint8(o + WALKER.STRENGTH),
-          flags,
-        });
+        let view = walkerPool[n];
+        if (!view) {
+          view = { id: 0, x: 0, y: 0, hp: 0, face: 0, owner: 0, strength: 0, flags: 0 };
+          walkerPool[n] = view;
+        }
+        view.id = walkerBytes.getUint16(o + WALKER.ID, true);
+        view.x = walkerBytes.getInt32(o + WALKER.X, true) / 65536;
+        view.y = walkerBytes.getInt32(o + WALKER.Y, true) / 65536;
+        view.hp = walkerBytes.getInt16(o + WALKER.HP, true);
+        view.face = walkerBytes.getUint8(o + WALKER.FACE);
+        view.owner = walkerBytes.getUint8(o + WALKER.OWNER);
+        view.strength = walkerBytes.getUint8(o + WALKER.STRENGTH);
+        view.flags = flags;
+        n += 1;
       }
-      return out;
+      walkerLive.length = 0;
+      for (let i = 0; i < n; i++) walkerLive.push(walkerPool[i]!);
+      return walkerLive;
     },
 
     settlements(): SettlementView[] {

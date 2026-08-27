@@ -13,6 +13,15 @@ export default defineConfig({
     reportCompressedSize: true,
     rollupOptions: {
       output: {
+        // three's core in one chunk, fetched behind the title card. The entry
+        // chunk imports no three at all — see the header of `main.ts`.
+        //
+        // Watch this number. It is a *tree-shaken* set, and it is easy to
+        // un-shake by accident: putting the `THREE` namespace object on the
+        // debug handle in `game.ts` — three characters — took it from 490 kB to
+        // 705 kB, because a namespace that something can read is a namespace
+        // nothing can be dropped from. `reportCompressedSize` above is what
+        // makes that visible at build time.
         manualChunks: { three: ["three"] },
       },
     },

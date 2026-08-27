@@ -260,7 +260,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       sim.meshUpdate();
       planet.sync(sim.e.dio_sea_level());
       water.sync();
-      vegetation.sync(tick);
+      vegetation.sync(tick, alpha);
       hand.sync(alpha);
       radial.sync();
       // Effects read what the simulation *applied*, so the opponent's powers

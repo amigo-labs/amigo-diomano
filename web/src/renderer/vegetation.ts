@@ -33,7 +33,7 @@ import * as THREE from "three";
 import type { Sim } from "../main";
 import type { QualityTier } from "../main";
 import { SKY_GLSL } from "./atmosphere";
-import { mergeGeometries, withTransform } from "./geometry";
+import { mergeGeometries, readGlb, withTransform } from "./geometry";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
 import type { View } from "./view";
 
@@ -110,9 +110,37 @@ const SCRUB_FERTILITY = 40;
 const WALKER_LEADER = 1 << 1;
 const WALKER_CHAMPION = 1 << 2;
 
+/**
+ * The figure's proportions, mirroring `scripts/build-figure.mjs`.
+ *
+ * The model carries no rig — a thousand skinned meshes is not a budget this
+ * project has — so the walk cycle is a vertex-shader rotation about these
+ * heights, and the limbs are read back out of the geometry by comparing each
+ * vertex against them. Move a joint in the generator without moving it here and
+ * an arm will swing as a torso.
+ *
+ * Reading limbs from *positions* rather than from an attribute the generator
+ * writes is deliberate: it means any humanoid in a roughly upright pose can
+ * replace `villager.glb` by being dropped in its place, which is what keeps the
+ * door open to a downloaded CC0 character.
+ */
+const FIGURE = { hip: 0.46, shoulder: 0.7, torsoHalfWidth: 0.115 } as const;
+
+/** Limb ids, as the vertex shader reads them. */
+const LIMB = { body: 0, armLeft: 1, armRight: 2, legLeft: 3, legRight: 4 } as const;
+
 export interface Vegetation {
   readonly group: THREE.Group;
-  sync(tick: number): void;
+  /**
+   * `alpha` is the sub-tick interpolation factor from `loop.ts`.
+   *
+   * Everything here except the walkers is a function of simulation state and is
+   * rebuilt only when `tick` changes; the walkers are drawn every frame, because
+   * at 30 Hz against a 60 or 144 Hz display a population that only moved on a
+   * tick visibly stepped. The factor has been available since the loop was
+   * written and only the hand ever used it.
+   */
+  sync(tick: number, alpha: number): void;
 }
 
 /**
@@ -227,13 +255,83 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 
   // Walkers: tiny, and they must separate from any terrain, so they get a rim
   // light in the shader rather than relying on contrast (§7.3 tier 1).
+  //
+  // A capsule until the model lands, and then people. The capsule is not a
+  // placeholder that was never replaced — it is what the population looks like
+  // for the fraction of a second before `villager.glb` finishes loading, and
+  // the swap costs one geometry assignment because the instance transforms do
+  // not care what they are transforming.
   const walkerGeometry = new THREE.CapsuleGeometry(0.25, 0.5, 3, 6);
   walkerGeometry.translate(0, 0.5, 0);
-  const walkers = new THREE.InstancedMesh(walkerGeometry, walkerMaterial(view), MAX_WALKERS);
+  const walkerMat = walkerMaterial(view);
+  const walkers: THREE.InstancedMesh<THREE.BufferGeometry, THREE.Material> =
+    new THREE.InstancedMesh(walkerGeometry, walkerMat, MAX_WALKERS);
+  /**
+   * Walk phase, one float per instance: the fraction is the phase and the sign
+   * says whether this figure is moving. Attached to whichever geometry is
+   * current, so it survives the swap from capsule to model.
+   */
+  const walkPhase = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WALKERS), 1);
+  walkPhase.setUsage(THREE.DynamicDrawUsage);
+  /**
+   * Every vertex of the stand-in capsule is "body", so it bobs and swings
+   * nothing. The attribute has to exist on it regardless: a shader that
+   * declares an attribute the geometry lacks reads a generic value, and three
+   * gives no warning that it happened.
+   */
+  const capsuleLimbs = new Float32Array(walkerGeometry.getAttribute("position").count);
+  walkerGeometry.setAttribute("limb", new THREE.BufferAttribute(capsuleLimbs, 1));
+  walkerGeometry.setAttribute("walk", walkPhase);
   walkers.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   walkers.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WALKERS * 3), 3);
   walkers.frustumCulled = false;
   walkers.count = 0;
+
+  /**
+   * Fetch the figure and put the population inside it.
+   *
+   * Fetched rather than bundled, and read by `readGlb` rather than by three's
+   * `GLTFLoader` — which costs 45 kB of itself plus 214 kB of three it drags
+   * back in, to read a file whose entire content is two float arrays. See
+   * `geometry.ts` for the whole argument.
+   *
+   * The limb attribute is computed here rather than read from the file, so the
+   * file stays a plain glTF that anything can produce — see `FIGURE`.
+   */
+  const loadFigure = async (): Promise<void> => {
+    const response = await fetch("/models/villager.glb");
+    if (!response.ok) throw new Error(`villager.glb: ${response.status}`);
+    const geometry = readGlb(await response.arrayBuffer());
+
+    const position = geometry.getAttribute("position");
+    const limbs = new Float32Array(position.count);
+    for (let i = 0; i < position.count; i++) {
+      const x = position.getX(i);
+      const y = position.getY(i);
+      // Order matters: a leg is decided by height alone, an arm needs height
+      // *and* being outboard of the torso, or the chest swings with the arms.
+      if (y < FIGURE.hip) limbs[i] = x < 0 ? LIMB.legLeft : LIMB.legRight;
+      else if (y < FIGURE.shoulder && Math.abs(x) > FIGURE.torsoHalfWidth) {
+        limbs[i] = x < 0 ? LIMB.armLeft : LIMB.armRight;
+      } else limbs[i] = LIMB.body;
+    }
+    geometry.setAttribute("limb", new THREE.BufferAttribute(limbs, 1));
+
+    geometry.setAttribute("walk", walkPhase);
+    walkers.geometry.dispose();
+    walkers.geometry = geometry;
+  };
+
+  // Started here rather than awaited anywhere: `createVegetation` runs behind
+  // the title card, so the model and three's glTF loader arrive during the same
+  // window the wasm and the renderer do, and the match never waits for them.
+  //
+  // A failure keeps the capsules. A population drawn as capsules is a worse
+  // game than one drawn as people and it is still a game; a black screen
+  // because a decorative mesh 404'd is not.
+  void loadFigure().catch((err: unknown) => {
+    console.warn("the figure model did not load; drawing capsules", err);
+  });
 
   // One-shot pickups (§5.3): free single-use powers lying on the terrain.
   // Contested map objects, so they have to be findable from orbit — hence a
@@ -462,17 +560,156 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     }
   };
 
+  /**
+   * One record per living figure, keyed by the walker id the simulation gives
+   * it, which is what lets a figure be *the same figure* from one tick to the
+   * next — and therefore lets it have a heading and a stride at all.
+   */
+  interface Figure {
+    face: number;
+    /** Where it was last tick, and where it is now, in face cells. */
+    fromX: number;
+    fromY: number;
+    toX: number;
+    toY: number;
+    /** Facing, as a turn about the surface normal. */
+    heading: number;
+    /** Walk phase, 0..1, advanced by distance covered rather than by time. */
+    phase: number;
+    /** Whether it moved this tick. A standing figure must not pedal. */
+    moving: boolean;
+    /** Colour and size inputs, so the frame loop need not re-read the sim. */
+    scale: number;
+    r: number;
+    g: number;
+    b: number;
+    /** Tick this record was last touched, for reaping the dead. */
+    seen: number;
+  }
+  const figures = new Map<number, Figure>();
+  /** How much walk phase a cell of travel is worth. Two steps per cell. */
+  const STRIDE_PER_CELL = 2;
+
+  const trackWalkers = (): void => {
+    const tick = builtAt;
+    for (const p of sim.walkers()) {
+      // Clamped for the same reason as the trees: a walker part-way through a
+      // seam crossing can carry a sub-cell offset just outside its face.
+      const wx = onFace(p.x);
+      const wy = onFace(p.y);
+      const champion = (p.flags & WALKER_CHAMPION) !== 0;
+      const leader = (p.flags & WALKER_LEADER) !== 0;
+      // Owner hue, then rank on top of it: a champion has to be findable in a
+      // crowd of its own colour, and it had no distinguishing mark at all.
+      if (p.owner === 0) colour.setRGB(1.0, 0.85, 0.5);
+      else colour.setRGB(0.5, 0.85, 1.0);
+      if (champion) colour.setRGB(1.0, 0.42, 0.24);
+      else if (leader) colour.lerp(leaderTint, 0.55);
+
+      let f = figures.get(p.id);
+      if (!f) {
+        f = {
+          face: p.face,
+          fromX: wx,
+          fromY: wy,
+          toX: wx,
+          toY: wy,
+          heading: 0,
+          phase: 0,
+          moving: false,
+          scale: 0,
+          r: 0,
+          g: 0,
+          b: 0,
+          seen: tick,
+        };
+        figures.set(p.id, f);
+      }
+
+      const crossed = f.face !== p.face;
+      f.fromX = crossed ? wx : f.toX;
+      f.fromY = crossed ? wy : f.toY;
+      f.face = p.face;
+      f.toX = wx;
+      f.toY = wy;
+
+      // Heading and stride from how far it actually travelled. A seam crossing
+      // is skipped rather than measured: the two coordinate frames are
+      // different, so the difference is meaningless and would spin the figure.
+      const dx = f.toX - f.fromX;
+      const dy = f.toY - f.fromY;
+      const travelled = Math.hypot(dx, dy);
+      // `SPEED` is a sixteenth of a cell per tick, so anything above a
+      // hundredth is real movement rather than a settling offset.
+      f.moving = !crossed && travelled > 0.01;
+      if (f.moving) {
+        // Face coordinates are the tangent frame `cellDirectionInto` builds
+        // from, so an angle in them is an angle about the surface normal.
+        f.heading = Math.atan2(dx, dy);
+        f.phase = (f.phase + travelled * STRIDE_PER_CELL) % 1;
+      }
+      // Rank, not strength, drives size. Scaling by `strength` turned a veteran
+      // into a giant, and §4.7 lets strength reach 255.
+      //
+      // Larger than the capsule these replaced, because a person is *thinner*
+      // than a capsule: at the capsule's own height the figure read as a
+      // scratch, and at the range this game is played from a walker has to
+      // survive being a dozen pixels tall standing next to a house.
+      f.scale = cellScale * (champion ? 1.5 : leader ? 1.25 : 0.95);
+      f.r = colour.r;
+      f.g = colour.g;
+      f.b = colour.b;
+      f.seen = tick;
+    }
+    // Reap the fallen. Without this the map grows for the whole match and the
+    // draw below walks every walker that ever lived.
+    for (const [id, f] of figures) {
+      if (f.seen !== tick) figures.delete(id);
+    }
+  };
+
+  /** Write the instance transforms for this *frame*, between two ticks. */
+  const drawWalkers = (alpha: number): void => {
+    let k = 0;
+    for (const f of figures.values()) {
+      if (k >= MAX_WALKERS) break;
+      // Sub-cell position: the simulation moves a point in Q16.16 and the
+      // renderer draws a figure around it (§4.5). This reads, never writes.
+      const wx = onFace(f.fromX + (f.toX - f.fromX) * alpha);
+      const wy = onFace(f.fromY + (f.toY - f.fromY) * alpha);
+      cellDirectionInto(dir, f.face, wx, wy, sim.N);
+      place(walkers, k, surfaceAt(f.face, wx, wy), f.scale, f.heading);
+      walkers.instanceColor?.setXYZ(k, f.r, f.g, f.b);
+      // The walk cycle's per-instance phase. Negative means standing, which is
+      // how the shader knows not to pedal on the spot — see `WALK_GLSL`.
+      walkPhase.setX(k, f.moving ? f.phase : -f.phase - 1);
+      k += 1;
+    }
+    walkers.count = k;
+    walkers.instanceMatrix.needsUpdate = true;
+    if (walkers.instanceColor) walkers.instanceColor.needsUpdate = true;
+    walkPhase.needsUpdate = true;
+  };
+
   let floraBuiltAt = -FLORA_REBUILD_TICKS;
   let builtAt = -1;
+  let rebuiltAt = -1;
 
   return {
     group,
-    sync(tick: number): void {
-      // Every instance below is a function of simulation state, which only
-      // changes on a tick. At 60 fps against a 30 Hz simulation this was doing
-      // all of it twice per tick, and on a 144 Hz display nearly five times.
-      if (tick === builtAt) return;
-      builtAt = tick;
+    sync(tick: number, alpha: number): void {
+      // The figures move between ticks; nothing else does.
+      if (tick !== builtAt) {
+        builtAt = tick;
+        trackWalkers();
+      }
+      drawWalkers(Math.min(Math.max(alpha, 0), 1));
+
+      // Everything below is a function of simulation state, which only changes
+      // on a tick. At 60 fps against a 30 Hz simulation this was doing all of it
+      // twice per tick, and on a 144 Hz display nearly five times.
+      if (tick === rebuiltAt) return;
+      rebuiltAt = tick;
 
       // --- flora -------------------------------------------------------------
       // Vegetation grows over minutes. Rebuilding thousands of instances every
@@ -507,39 +744,6 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       buildings.count = b;
       buildings.instanceMatrix.needsUpdate = true;
       if (buildings.instanceColor) buildings.instanceColor.needsUpdate = true;
-
-      // --- walkers -----------------------------------------------------------
-      const people = sim.walkers();
-      let k = 0;
-      for (const p of people) {
-        if (k >= MAX_WALKERS) break;
-        // Sub-cell position: the simulation moves a point in Q16.16 and the
-        // renderer draws a figure around it (§4.5). Flooring it here — which is
-        // what this did — threw that away and teleported every walker from one
-        // cell centre to the next. No feedback, ever: this reads, never writes.
-        // Clamped for the same reason as the trees: a walker part-way through a
-        // seam crossing can carry a sub-cell offset just outside its face.
-        const wx = onFace(p.x);
-        const wy = onFace(p.y);
-        cellDirectionInto(dir, p.face, wx, wy, sim.N);
-        // Rank, not strength, drives size. Scaling by `strength` turned a
-        // veteran into a giant, and §4.7 lets strength reach 255.
-        const champion = (p.flags & WALKER_CHAMPION) !== 0;
-        const leader = (p.flags & WALKER_LEADER) !== 0;
-        const scale = cellScale * (champion ? 0.95 : leader ? 0.78 : 0.5);
-        place(walkers, k, surfaceAt(p.face, wx, wy), scale, 0);
-        // Owner hue, then rank on top of it: a champion has to be findable in a
-        // crowd of its own colour, and it had no distinguishing mark at all.
-        if (p.owner === 0) colour.setRGB(1.0, 0.85, 0.5);
-        else colour.setRGB(0.5, 0.85, 1.0);
-        if (champion) colour.setRGB(1.0, 0.42, 0.24);
-        else if (leader) colour.lerp(leaderTint, 0.55);
-        walkers.instanceColor?.setXYZ(k, colour.r, colour.g, colour.b);
-        k += 1;
-      }
-      walkers.count = k;
-      walkers.instanceMatrix.needsUpdate = true;
-      if (walkers.instanceColor) walkers.instanceColor.needsUpdate = true;
 
       // --- pickups -----------------------------------------------------------
       const drops = sim.pickups();
@@ -610,7 +814,12 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
  * so a lit window seen across the planet is dimmed by the air like everything
  * else.
  */
-function hazedLambert(view: View, colour: number, extra = ""): THREE.MeshLambertMaterial {
+function hazedLambert(
+  view: View,
+  colour: number,
+  extra = "",
+  walk?: { vertex: string; main: string },
+): THREE.MeshLambertMaterial {
   // No `vertexColors: true`. It defines `USE_COLOR`, and `color_vertex.glsl`
   // then runs `vColor *= color` against a `color` attribute that does not exist
   // on this geometry. `MeshLambertMaterial` — unlike `ShaderMaterial` — has no
@@ -629,8 +838,16 @@ function hazedLambert(view: View, colour: number, extra = ""): THREE.MeshLambert
       vertex,
       "#include <common>",
       `#include <common>
-       varying vec3 vDioWorld;`,
+       varying vec3 vDioWorld;
+       ${walk?.vertex ?? ""}`,
     );
+    if (walk) {
+      // After `begin_vertex`, which is where `transformed` is defined —
+      // `beginnormal_vertex` runs before it, so `objectNormal` is already in
+      // scope and both can be swung by the same rotation. Injecting before
+      // either would compile against a variable that does not exist yet.
+      vertex = inject(vertex, "#include <begin_vertex>", `#include <begin_vertex>\n${walk.main}`);
+    }
     vertex = inject(
       vertex,
       "#include <project_vertex>",
@@ -729,5 +946,65 @@ function walkerMaterial(view: View): THREE.MeshLambertMaterial {
       vec3 dioView = normalize(vViewPosition);
       float dioRim = pow(1.0 - max(dot(normalize(vNormal), dioView), 0.0), 2.0);
       outgoingLight += dioRim * 0.55;`,
+    WALK_GLSL,
   );
 }
+
+/**
+ * The walk cycle, as a vertex-shader hinge per limb.
+ *
+ * There is no rig. A thousand `SkinnedMesh`es would be a thousand draw calls
+ * and a skinning cost this project has no budget for, and the figures are three
+ * pixels tall most of the time — so the limbs swing about hard-coded joint
+ * heights instead, and the whole population stays one instanced draw call.
+ *
+ * `limb` comes from `vegetation.ts`, which derives it from vertex positions at
+ * load so the model file itself stays a plain glTF. `walk` is per instance: its
+ * fractional part is the phase, so figures do not march in step, and its sign
+ * carries whether this one is moving at all — a standing figure must not
+ * pedal on the spot.
+ *
+ * Arms swing opposite their diagonal leg, which is the one detail that makes a
+ * walk read as a walk rather than as a shuffle.
+ */
+const WALK_GLSL = {
+  vertex: /* glsl */ `
+    attribute float limb;
+    attribute float walk;
+  `,
+  main: /* glsl */ `
+    {
+      float phase = fract(abs(walk));
+      // A standing figure holds still: the sign of walk carries "moving".
+      float stride = walk < 0.0 ? 0.0 : 1.0;
+      float swingA = sin(phase * 6.2831853) * 0.85 * stride;
+      float swingB = -swingA;
+      float angle = 0.0;
+      float pivotY = 0.0;
+      if (limb > 2.5) {
+        // Legs, from the hip.
+        pivotY = ${(0.46).toFixed(3)};
+        angle = limb > 3.5 ? swingB : swingA;
+      } else if (limb > 0.5) {
+        // Arms, from the shoulder, opposite the diagonal leg.
+        pivotY = ${(0.7).toFixed(3)};
+        angle = limb > 1.5 ? swingA : swingB;
+        angle *= 0.7;
+      }
+      if (angle != 0.0) {
+        float c = cos(angle);
+        float sn = sin(angle);
+        float y = transformed.y - pivotY;
+        float z = transformed.z;
+        transformed.y = pivotY + y * c - z * sn;
+        transformed.z = y * sn + z * c;
+        float ny = objectNormal.y;
+        float nz = objectNormal.z;
+        objectNormal.y = ny * c - nz * sn;
+        objectNormal.z = ny * sn + nz * c;
+      }
+      // A little bob, so the body rises on each step rather than gliding.
+      transformed.y += abs(sin(phase * 6.2831853)) * 0.035 * stride;
+    }
+  `,
+};
