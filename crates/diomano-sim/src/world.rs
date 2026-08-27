@@ -5,7 +5,9 @@
 
 use crate::hash::{Fnv64, Rng, hash3};
 use crate::seams::{DIR_DX, DIR_DY, GHOST_DST, GHOST_ENTRIES, GHOST_SRC, step};
-use crate::{ai, combat, flowfield, materials, powers, settlements, tide, walkers, water};
+use crate::{
+    ai, combat, flowfield, materials, powers, settlements, tectonics, tide, walkers, water,
+};
 
 // ---------------------------------------------------------------------------
 // Geometry (HANDOFF §3.2)
@@ -547,6 +549,16 @@ pub struct MapConfig {
     pub telegraph_ticks: u32,
     pub impact_ticks: u32,
     pub recovery_ticks: u32,
+    /// Ticks of calm before the *first* wave and after the *last* one.
+    ///
+    /// Separate from `recovery_ticks` because the two windows do different
+    /// jobs. The recovery between waves is playing time — rebuild, replant,
+    /// reclaim — and at a fifteen-minute cadence it is fourteen minutes long.
+    /// The opening and closing windows are not: nothing has happened yet at the
+    /// start, and after the last wave recedes the match is only waiting for
+    /// `decide_match` to fire. Running those on `recovery_ticks` would put
+    /// fourteen minutes of nothing at each end of a match.
+    pub lull_ticks: u32,
     /// Percent per wave, integer (§5.4).
     pub escalation: u16,
     /// Height units the first wave adds to sea level.
@@ -556,6 +568,20 @@ pub struct MapConfig {
     /// Scripted opponent (this run only; not part of the shipped ruleset).
     pub ai_enabled: u8,
     pub ai_player: u8,
+    /// Carve the contact corridor between the two spawns.
+    ///
+    /// **Off in real matches, by user decision.** A ridge running half the
+    /// planet's circumference between the two starts was the single most
+    /// artificial thing in the world — a road nothing built, laid across
+    /// whatever geology happened to be under it. If the two peoples begin on
+    /// separate land, joining them is now the player's problem, and raising
+    /// land is the verb the game is about.
+    ///
+    /// It stays available because the §6.3 corpus needs it: the corpus asks for
+    /// 200 combat resolutions in ten scripted matches, and armies that never
+    /// meet resolve none. A corpus log states `land_bridge 1` for itself, the
+    /// same way it states its own tide.
+    pub land_bridge: u8,
     /// Keep simulating after the outcome is decided. Off for real matches —
     /// an ended world freezes — but the §6.3 corpus needs 20,000 ticks of
     /// activity from matches whose outcome lands around tick 10,000.
@@ -574,11 +600,21 @@ impl MapConfig {
         n: N as u16,
         seed: 0x5EED,
         terrain: TERRAIN_ARCHIPELAGO,
-        waves: 7,
-        telegraph_ticks: 300,
-        impact_ticks: 150,
-        recovery_ticks: 900,
-        escalation: 115,
+        // A wave every fifteen minutes, three of them (user decision). The
+        // cadence is `telegraph + impact + recovery` = 27,000 ticks at 30 Hz,
+        // exactly 15:00, so the waves land at 1:30, 16:30 and 31:30 and a match
+        // is about 34 minutes. §5.5's `[START]` was seven waves 45 seconds
+        // apart, which put a whole match inside six minutes.
+        //
+        // Escalation rises with the cadence: over three waves rather than seven
+        // it has to reach a comparable finale in a third of the steps, and 150%
+        // gives 48 / 72 / 108 against the old sequence's 48 ... 106.
+        waves: 3,
+        telegraph_ticks: 900,
+        impact_ticks: 600,
+        recovery_ticks: 25_500,
+        lull_ticks: 2_700,
+        escalation: 150,
         wave_strength: 48,
         power_enabled: [1, 1, 1, 0, 1, 1, 1, 1],
         // Armageddon at 2,500 is roughly a minute of late-game accrual — see
@@ -590,6 +626,7 @@ impl MapConfig {
         power_cost: [0, 20, 120, 200, 260, 600, 700, 2500],
         ai_enabled: 0,
         ai_player: 1,
+        land_bridge: 0,
         endless: 0,
     };
 }
@@ -971,85 +1008,76 @@ impl World {
     /// The noise is sampled at the cell's position **on the cube**, in 3D. That
     /// is why there is no seam in the generated terrain: adjacent cells across a
     /// face boundary are adjacent in 3D too, so no per-face fixup is needed.
+    /// Build the world. HANDOFF §3.3, superseding its noise `[START]`.
+    ///
+    /// The shape of the land comes from `tectonics`: plates, their boundaries,
+    /// hotspot volcanism and then erosion. This function is the profile — how
+    /// much of the surface a profile wants dry, how volcanic it is, how hard
+    /// its weather cuts — and the assignment of surface materials and fertility
+    /// to the result. See the header of `tectonics.rs` for why the noise field
+    /// it replaced had to go.
     fn generate_terrain(&mut self) {
-        let seed = self.cfg.seed;
-        let amp: i32 = 720;
-        // Measured against the widened distribution (see `widen`), not carried
-        // over from the old stack: `terrain_profiles_produce_playable_land`
-        // holds the resulting land fractions. Archipelago ~24-42% land across
-        // seeds, pangaea ~57-78%, volcano in between.
-        let bias: i32 = match self.cfg.terrain {
-            TERRAIN_PANGAEA => -40,
-            TERRAIN_VOLCANO => 210,
-            _ => 350, // archipelago: most of the surface starts under water
+        // Per profile: dry fraction in per mille, hotspot gain over 256, and
+        // how much the drainage network cuts.
+        let (dry_per_mille, hotspot_gain, cut) = match self.cfg.terrain {
+            TERRAIN_PANGAEA => (620, 160, 30),
+            TERRAIN_VOLCANO => (380, 640, 22),
+            // Archipelago: mostly sea, and the land that exists is volcanic
+            // island chains and arcs rather than the drowned edges of one
+            // continent.
+            _ => (300, 420, 26),
         };
 
-        // Domain warp amplitudes, each ~0.28 of its own lattice spacing. Value
-        // noise on an axis-aligned lattice has square isolines; sampling the
-        // height field through a warp of the cube point bends them into curves.
-        // Both warp fields are continuous functions of the 3D cube point, so the
-        // result stays seamless — that argument is the whole reason this is
-        // allowed at all, and it does not care how many octaves of warp there
-        // are.
-        //
-        // The coarse warp was here alone, and one warp cannot do this job. A
-        // shift-11 field is constant over 16 cells, so it *translates* the fine
-        // octaves rather than bending them: their own lattice — shift 8 is two
-        // cells wide at N = 64 — stayed axis-aligned at exactly the scale a
-        // player sees from close range, which is most of why the world read as
-        // rasterised. `WARP_FINE` is what actually bends it.
-        const WARP: i32 = 600; // vs. the shift-11 spacing of 2048
-        const WARP_FINE: i32 = 140; // vs. the shift-9 spacing of 512
+        tectonics::raise_land(self, 0, hotspot_gain);
+        self.ghost_copy_all();
+        // Twelve routing passes: flow reaches twelve cells downstream, which on
+        // a 64-cell face is enough for a trunk valley to know it is one without
+        // spending the whole init budget on drainage.
+        tectonics::erode(self, 12, cut);
+        tectonics::set_sea_level(self, dry_per_mille);
 
+        // Surface materials and fertility, from the shape rather than from a
+        // second noise field: fertile ground is low, flat and watered, which is
+        // exactly what the drainage accumulation left in `sediment`.
         for face in 0..6usize {
             for y in 0..N {
                 for x in 0..N {
-                    let (px, py, pz) = cube_point(face, x as i32, y as i32);
-                    let cwx = value_noise(px + 5741, py + 2099, pz - 4451, 11, seed ^ 0x7A17);
-                    let cwy = value_noise(py - 3299, pz + 5443, px + 1877, 11, seed ^ 0x3B21);
-                    let cwz = value_noise(pz + 4519, px - 2687, py + 3947, 11, seed ^ 0x51C3);
-                    let fwx = value_noise(px - 1213, pz + 3457, py + 907, 9, seed ^ 0x2D45);
-                    let fwy = value_noise(py + 2131, px - 4079, pz + 1523, 9, seed ^ 0x6E11);
-                    let fwz = value_noise(pz - 3701, py + 1049, px + 2381, 9, seed ^ 0x1F83);
-                    let wx = (cwx - 32768) * WARP / 32768 + (fwx - 32768) * WARP_FINE / 32768;
-                    let wy = (cwy - 32768) * WARP / 32768 + (fwy - 32768) * WARP_FINE / 32768;
-                    let wz = (cwz - 32768) * WARP / 32768 + (fwz - 32768) * WARP_FINE / 32768;
-                    let h = fbm(px + wx, py + wy, pz + wz, seed);
-                    let centred = widen(h) - 32768;
-                    let raw = centred * amp / 32768;
-                    // The bias moves the sea level, then both sides stretch
-                    // back to the full ±amp span. Subtracting the bias outright
-                    // (the old form) also lowered every peak, which is how the
-                    // rock threshold below and the renderer's snowline ended up
-                    // unreachable on the wetter profiles.
-                    let height = if raw > bias {
-                        (raw - bias) * amp / (amp - bias)
-                    } else {
-                        (raw - bias) * amp / (amp + bias)
-                    };
                     let c = idx(face, x, y);
-                    self.height[c] =
-                        height.clamp(i32::from(HEIGHT_MIN), i32::from(HEIGHT_MAX)) as i16;
+                    let height = i32::from(self.height[c]);
+                    let mut slope = 0i32;
+                    for dir in 0..4usize {
+                        slope = slope
+                            .max((height - i32::from(self.height[neighbour_flat(c, dir)])).abs());
+                    }
+                    let flow = i32::from(self.sediment[c]);
 
-                    let f = fbm(px + 8192, py - 4096, pz + 2048, seed ^ 0x9E37) >> 8; // 0..255
-                    self.fertility[c] = f as u8;
+                    // Alluvium: a broad valley floor with a river through it is
+                    // the most fertile ground there is, a bare ridge the least.
+                    let lowland = (400 - height.abs() / 2).clamp(0, 400);
+                    let flat = (255 - slope * 4).clamp(0, 255);
+                    let fert = (flow * 3 + lowland / 2 + flat / 2).clamp(0, 255);
+                    self.fertility[c] = fert as u8;
 
-                    self.material[c] = if height > 380 {
+                    self.material[c] = if height > 380 || slope > i32::from(TERRACE) * 4 {
                         MAT_ROCK
                     } else if height > -30 {
-                        if f > 140 { MAT_SOIL } else { MAT_SAND }
+                        if fert > 140 { MAT_SOIL } else { MAT_SAND }
                     } else {
                         MAT_SAND
                     };
                 }
             }
         }
+        self.ghost_copy_all();
 
-        // Fill everything below sea level (§4.3).
+        // Fill everything below sea level (§4.3). `sediment` and `water` were
+        // both scratch for the erosion passes, so they are cleared here rather
+        // than assumed empty.
         for face in 0..6usize {
             for y in 0..N {
                 for x in 0..N {
                     let c = idx(face, x, y);
+                    self.sediment[c] = 0;
                     let depth = i32::from(self.sea_level) - i32::from(self.height[c]);
                     self.water[c] = depth.max(0).min(i32::from(i16::MAX)) as i16;
                 }
@@ -1064,6 +1092,7 @@ impl World {
             self.lava[c] = 200;
             self.water[c] = 0;
         }
+        self.ghost_copy_all();
     }
 
     // -----------------------------------------------------------------------
@@ -1613,6 +1642,28 @@ fn fbm(px: i32, py: i32, pz: i32, seed: u32) -> i32 {
     let d = value_noise(px - 613 - (pz >> 1), py + 1279 + (px >> 2), pz - 2039, 9, seed ^ 0x3333);
     let e = value_noise(-py + 337 + (pz >> 1), pz + 761 - (px >> 1), px + 1201, 8, seed ^ 0x4444);
     (a * 6 + b * 8 + c * 4 + d * 2 + e) / 21
+}
+
+/// The roughness `tectonics` lays over its landforms, in height units.
+///
+/// The old generator's whole height field, kept and demoted. Its amplitude is
+/// below a plate boundary's on purpose: it may texture a mountain range, it may
+/// not invent one, and the difference between those two is the entire reason
+/// the geology replaced it.
+pub(crate) fn terrain_detail(px: i32, py: i32, pz: i32, seed: u32) -> i32 {
+    const WARP: i32 = 600;
+    const WARP_FINE: i32 = 140;
+    const DETAIL_AMP: i32 = 190;
+    let cwx = value_noise(px + 5741, py + 2099, pz - 4451, 11, seed ^ 0x7A17);
+    let cwy = value_noise(py - 3299, pz + 5443, px + 1877, 11, seed ^ 0x3B21);
+    let cwz = value_noise(pz + 4519, px - 2687, py + 3947, 11, seed ^ 0x51C3);
+    let fwx = value_noise(px - 1213, pz + 3457, py + 907, 9, seed ^ 0x2D45);
+    let fwy = value_noise(py + 2131, px - 4079, pz + 1523, 9, seed ^ 0x6E11);
+    let fwz = value_noise(pz - 3701, py + 1049, px + 2381, 9, seed ^ 0x1F83);
+    let wx = (cwx - 32768) * WARP / 32768 + (fwx - 32768) * WARP_FINE / 32768;
+    let wy = (cwy - 32768) * WARP / 32768 + (fwy - 32768) * WARP_FINE / 32768;
+    let wz = (cwz - 32768) * WARP / 32768 + (fwz - 32768) * WARP_FINE / 32768;
+    (widen(fbm(px + wx, py + wy, pz + wz, seed)) - 32768) * DETAIL_AMP / 32768
 }
 
 /// Widen `fbm`'s compressed midrange: the weighted octave average clusters

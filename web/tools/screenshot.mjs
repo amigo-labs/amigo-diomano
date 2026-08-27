@@ -115,6 +115,24 @@ async function main() {
     await page.waitForTimeout(4000);
     await shoot("4-gameplay");
 
+    // The controls overlay: off by default, one key away, and off again. It is
+    // asserted rather than only photographed — a card that never appeared makes
+    // exactly as plausible a PNG as one that did.
+    if (await page.locator(".hud-controls.shown").count()) {
+      fail("the controls overlay is up before anyone asked for it");
+    }
+    await page.keyboard.press("F1");
+    await page.waitForTimeout(400);
+    if (!(await page.locator(".hud-controls.shown").count())) {
+      fail("F1 did not open the controls overlay");
+    }
+    await shoot("4a-controls");
+    await page.keyboard.press("F1");
+    await page.waitForTimeout(400);
+    if (await page.locator(".hud-controls.shown").count()) {
+      fail("F1 did not close the controls overlay again");
+    }
+
     // Close working view: zoom to the floor. The clouds must dissolve on the
     // way in (view.ts, cloudFade) so the terrain under the hand is readable.
     await page.mouse.move(640, 400);
@@ -138,6 +156,27 @@ async function main() {
 
     await page.keyboard.press("Escape");
     await page.waitForTimeout(300);
+
+    // The wave landing, which is the one moment the sea is supposed to look
+    // like weather rather than like a level. Ticked forward from the console
+    // rather than waited out: the first wave is minutes away.
+    //
+    // With the opponent off, deliberately. The scripted AI can win by siege
+    // against a player who never acts well before the first wave lands at the
+    // shipped cadence, and a world that has ended freezes — so on the normal
+    // page this loop would tick a frozen world forever and see no wave.
+    const phase = await page.evaluate(() => {
+      const sim = window.diomano.sim;
+      for (let i = 0; i < 60000 && sim.e.dio_tide_phase() !== 2; i++) sim.tick();
+      return sim.e.dio_tide_phase();
+    });
+    if (phase !== 2 && !(await page.evaluate(() => window.diomano.sim.e.dio_outcome() !== 0))) {
+      fail("the tide never reached impact");
+    }
+    if (phase === 2) {
+      await page.waitForTimeout(700);
+      await shoot("4d-surge");
+    }
 
     for (let i = 0; i < 14; i++) {
       await page.mouse.wheel(0, 400);
@@ -178,6 +217,33 @@ async function main() {
     });
     if (!running) fail("restart did not produce a running match");
     console.log("  restart: running match confirmed");
+
+    // The failure path, on its own page: starve the loader of its wasm and the
+    // epitaph in `#fallback` must appear *without* an unhandled rejection.
+    //
+    // Worth a step of its own because this file is the thing that catches it —
+    // `page.on("pageerror")` above fails the run on one — and because the
+    // rejection was real: `boot()` used to rethrow after showing the fallback,
+    // which is noise in a player's console and a failed run here, for an error
+    // that had already been reported on screen.
+    const failPage = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    const rejections = [];
+    failPage.on("pageerror", (err) => rejections.push(err.message));
+    await failPage.route("**/diomano.wasm", (r) => r.abort());
+    await failPage.goto(`http://127.0.0.1:${port}/`, { waitUntil: "load" });
+    await failPage.waitForTimeout(2500);
+    const epitaph = await failPage.evaluate(() => {
+      const el = document.querySelector("#fallback");
+      return { shown: getComputedStyle(el).display !== "none", text: el.textContent ?? "" };
+    });
+    if (!epitaph.shown || !epitaph.text.includes("could not start")) {
+      fail(`a boot failure did not show the epitaph: ${JSON.stringify(epitaph)}`);
+    }
+    if (rejections.length > 0) {
+      fail(`a boot failure left an unhandled rejection: ${rejections.join(", ")}`);
+    }
+    await failPage.close();
+    console.log("  failed boot: epitaph shown, no unhandled rejection");
   } finally {
     await browser.close();
     server.close();

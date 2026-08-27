@@ -53,6 +53,11 @@ transient radial menu on right-click.
 | middle or right drag | orbit the planet |
 | right click | open the power menu: magnet, earthquake, volcano, flood, champion, armageddon |
 | shift / alt / ctrl | thrown / increased / extreme |
+| `+` `=` `-` `M` | louder / quieter / mute |
+| `F1` or `?` | show or hide the full control list |
+
+The two peoples do **not** start connected by land. If they are on separate
+islands, raising the ground between them is the player's job.
 
 ## What is not here
 

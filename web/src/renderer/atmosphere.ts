@@ -53,12 +53,23 @@ import type { View } from "./view";
 const TIDE_TELEGRAPH = 1;
 const TIDE_IMPACT = 2;
 
+/**
+ * How long the sky takes to redden before a wave lands, in ticks.
+ *
+ * A *render* ramp, not a mirror of the manifest's `telegraph_ticks`: the sky
+ * should turn over about ten seconds however long the warning itself is, and a
+ * copy of the manifest value here would be one more number to keep in step with
+ * the simulation for no gain. A telegraph shorter than this simply reddens from
+ * part-way up, which is the honest reading of "less warning".
+ */
+const WARNING_RAMP_TICKS = 300;
+
 export interface Atmosphere {
   readonly group: THREE.Group;
   /** The shared sun vector, for anything that needs to read it directly. */
   readonly sunDirection: THREE.Vector3;
   readonly material: THREE.ShaderMaterial;
-  sync(tidePhase: number, ticksToImpact: number): void;
+  sync(tidePhase: number, ticksToImpact: number, tideOffset: number, tideStrength: number): void;
 }
 
 /**
@@ -470,21 +481,28 @@ export function createAtmosphere(view: View): Atmosphere {
     group,
     sunDirection,
     material,
-    sync(tidePhase: number, ticksToImpact: number): void {
+    sync(tidePhase: number, ticksToImpact: number, tideOffset: number, tideStrength: number): void {
       // The sun's day cycle and the cloud clock live in `view.ts` now, because
       // three other materials need the same values and private copies drifted.
 
-      // Warning ramps up over the last ten seconds before impact and stays hot
-      // through the surge.
+      // Warning ramps up over the last `WARNING_RAMP_TICKS` before impact and
+      // stays hot through the surge.
       let warning = 0;
       if (tidePhase === TIDE_TELEGRAPH) {
-        warning = 1 - Math.min(ticksToImpact / 300, 1);
+        warning = 1 - Math.min(ticksToImpact / WARNING_RAMP_TICKS, 1);
       } else if (tidePhase === TIDE_IMPACT) {
         warning = 1;
       }
       // Written here and read by every ground shader through `view`: the sky
       // reddens and thickens as one thing, because it is one thing.
       view.warning.value = warning;
+      // The water's half of the same event. The signed offset is the sea level
+      // itself, so this is 0 while the sea is drawn back (negative) and 1 at the
+      // crest — the swell builds as the wave lands rather than through the whole
+      // warning, which is when the sea is at its flattest. A little of the
+      // warning bleeds in so the horizon is already moving before it arrives.
+      const peak = tideStrength > 0 ? tideOffset / tideStrength : 0;
+      view.surge.value = Math.min(Math.max(Math.max(peak, warning * 0.3), 0), 1);
       sun.position.copy(sunDirection).multiplyScalar(10);
       // The sun dims as the sky reddens, which is the other half of the tide's
       // no-UI warning.

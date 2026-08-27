@@ -6,6 +6,25 @@
  * Tier 2: two normal fields scrolling at different speeds and directions, and
  * sun glitter as a high-exponent specular.
  *
+ * # Waves that are actually there
+ *
+ * The tier-2 ripple perturbs the *normal* only: the sea was lit as though it
+ * had waves and had none, so it was flat against the limb and flat under the
+ * hand, and a tide could only be read as a number changing. The vertex shader
+ * now displaces the surface along its own radial by a sum of three travelling
+ * waves, and derives the shading normal from the same expression rather than
+ * from the radial. The ripple noise stays, as chop *on* the swell.
+ *
+ * Displacement is radial only — no Gerstner horizontal pinch. The sideways term
+ * is what gives a Gerstner wave its sharp crest, and it also shears the mesh;
+ * this mesh is chunked and shares vertices with nothing, so a shear would open
+ * visible cracks at every chunk boundary for a crest shape that is invisible at
+ * this scale anyway.
+ *
+ * The amplitude is faded to zero as the water shallows. The water mesh has no
+ * skirt (`mesh.rs`, and §7.3 says why), so a sea that still heaved at the
+ * waterline would lift clean off the beach and show the gap.
+ *
  * Like the terrain, the geometry comes from Rust: the same dual grid, the same
  * chunking, the same zero-copy views. The water surface is a real mesh rather
  * than a sphere at sea level, because the tide has to visibly flood *inland*
@@ -16,6 +35,7 @@ import * as THREE from "three";
 import type { Sim } from "../main";
 import { SKY_GLSL } from "./atmosphere";
 import { BASE_RADIUS } from "./planet";
+import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
 
 export interface Water {
@@ -26,8 +46,35 @@ export interface Water {
   refreshAll(): void;
 }
 
+/**
+ * The travelling swell: direction, wavenumber, amplitude in radii, speed.
+ *
+ * Three waves in *world* directions rather than in a tangent frame built from
+ * the radial. Any such frame has to pick a reference axis and flips at that
+ * axis's poles, and a flipped frame is a phase discontinuity — a hard seam
+ * across the ocean. A world-space plane wave projected onto the sphere is
+ * continuous everywhere; the cost is that the field flattens near the poles of
+ * each direction, which three non-parallel directions turn into a calm patch
+ * rather than a dead hemisphere.
+ *
+ * Wavenumbers are radians per world unit. A cell is ~0.0245 radii wide, so
+ * k = 70 is a wavelength of about 3.7 cells.
+ */
+const SWELL_GLSL = /* glsl */ `
+  const vec3 DIO_SWELL_DIR_A = vec3(0.80, 0.34, 0.49);
+  const vec3 DIO_SWELL_DIR_B = vec3(-0.42, 0.68, 0.60);
+  const vec3 DIO_SWELL_DIR_C = vec3(0.31, -0.55, 0.77);
+  const vec3 DIO_SWELL_K = vec3(58.0, 91.0, 137.0);
+  const vec3 DIO_SWELL_AMP = vec3(0.00300, 0.00180, 0.00100);
+  const vec3 DIO_SWELL_SPEED = vec3(0.85, 1.24, 1.71);
+`;
+
 const VERTEX_SHADER = /* glsl */ `
   attribute vec4 attrib;   // depth/8 / 255, influence + 128, foam, dry flag
+
+  uniform float uTime;
+  uniform float uSurge;
+  uniform float uTier;
 
   varying vec3 vWorld;
   varying vec3 vNormal;
@@ -36,17 +83,54 @@ const VERTEX_SHADER = /* glsl */ `
   varying float vInfluence;
   varying float vDry;
 
+  ${SWELL_GLSL}
+
   void main() {
-    vWorld = (modelMatrix * vec4(position, 1.0)).xyz;
-    // World space, for the same reason as planet.ts: normalMatrix is view-space
-    // and the sun, the Fresnel view vector and the ripple tangent frame are all
-    // world-space. The normal attribute here *is* the position buffer, so this
-    // is the outward radial.
-    vNormal = normalize(mat3(modelMatrix) * normal);
+    vec3 up = normalize(position);
     vDepth = attrib.r;
     vInfluence = attrib.g * 2.0 - 1.0;
     vFoam = attrib.b;
     vDry = attrib.a;
+
+    // Height units of water over this vertex. The same decode the fragment
+    // shader does, and the reason the attribute is stored as depth/8.
+    float depth = vDepth * 255.0 * 8.0;
+    // Zero at the waterline, full by four terraces down. Shallow water really
+    // does have a smaller swell, and more importantly the sea must stay welded
+    // to the shore: there is no skirt under it.
+    // Full swell only in genuinely deep water. 260 height units is sixteen
+    // terraces: the shelf stays calm, which is both what a shelf does and what
+    // keeps the sea welded to a beach it has no skirt to hide behind.
+    float shore = smoothstep(0.0, 260.0, depth);
+    // Tier 1 keeps a flat sea: the displacement is three sines and a normalise
+    // per vertex, and tier 1 exists for hardware that cannot spare it.
+    float amp = shore * (0.55 + uSurge * 1.00) * step(1.5, uTier);
+
+    // Sum the three waves and their gradients together. The gradient is what
+    // becomes the normal, so it has to come from the same expression as the
+    // height or the lighting describes a different sea from the silhouette.
+    float h = 0.0;
+    vec3 grad = vec3(0.0);
+    float phaseA = dot(position, DIO_SWELL_DIR_A) * DIO_SWELL_K.x + uTime * DIO_SWELL_SPEED.x;
+    float phaseB = dot(position, DIO_SWELL_DIR_B) * DIO_SWELL_K.y + uTime * DIO_SWELL_SPEED.y;
+    float phaseC = dot(position, DIO_SWELL_DIR_C) * DIO_SWELL_K.z + uTime * DIO_SWELL_SPEED.z;
+    h += DIO_SWELL_AMP.x * sin(phaseA);
+    h += DIO_SWELL_AMP.y * sin(phaseB);
+    h += DIO_SWELL_AMP.z * sin(phaseC);
+    grad += DIO_SWELL_AMP.x * DIO_SWELL_K.x * cos(phaseA) * DIO_SWELL_DIR_A;
+    grad += DIO_SWELL_AMP.y * DIO_SWELL_K.y * cos(phaseB) * DIO_SWELL_DIR_B;
+    grad += DIO_SWELL_AMP.z * DIO_SWELL_K.z * cos(phaseC) * DIO_SWELL_DIR_C;
+    h *= amp;
+    grad *= amp;
+
+    vec3 displaced = position + up * h;
+    vWorld = (modelMatrix * vec4(displaced, 1.0)).xyz;
+    // World space, for the same reason as planet.ts: normalMatrix is view-space
+    // and the sun, the Fresnel view vector and the ripple tangent frame are all
+    // world-space. Only the tangential part of the gradient tilts the surface;
+    // the radial part is the height change itself and would double-count.
+    vec3 tangentGrad = grad - dot(grad, up) * up;
+    vNormal = normalize(mat3(modelMatrix) * normalize(up - tangentGrad));
     gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
   }
 `;
@@ -68,8 +152,10 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform vec3 uGodA;
   uniform vec3 uGodB;
   uniform float uWarning;
+  uniform float uSurge;
 
   ${SKY_GLSL}
+  ${SURF_GLSL}
 
   // Cheap value noise, for the tier-2 ripple normals. Procedural: no textures,
   // no licensing exposure, near-zero repo weight (§7.5).
@@ -132,7 +218,21 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Foam where the water is moving fast enough to erode (§4.4). Driven by the
     // simulation's own erosion marker, so foam appears exactly where terrain is
     // being cut — the visual and the mechanic cannot disagree.
-    colour = mix(colour, vec3(0.92, 0.96, 0.98), clamp(vFoam * 2.2, 0.0, 0.7));
+    float foam = clamp(vFoam * 2.2, 0.0, 0.7);
+
+    // Breakers. Erosion foam was the *only* white the sea had, so a coast with
+    // nothing being cut on it had no surf at all: the water met the sand at a
+    // hard line. dioSurf is shared with the terrain shader, which draws the
+    // other half of the same wash on the sand — see surf.ts.
+    //
+    // The jitter is one noise sample, and it is what stops a breaker from being
+    // a perfect iso-line of the depth field, which reads as a contour map.
+    vec2 surfUv = vec2(vWorld.x + vWorld.z, vWorld.y - vWorld.z);
+    float jitter = noise(surfUv * 22.0) * 2.0 - 1.0;
+    float surf = dioSurf(depth, uTime, uSurge, jitter);
+    // Foam is white and slightly blue-lifted, and it sits on top of whatever the
+    // water was doing rather than replacing it.
+    colour = mix(colour, vec3(0.92, 0.96, 0.98), max(foam, surf * 0.62));
 
     // The same air as the terrain, at the same strength — and only the colour
     // is hazed, not the alpha. The ground showing through a shallow sea has
@@ -146,7 +246,20 @@ const FRAGMENT_SHADER = /* glsl */ `
     float limb = 1.0 - smoothstep(0.12, 0.62, max(dot(up, viewDir), 0.0));
     colour = mix(colour, air.rgb, air.a * limb * 0.50);
 
-    float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995);
+    // Fade out over the last terrace of depth.
+    //
+    // The dry flag is 0 or 255 *per vertex*, so the discard boundary is a
+    // polyline with one segment per cell: the sea used to end in flat angular
+    // plates with 45-degree edges, which was the single most cell-shaped thing
+    // left in the picture once the terrain stopped being one. Fading the alpha
+    // to zero as the water shallows hides that boundary behind water you can
+    // already see through, and hands the shoreline over to the terrain's own
+    // beach band and the surf line, both of which are smooth fields.
+    float edge = smoothstep(0.0, 16.0, depth);
+    float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995) * edge;
+    // Foam is the exception: a breaker is opaque white whatever the depth under
+    // it, and it is what the eye reads the waterline from.
+    alpha = max(alpha, surf * 0.85);
     gl_FragColor = vec4(colour, alpha);
   }
 `;
@@ -165,6 +278,7 @@ export function createWater(sim: Sim, view: View): Water {
       uCameraPosition: view.cameraPosition,
       uTime: view.time,
       uWarning: view.warning,
+      uSurge: view.surge,
       uTier: { value: 2 },
       uGodA: { value: new THREE.Color(1.05, 0.95, 0.85) },
       uGodB: { value: new THREE.Color(0.85, 0.92, 1.1) },

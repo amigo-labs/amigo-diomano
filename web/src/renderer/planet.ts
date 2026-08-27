@@ -22,6 +22,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL, SKY_GLSL } from "./atmosphere";
+import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
 
 /** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
@@ -128,6 +129,8 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uCloudFade;
   uniform float uTier;
   uniform float uWarning;
+  uniform float uTime;
+  uniform float uSurge;
 
   // CC0 surface textures (docs/ASSETS.md). uTexMix is 0 until every map has
   // arrived, so the purely procedural shading below is the fallback, not a
@@ -141,6 +144,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   ${CLOUD_NOISE_GLSL}
   ${SKY_GLSL}
+  ${SURF_GLSL}
 
   // Triplanar sample: the quadsphere has no UV atlas (slope/height texturing
   // exists precisely to avoid one), so textures are projected along the three
@@ -155,6 +159,52 @@ const FRAGMENT_SHADER = /* glsl */ `
     return texture2D(t, p.yz * scale).rgb * w.x
          + texture2D(t, p.xz * scale).rgb * w.y
          + texture2D(t, p.xy * scale).rgb * w.z;
+  }
+
+  /*
+    A surface map, as *structure* rather than as brightness.
+
+    This is the fix for the black ring that had been sitting around every spawn
+    pedestal since the textures landed, and it was never a NaN: the five maps
+    have wildly different mean brightness — measured over the shipped files,
+    rock is 0.092 where sand is 0.551, grass 0.556, dirt 0.409 and snow 0.924 —
+    and the shader multiplied the authored palette by the raw sample times a
+    single constant tuned for the bright ones. Rock therefore came out at about
+    a fifth of the colour §7.3 specifies, and where a fragment was *pure* rock
+    with nothing to blend against, a fifth of a dark palette entry rounded to
+    black. Every rock surface on the planet was affected; the pedestal shelf was
+    just the only place with no other material to hide it.
+
+    So each map is divided by its own mean first, which leaves a field centred
+    on 1.0, and then pulled back toward 1.0 so it modulates the palette instead
+    of competing with it. The clamp bounds what a very dark map's brightest
+    speck can do once it has been scaled up by ten.
+  */
+  const float DIO_TEX_CONTRAST = 0.62;
+
+  /**
+    A surface map at two scales: the material, and its grain.
+
+    A 512-pixel map projected over a whole planet has one texel to a couple of
+    metres of ground, so up close it is a smooth wash and the only structure
+    left is the procedural noise. Sampling the *same* map again seven times
+    finer and folding it in as the camera approaches costs one extra fetch on
+    the close half of the zoom range and nothing at all on the far half, where
+    the branch is not taken — no new asset, no payload, no second set of means
+    to keep in step.
+
+    Both layers are normalised before they meet, so the fine one modulates the
+    coarse one around 1.0 rather than multiplying two absolute brightnesses
+    together and squaring the contrast.
+  */
+  const float DIO_DETAIL_SCALE = 7.0;
+  vec3 dioSurfaceMap(sampler2D t, vec3 p, vec3 nrm, float scale, float invMean, float detail) {
+    vec3 coarse = clamp(dioTriplanar(t, p, nrm, scale) * invMean, 0.22, 2.4);
+    if (detail > 0.004) {
+      vec3 fine = clamp(dioTriplanar(t, p, nrm, scale * DIO_DETAIL_SCALE) * invMean, 0.35, 1.9);
+      coarse *= mix(vec3(1.0), fine, detail * 0.7);
+    }
+    return mix(vec3(1.0), coarse, DIO_TEX_CONTRAST);
   }
 
   // The five materials of world.rs: rock, sand, soil, ash, swamp.
@@ -224,6 +274,13 @@ const FRAGMENT_SHADER = /* glsl */ `
     // grass, high as snow. Avoids UV-mapping a quadsphere entirely.
     float slope = 1.0 - clamp(dot(n, up), 0.0, 1.0);
 
+    // How close the eye is, 0 at orbit and 1 under the hand. Computed here
+    // rather than beside the noise octaves that used to be its only reader:
+    // the surface maps want it too, and sampling a texture needs to know how
+    // close the camera is *before* the sample, not after.
+    float eyeDist = distance(uCameraPosition, vWorld);
+    float detail = 1.0 - smoothstep(0.45, 1.30, eyeDist);
+
     vec4 matW;
     float matSwamp;
     dioMaterialSplat(vAttrib3, up, matW, matSwamp);
@@ -235,21 +292,27 @@ const FRAGMENT_SHADER = /* glsl */ `
     // script (saturated earth, §7.3's ACES note) stays authored, the textures
     // supply what noise octaves cannot: photographic micro-structure. Sampled
     // against the geometric normal, before the bump perturbs it.
-    vec3 tRock = vec3(0.48);
-    vec3 tSand = vec3(0.55);
-    vec3 tGrass = vec3(0.45);
-    vec3 tSnow = vec3(0.9);
+    // Neutral until the maps arrive: dioSurfaceMap returns a modulation around
+    // 1.0, so "no texture yet" is exactly 1.0 and the authored palette stands
+    // on its own. These used to be mid greys because the samples were absolute
+    // brightness rather than a modulation.
+    vec3 tRock = vec3(1.0);
+    vec3 tSand = vec3(1.0);
+    vec3 tGrass = vec3(1.0);
+    vec3 tSnow = vec3(1.0);
     if (uTexMix > 0.001) {
-      tRock = dioTriplanar(uTexRock, vWorld, n, 16.0);
-      tSand = dioTriplanar(uTexSand, vWorld, n, 26.0);
-      tGrass = dioTriplanar(uTexGrass, vWorld, n, 22.0);
-      tSnow = dioTriplanar(uTexSnow, vWorld, n, 18.0);
-      vec3 tDirt = dioTriplanar(uTexDirt, vWorld, n, 20.0);
+      // The reciprocal of each map's own mean colour, measured over the files
+      // in web/public/tex and recorded in docs/ASSETS.md. See dioSurfaceMap.
+      tRock = dioSurfaceMap(uTexRock, vWorld, n, 16.0, 10.90, detail);
+      tSand = dioSurfaceMap(uTexSand, vWorld, n, 26.0, 1.81, detail);
+      tGrass = dioSurfaceMap(uTexGrass, vWorld, n, 22.0, 1.80, detail);
+      tSnow = dioSurfaceMap(uTexSnow, vWorld, n, 18.0, 1.08, detail);
+      vec3 tDirt = dioSurfaceMap(uTexDirt, vWorld, n, 20.0, 2.44, detail);
       // The same weights as the palette, so structure and colour never disagree
       // about which material a fragment is. Soil, ash and swamp all take the
       // dirt map, as they did when this was a step chain on the material id.
       vec3 t = tRock * matW.x + tSand * matW.y + tDirt * (matW.z + matW.w + matSwamp);
-      albedo *= mix(vec3(1.0), t * 2.1, uTexMix);
+      albedo *= mix(vec3(1.0), t, uTexMix);
     }
 
     // Multi-octave ground grain, and a bump from the same field so the
@@ -264,8 +327,6 @@ const FRAGMENT_SHADER = /* glsl */ `
     // with proximity (and only cost anything when the branch is taken); the
     // fade keeps them from shimmering at orbit distance, where a texel would
     // cover many noise cells.
-    float eyeDist = distance(uCameraPosition, vWorld);
-    float detail = 1.0 - smoothstep(0.45, 1.30, eyeDist);
     float mid = dioNoise(up * 230.0);
     float mc = 0.5;
     float micro = 0.5;
@@ -324,9 +385,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // is what stops a green area reading as a decal.
     float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 52.0) * 0.65 + fert * 0.35);
     // Grass keeps its authored hue and takes only the texture's *luminance*
-    // as structure: green photo times green palette oversaturates.
+    // as structure: green photo times green palette oversaturates. The gain is
+    // gone with the rest of them — dioSurfaceMap already centres the map on
+    // 1.0, so a second brightening here would double-count it.
     float gLum = dot(tGrass, vec3(0.299, 0.587, 0.114));
-    vec3 grassCol = mix(dryGrass, meadow, meadowPatch) * mix(1.0, gLum * 2.3, uTexMix);
+    vec3 grassCol = mix(dryGrass, meadow, meadowPatch) * mix(1.0, gLum, uTexMix);
     albedo = mix(albedo, grassCol, grassMask * 0.90);
     albedo = mix(albedo, canopy, veg * above * (1.0 - beach) * 0.95);
     albedo = mix(albedo, vec3(0.48, 0.40, 0.24), vAttrib2.b * 0.30);
@@ -346,14 +409,29 @@ const FRAGMENT_SHADER = /* glsl */ `
     float snow = smoothstep(0.032, 0.050, vAltitude) * (1.0 - smoothstep(0.2, 0.5, slope));
     vec3 snowCol =
       mix(vec3(0.62, 0.70, 0.84), vec3(0.93, 0.95, 0.98), clamp(0.25 + grain * 0.7 + (micro - 0.5) * 0.5 * detail, 0.0, 1.0));
-    snowCol *= mix(1.0, dot(tSnow, vec3(0.299, 0.587, 0.114)) * 1.35, uTexMix);
+    snowCol *= mix(1.0, dot(tSnow, vec3(0.299, 0.587, 0.114)), uTexMix);
     albedo = mix(albedo, snowCol, snow);
 
     vec3 beachSand = vec3(0.78, 0.64, 0.38);
     vec3 wetSand = vec3(0.52, 0.40, 0.24);
     vec3 beachCol = mix(beachSand, wetSand, 1.0 - smoothstep(0.0, 0.003, vAltitude));
-    beachCol *= mix(1.0, dot(tSand, vec3(0.299, 0.587, 0.114)) * 1.9, uTexMix);
+    beachCol *= mix(1.0, dot(tSand, vec3(0.299, 0.587, 0.114)), uTexMix);
     albedo = mix(albedo, beachCol, beach);
+
+    // The landward half of the surf. dioSurf is the *same* function the water
+    // shader evaluates on the seaward side, over the same signed coordinate —
+    // height units below the current sea level — so a set that breaks offshore
+    // is the one that runs up this sand. Two private phases would have put a
+    // white line on a beach that was already wet, which reads as a lighting bug
+    // rather than as the copy-paste it would be. See surf.ts.
+    //
+    // vAltitude is in radii; HEIGHT_TO_RADIUS is 8e-5, so 12500 converts back.
+    float swash = dioSurf(-vAltitude * 12500.0, uTime, uSurge, dioNoise(up * 240.0) * 2.0 - 1.0);
+    swash *= beach;
+    // Wet sand first — the water arrives before the foam does — then the foam
+    // edge on top of it.
+    albedo = mix(albedo, wetSand * 0.86, swash * 0.65);
+    albedo = mix(albedo, vec3(0.90, 0.94, 0.96), smoothstep(0.45, 0.95, swash) * 0.75);
 
     // Standing water darkens the ground it sits on. Not a cyan wash.
     albedo *= 1.0 - clamp(vAttrib.a * 4.0, 0.0, 1.0) * 0.35;
@@ -412,7 +490,9 @@ const FRAGMENT_SHADER = /* glsl */ `
     // and grass is the other precise signature of plastic, which is why there
     // is deliberately none.
     float wet = beach * (1.0 - smoothstep(0.0, 0.003, vAltitude));
-    float glossMask = snow * 0.30 + wet * 0.35;
+    // The gloss follows the water up the beach rather than sitting at a fixed
+    // altitude: a wet band that never moves is the tell that it is painted on.
+    float glossMask = snow * 0.30 + max(wet, swash) * 0.35;
     if (glossMask > 0.001) {
       vec3 h = normalize(uSunDirection + viewDir);
       float spec = pow(max(dot(n, h), 0.0), 56.0) * lambert;
@@ -506,6 +586,8 @@ export function createPlanet(sim: Sim, view: View): Planet {
       uSunDirection: view.sunDirection,
       uCameraPosition: view.cameraPosition,
       uCloudTime: view.cloudTime,
+      uTime: view.time,
+      uSurge: view.surge,
       uCloudFade: view.cloudFade,
       uWarning: view.warning,
       uSeaRadius: { value: BASE_RADIUS },

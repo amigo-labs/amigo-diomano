@@ -535,6 +535,8 @@ pub fn parse_manifest(src: &str) -> Result<MapConfig, ParseError> {
                     "telegraph_ticks" => cfg.telegraph_ticks = v.clamp(1, 100_000) as u32,
                     "impact_ticks" => cfg.impact_ticks = v.clamp(1, 100_000) as u32,
                     "recovery_ticks" => cfg.recovery_ticks = v.clamp(1, 100_000) as u32,
+                    "lull_ticks" => cfg.lull_ticks = v.clamp(1, 100_000) as u32,
+                    "land_bridge" => cfg.land_bridge = u8::from(v != 0),
                     "escalation" => cfg.escalation = v.clamp(100, 1000) as u16,
                     "strength" => cfg.wave_strength = v.clamp(0, 4096) as i16,
                     _ => return Err(err(line_no, "unknown key in [mode.tide]")),
@@ -616,12 +618,32 @@ pub fn parse_log_header(src: &str) -> Result<LogHeader, ParseError> {
                 }
             }
             "terrain" => cfg.terrain = v.clamp(0, 2) as u8,
+            // The tide, recorded in the log rather than inherited from
+            // `MapConfig::DEFAULT`.
+            //
+            // It used not to be, and that made every fixture silently dependent
+            // on a constant nobody thought of as part of the recording: retuning
+            // the tide invalidated ten corpus matches that had nothing to do
+            // with the tide. A log that states its own tide replays to its own
+            // hashes whatever the shipped defaults become, and it is also what
+            // lets the corpus run a *fast* tide so that twenty thousand ticks
+            // still cover telegraph, impact and recovery at a cadence where one
+            // real wave is twenty-seven thousand ticks apart.
             "waves" => cfg.waves = v.clamp(1, crate::world::MAX_WAVES as i64) as u8,
+            "telegraph_ticks" => cfg.telegraph_ticks = v.clamp(1, 100_000) as u32,
+            "impact_ticks" => cfg.impact_ticks = v.clamp(1, 100_000) as u32,
+            "recovery_ticks" => cfg.recovery_ticks = v.clamp(1, 100_000) as u32,
+            "lull_ticks" => cfg.lull_ticks = v.clamp(1, 100_000) as u32,
+            "escalation" => cfg.escalation = v.clamp(100, 1000) as u16,
+            "strength" => cfg.wave_strength = v.clamp(0, 4096) as i16,
             "ai" => cfg.ai_enabled = u8::from(v != 0),
             // Keep simulating past the decided outcome. Corpus logs set this:
             // a default match decides around tick 10,000 and a frozen second
             // half would gut the §6.3 coverage. Real matches freeze.
             "endless" => cfg.endless = u8::from(v != 0),
+            // The §6.3 corpus's land bridge. Off everywhere else; see
+            // `MapConfig::land_bridge`.
+            "land_bridge" => cfg.land_bridge = u8::from(v != 0),
             // Bitmask over the power ids: bit `i` enables power `i`.
             //
             // Here because §6.3 asks a corpus to cover every verb at least 20

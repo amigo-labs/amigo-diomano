@@ -17,6 +17,7 @@
 import * as THREE from "three";
 import type { OrbitCamera } from "./camera";
 import type { Sim } from "./main";
+import { mergeGeometries, withTransform } from "./renderer/geometry";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirection, pickCell } from "./renderer/planet";
 import { MOD, POWER, VERB, readModifier } from "./verbs";
 
@@ -75,23 +76,117 @@ export function createHand(
 ): Hand {
   const group = new THREE.Group();
 
-  // The hand itself: a soft sphere that fills with what it carries. Not a
-  // pointer icon — the player's whole read of "how much am I holding" is this.
-  const palm = new THREE.Mesh(
-    new THREE.SphereGeometry(1, 24, 16),
-    // `depthWrite: false` is load-bearing. The palm is a transparent shell with
-    // the fill sphere strictly inside it; three sorts two transparent meshes at
-    // the same position by creation order, so the palm drew first, wrote its
-    // front-face depth, and the fill failed the depth test entirely. The one
-    // diegetic readout §4.2 asks for — how much matter am I holding — was being
-    // z-rejected by its own container.
-    new THREE.MeshBasicMaterial({
-      color: 0xfff0d8,
-      transparent: true,
-      opacity: 0.28,
-      depthWrite: false,
+  // The hand itself.
+  //
+  // It used to be a sphere, and a sphere is a perfectly good matter gauge and
+  // not a hand: the game is called `dio` + `mano` and its whole interface is
+  // supposed to be one. So: a palm with four fingers and a thumb, built out of
+  // boxes and merged into **two** meshes rather than eleven, which is what lets
+  // it grip for one extra draw call instead of ten.
+  //
+  // The split is the knuckle line. Everything proximal to it — palm, thumb
+  // base, the first segment of each finger — never moves relative to the wrist,
+  // so it is one static mesh. Everything distal is a second mesh whose origin
+  // *is* the knuckle line, so rotating that one group about its local X closes
+  // every fingertip at once. A hand curling is very nearly a single hinge.
+  const HAND = {
+    /** Palm: wider than it is long, and thin. Seen from above, that reads. */
+    palm: [0.9, 0.22, 0.8] as const,
+    /** Fingers, as [lateral offset, proximal length, distal length, splay]. */
+    fingers: [
+      [-0.33, 0.3, 0.26, -0.2],
+      [-0.11, 0.34, 0.3, -0.06],
+      [0.11, 0.33, 0.29, 0.06],
+      [0.31, 0.28, 0.23, 0.2],
+    ] as const,
+    thickness: 0.15,
+  };
+  /** Where the knuckles are, in local units: the palm's leading edge. */
+  const KNUCKLE_Z = -HAND.palm[2] / 2;
+
+  const proximalParts: THREE.BufferGeometry[] = [];
+  const distalParts: THREE.BufferGeometry[] = [];
+
+  proximalParts.push(
+    withTransform(new THREE.BoxGeometry(HAND.palm[0], HAND.palm[1], HAND.palm[2]), (g) => {
+      // A cupped palm: the heel sits a little lower than the knuckles, which is
+      // most of what stops a box reading as a box.
+      g.rotateX(-0.12);
     }),
   );
+  for (const [offset, proximal, distal, splay] of HAND.fingers) {
+    // The proximal segment runs forward from the knuckle line, splayed.
+    proximalParts.push(
+      withTransform(new THREE.BoxGeometry(HAND.thickness, HAND.thickness * 0.85, proximal), (g) => {
+        g.translate(0, 0, -proximal / 2);
+        g.rotateY(splay);
+        g.translate(offset, 0.01, KNUCKLE_Z);
+      }),
+    );
+    // The distal segment is authored *relative to the knuckle line*, because
+    // that is where its group's origin will be.
+    distalParts.push(
+      withTransform(
+        new THREE.BoxGeometry(HAND.thickness * 0.86, HAND.thickness * 0.72, distal),
+        (g) => {
+          g.translate(0, 0, -distal / 2);
+          g.rotateY(splay);
+          g.translate(offset, 0.01, -proximal);
+        },
+      ),
+    );
+  }
+  // The thumb, off the side and angled forward — the one part that makes a hand
+  // read as a hand rather than as a mitten.
+  proximalParts.push(
+    withTransform(new THREE.BoxGeometry(HAND.thickness * 1.15, HAND.thickness, 0.34), (g) => {
+      g.translate(0, 0, -0.17);
+      g.rotateY(0.95);
+      g.translate(-HAND.palm[0] / 2 + 0.04, 0.0, KNUCKLE_Z + 0.3);
+    }),
+  );
+  distalParts.push(
+    withTransform(new THREE.BoxGeometry(HAND.thickness, HAND.thickness * 0.8, 0.26), (g) => {
+      g.translate(0, 0, -0.13);
+      g.rotateY(0.95);
+      g.translate(-HAND.palm[0] / 2 + 0.04, 0.0, KNUCKLE_Z + 0.3 - 0.34);
+      // Back into knuckle-relative space, like the fingers.
+      g.translate(0, 0, -KNUCKLE_Z);
+    }),
+  );
+
+  // `depthWrite: false` is load-bearing, and was before the hand had fingers.
+  // The hand is a translucent shell with the fill strictly inside it; three
+  // sorts two transparent meshes at the same position by creation order, so the
+  // shell drew first, wrote its front-face depth, and the fill failed the depth
+  // test entirely. The one diegetic readout §4.2 asks for — how much matter am
+  // I holding — was being z-rejected by its own container.
+  // Lit, not flat.
+  //
+  // The sphere this replaced was a `MeshBasicMaterial`, and unlit was right for
+  // a sphere: a sphere has one silhouette and no interior form to describe. A
+  // hand is nothing *but* interior form, and five flat-shaded boxes at one
+  // uniform colour composite into a single pale trapezoid — the first build of
+  // this read as a plate, not as a hand, and no amount of resizing fixed it.
+  //
+  // Lambert against the scene's own sun carves the palm from the fingers.
+  // `emissive` keeps the floor up so the hand never goes dark against dark
+  // ground, which is what unlit was protecting; the mana glow rides on the
+  // emissive rather than on the opacity now.
+  const skin = new THREE.MeshLambertMaterial({
+    color: 0xffe6c2,
+    emissive: new THREE.Color(0xfff0d8),
+    transparent: true,
+    opacity: 0.62,
+    depthWrite: false,
+  });
+  const palm = new THREE.Mesh(mergeGeometries(proximalParts), skin);
+  const knuckles = new THREE.Group();
+  const distal = new THREE.Mesh(mergeGeometries(distalParts), skin);
+  knuckles.position.set(0, 0, KNUCKLE_Z);
+  knuckles.add(distal);
+  palm.add(knuckles);
+
   const fill = new THREE.Mesh(
     new THREE.SphereGeometry(1, 20, 14),
     new THREE.MeshBasicMaterial({ color: 0xc9a06a, transparent: true, opacity: 0.85 }),
@@ -269,6 +364,13 @@ export function createHand(
 
   const position = new THREE.Vector3();
   const targetPosition = new THREE.Vector3();
+  /** Scratch for the hand's basis, hoisted off the frame loop. */
+  const reach = new THREE.Vector3();
+  const handX = new THREE.Vector3();
+  const handZ = new THREE.Vector3();
+  const handBasis = new THREE.Matrix4();
+  /** How closed the fingers are, 0 open to 1 fist. Eased in `sync`. */
+  let grip = 0;
   /** `RingGeometry` lies in the XY plane, so its normal is +Z. Hoisted. */
   const ringNormal = new THREE.Vector3(0, 0, 1);
   /** Scratch for the mote orbit, hoisted off the frame loop. */
@@ -325,15 +427,54 @@ export function createHand(
       // cell centres — the only place `alpha` is used, and purely cosmetic.
       position.lerp(targetPosition, 0.25 + alpha * 0.25);
       palm.position.copy(position);
-      fill.position.copy(position);
 
       const cellScale = (Math.PI * 0.5 * BASE_RADIUS) / sim.N;
-      palm.scale.setScalar(cellScale * 1.5);
+      // Wider than the sphere it replaced. A sphere of radius 1.5 cells reads
+      // at that size; a palm 0.9 units across at the same scale is barely a
+      // cell wide, and a hand you cannot see is not an interface.
+      palm.scale.setScalar(cellScale * 2.2);
+
+      // Which way the hand points.
+      //
+      // A sphere needed no answer to this; a hand does, and "along the surface
+      // normal" is only two thirds of one. The fingers reach *away from the
+      // viewer*, so the hand is always seen from the back and never from the
+      // fingertips — which is the one angle at which a hand reads as a hand
+      // rather than as a cluster of boxes.
+      //
+      // Built as an explicit basis rather than a `setFromUnitVectors` plus a
+      // corrective spin: local +Y is the surface normal, local -Z is the view
+      // direction flattened into the tangent plane, and local X completes a
+      // right-handed set. Degenerate only where the view ray is exactly the
+      // normal — looking straight down the hand's own axis — and there the
+      // fallback keeps the previous heading rather than snapping.
+      reach.copy(position).sub(camera.camera.position);
+      reach.addScaledVector(dir, -reach.dot(dir)).normalize();
+      if (reach.lengthSq() > 0.25) {
+        handZ.copy(reach).negate();
+        handX.crossVectors(dir, handZ).normalize();
+        handBasis.makeBasis(handX, dir, handZ);
+        palm.quaternion.setFromRotationMatrix(handBasis);
+      }
 
       // How full the hand is, straight from the simulation. This is the matter
-      // budget of pillar 4, shown as a volume rather than as a number.
+      // budget of pillar 4, shown as a volume rather than as a number — and now
+      // it is held *in the palm*, which is where a hand holds things.
       const carried = sim.e.dio_hand_amount(player) / sim.e.dio_hand_capacity();
-      fill.scale.setScalar(cellScale * 1.5 * Math.cbrt(Math.max(carried, 0.001)));
+      const held = Math.cbrt(Math.max(carried, 0.001));
+      fill.position.copy(position).addScaledVector(dir, cellScale * 0.1);
+      fill.scale.setScalar(cellScale * 0.62 * held);
+
+      // The grip. Closed while the hand is working and in proportion to what it
+      // holds, open when it is not — the same information the fill already
+      // carries, in the shape of the thing carrying it, which is what §4.2 means
+      // by diegetic. Eased rather than set, so a drag does not snap the fingers.
+      // Never quite flat, even at rest: a hand with straight fingers is a
+      // paddle, and the resting curl is what gives the fingertips a silhouette
+      // of their own from directly above.
+      const wanted = dragging ? 1.0 : 0.16 + carried * 0.6;
+      grip += (wanted - grip) * (0.18 + alpha * 0.12);
+      knuckles.rotation.x = -grip * 1.15;
       const material = sim.e.dio_hand_material(player);
       const mat = fill.material as THREE.MeshBasicMaterial;
       mat.color.setHex(material === 1 ? 0x4fa8d8 : material === 2 ? 0xff6a2a : 0xc9a06a);
@@ -348,14 +489,23 @@ export function createHand(
       const mana = sim.e.dio_mana(player);
       const glow = Math.min(Math.sqrt(mana / pulseThreshold), 1);
       const pulse = mana >= pulseThreshold ? Math.sin(now / 240) * 0.06 : 0;
-      const palmMat = palm.material as THREE.MeshBasicMaterial;
+      const palmMat = palm.material as THREE.MeshLambertMaterial;
       if (now < flashUntil) {
         // The refusal: a dull red dip, unmistakably "no" without a toast.
-        palmMat.color.setHex(0xb03a2a);
-        palmMat.opacity = 0.55;
+        palmMat.color.setHex(0x8f2c1e);
+        palmMat.emissive.setHex(0xb03a2a);
+        palmMat.opacity = 0.72;
       } else {
-        palmMat.color.setHex(0xfff0d8);
-        palmMat.opacity = 0.18 + glow * 0.5 + pulse;
+        palmMat.color.setHex(0xffe6c2);
+        // The mana glow rides the emissive floor rather than the opacity: a
+        // hand made of thin boxes needs its *shape* at every mana level, and
+        // fading the shape out to show a low balance costs more than it says.
+        palmMat.emissive.setRGB(
+          0.3 + glow * 0.55 + pulse,
+          0.28 + glow * 0.5 + pulse,
+          0.24 + glow * 0.42 + pulse,
+        );
+        palmMat.opacity = 0.62 + glow * 0.2;
       }
 
       // Collected pickup charges orbit the palm.

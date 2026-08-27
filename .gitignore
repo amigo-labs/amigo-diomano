@@ -5,3 +5,4 @@ web/public/diomano.wasm
 web/public/*.wasm
 *.log.tmp
 .DS_Store
+web/screenshots

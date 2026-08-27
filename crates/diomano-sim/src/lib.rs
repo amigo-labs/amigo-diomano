@@ -51,6 +51,7 @@ pub mod mesh;
 pub mod powers;
 pub mod seams;
 pub mod settlements;
+pub mod tectonics;
 pub mod tide;
 pub mod walkers;
 pub mod water;

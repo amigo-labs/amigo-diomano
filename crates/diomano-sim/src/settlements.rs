@@ -783,7 +783,9 @@ pub fn seed_starting_positions(w: &mut World) {
         w.settlement_count = w.settlement_count.saturating_add(1);
         carve_spawn_pedestal(w, face, cx as i32, cy as i32, platform);
     }
-    carve_contact_corridor(w);
+    if w.cfg.land_bridge != 0 {
+        carve_contact_corridor(w);
+    }
     w.ghost_copy_all();
     detect_plateaus(w);
 }
@@ -1019,11 +1021,23 @@ mod tests {
         update(&mut w); // must not panic looking for a free slot
     }
 
-    /// The load-bearing playability assertion: whatever the terrain noise
-    /// does, a land path between the two spawns exists from tick zero. If this
-    /// fails, the two peoples cannot meet and the game has no war in it.
+    /// The corpus's land bridge does connect the spawns, on every terrain and
+    /// seed it is asked for.
+    ///
+    /// This used to assert the same thing about the *shipped* map, and it was
+    /// the load-bearing playability assertion. It is not any more: by user
+    /// decision the corridor is gone from real matches, because a ridge running
+    /// half the planet's circumference between the two starts was the most
+    /// artificial thing in the world. Two peoples on separate islands is now a
+    /// legal opening and raising the land between them is the player's job —
+    /// which is, after all, the verb the game is about.
+    ///
+    /// What still has to hold is that each spawn is *playable*, and that is
+    /// asserted by `spawns_hold_influence_on_every_terrain_and_seed` and by
+    /// `terrain_profiles_produce_playable_land`, neither of which needs the two
+    /// to be joined.
     #[test]
-    fn spawns_are_connected_at_tick_zero() {
+    fn the_land_bridge_connects_the_spawns() {
         for terrain in [
             crate::world::TERRAIN_ARCHIPELAGO,
             crate::world::TERRAIN_PANGAEA,
@@ -1033,6 +1047,7 @@ mod tests {
                 let mut cfg = MapConfig::DEFAULT;
                 cfg.terrain = terrain;
                 cfg.seed = seed;
+                cfg.land_bridge = 1;
                 let mut w = World::boxed();
                 w.init(&cfg);
 
@@ -1055,7 +1070,10 @@ mod tests {
                         }
                     }
                 }
-                assert!(reached, "spawns disconnected on terrain {terrain} seed {seed:#x}");
+                assert!(
+                    reached,
+                    "the land bridge does not connect the spawns on terrain {terrain} seed {seed:#x}"
+                );
             }
         }
     }
@@ -1063,7 +1081,7 @@ mod tests {
     #[test]
     fn the_causeway_floods_at_wave_peak_and_reopens() {
         let mut w = World::boxed();
-        w.init(&MapConfig::DEFAULT);
+        w.init(&MapConfig { land_bridge: 1, ..MapConfig::DEFAULT });
 
         let peak = crate::tide::wave_strength(&w, 0);
         // The whole crest band sits under every wave peak and its lowest dry
@@ -1096,7 +1114,7 @@ mod tests {
     #[test]
     fn the_causeway_is_passable_and_unsettleable() {
         let mut w = World::boxed();
-        w.init(&MapConfig::DEFAULT);
+        w.init(&MapConfig { land_bridge: 1, ..MapConfig::DEFAULT });
         let mut carved_ocean = 0usize;
         for i in 0..CORRIDOR_STEPS {
             let (face, x, y) = corridor_cell(i);
@@ -1123,7 +1141,7 @@ mod tests {
         // would hand a player a build site in the middle of the one road.
         for seed in [0x5EEDu32, 1, 7, 99] {
             let mut w = World::boxed();
-            w.init(&MapConfig { seed, ..MapConfig::DEFAULT });
+            w.init(&MapConfig { seed, land_bridge: 1, ..MapConfig::DEFAULT });
             for face in 0..6usize {
                 for y in 0..N {
                     for x in 0..N {
@@ -1150,7 +1168,22 @@ mod tests {
     #[test]
     fn the_causeway_survives_the_early_game() {
         let mut w = World::boxed();
-        w.init(&MapConfig::DEFAULT);
+        // The corpus's tide as well as its bridge. The shipped cadence is a
+        // wave every fifteen minutes, so "two full tide cycles" on it is 54,000
+        // ticks of simulation to assert something about erosion — and the
+        // bridge only exists in the corpus configuration anyway, so testing it
+        // under the corpus's own tide is both faster and more honest.
+        //
+        // 3,600 ticks is exactly lull + two cycles at these numbers, which is
+        // why the sample below lands between waves.
+        w.init(&MapConfig {
+            land_bridge: 1,
+            telegraph_ticks: 300,
+            impact_ticks: 150,
+            recovery_ticks: 900,
+            lull_ticks: 900,
+            ..MapConfig::DEFAULT
+        });
         for _ in 0..3_600 {
             w.tick(&[]);
         }

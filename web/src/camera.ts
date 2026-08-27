@@ -125,8 +125,6 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   let zoomAnchorX = 0;
   let zoomAnchorY = 0;
 
-  const PITCH_LIMIT = Math.PI * 0.49;
-
   const onPointerDown = (ev: PointerEvent): void => {
     // Any press ends the intro tour — the player's intent wins.
     introActive = false;
@@ -150,7 +148,18 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
     // amount of ground at every zoom level.
     const rate = (DRAG_SENSITIVITY * distance) / DEFAULT_DISTANCE;
     targetYaw -= (ev.clientX - lastX) * rate;
-    targetPitch = clamp((ev.clientY - lastY) * rate + targetPitch, -PITCH_LIMIT, PITCH_LIMIT);
+    // Unclamped, in both axes. There used to be a 0.49pi pitch limit, and it
+    // meant that dragging north eventually just *stopped*: a globe you cannot
+    // walk over the top of. What the limit was really guarding was the
+    // `lookAt` basis going degenerate at the pole, and that has since been
+    // fixed properly — `camera.up` is `northish`, built as `eye x east`, which
+    // is well-conditioned at every pitch including exactly at the pole.
+    //
+    // Past the pole the horizon flips, and that is not a bug: on a real globe,
+    // carrying on north over the pole leaves you facing south down the far
+    // side. Yaw has always been free to wind without bound; pitch now is too,
+    // and for the same reason it was never a problem there.
+    targetPitch += (ev.clientY - lastY) * rate;
     lastX = ev.clientX;
     lastY = ev.clientY;
   };
@@ -179,7 +188,7 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
       const halfWidth = halfHeight * camera.aspect;
       const gain = closer * 0.6;
       targetYaw += zoomAnchorX * halfWidth * gain;
-      targetPitch = clamp(targetPitch + zoomAnchorY * halfHeight * gain, -PITCH_LIMIT, PITCH_LIMIT);
+      targetPitch += zoomAnchorY * halfHeight * gain;
     }
   };
 
@@ -296,7 +305,7 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
     },
 
     aimAt(dir: THREE.Vector3, immediate: boolean): void {
-      const { yaw: toYaw, pitch: toPitch } = anglesFor(dir, targetYaw);
+      const { yaw: toYaw, pitch: toPitch } = anglesFor(dir, targetYaw, targetPitch);
       targetYaw = toYaw;
       targetPitch = toPitch;
       if (immediate) {
@@ -306,7 +315,7 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
     },
 
     intro(dir: THREE.Vector3, durationMs: number): void {
-      const { yaw: toYaw, pitch: toPitch } = anglesFor(dir, yaw);
+      const { yaw: toYaw, pitch: toPitch } = anglesFor(dir, yaw, pitch);
       introFromYaw = yaw;
       introFromPitch = pitch;
       introToYaw = toYaw;
@@ -323,17 +332,44 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
 }
 
 /**
- * Orbit angles that put the camera over `dir`, with the yaw expressed as the
- * equivalent nearest `referenceYaw` — otherwise a pan can take the long way
+ * Orbit angles that put the camera over `dir`, expressed as the equivalent
+ * nearest where the camera already is — otherwise a pan takes the long way
  * around the planet.
+ *
+ * Both angles need it now that pitch is unbounded. A direction has *two*
+ * spherical addresses, `(yaw, pitch)` and `(yaw + pi, pi - pitch)`, and they
+ * are the same place seen from opposite headings; `asin` only ever produces
+ * the first. After a drag over the pole the camera is living on the second,
+ * and aiming at anything would have unwound a whole hemisphere to get back to
+ * the branch `asin` likes. So both candidates are unwrapped toward the current
+ * angles and the nearer one wins.
  */
-function anglesFor(dir: THREE.Vector3, referenceYaw: number): { yaw: number; pitch: number } {
-  const pitch = Math.asin(clamp(dir.y, -1, 1));
-  let yaw = Math.atan2(dir.x, dir.z);
+function anglesFor(
+  dir: THREE.Vector3,
+  referenceYaw: number,
+  referencePitch: number,
+): { yaw: number; pitch: number } {
+  const basePitch = Math.asin(clamp(dir.y, -1, 1));
+  const baseYaw = Math.atan2(dir.x, dir.z);
+  const a = unwrapTo(baseYaw, referenceYaw, basePitch, referencePitch);
+  const b = unwrapTo(baseYaw + Math.PI, referenceYaw, Math.PI - basePitch, referencePitch);
+  const costA = Math.abs(a.yaw - referenceYaw) + Math.abs(a.pitch - referencePitch);
+  const costB = Math.abs(b.yaw - referenceYaw) + Math.abs(b.pitch - referencePitch);
+  return costA <= costB ? a : b;
+}
+
+/** Both angles shifted by whole turns to sit within half a turn of the reference. */
+function unwrapTo(
+  yaw: number,
+  referenceYaw: number,
+  pitch: number,
+  referencePitch: number,
+): { yaw: number; pitch: number } {
   const twoPi = Math.PI * 2;
-  while (yaw - referenceYaw > Math.PI) yaw -= twoPi;
-  while (referenceYaw - yaw > Math.PI) yaw += twoPi;
-  return { yaw, pitch };
+  return {
+    yaw: yaw + twoPi * Math.round((referenceYaw - yaw) / twoPi),
+    pitch: pitch + twoPi * Math.round((referencePitch - pitch) / twoPi),
+  };
 }
 
 /**

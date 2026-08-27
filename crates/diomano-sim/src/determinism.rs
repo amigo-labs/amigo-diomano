@@ -287,6 +287,10 @@ fn tick_order_is_the_order_the_spec_lists() {
     cfg.telegraph_ticks = 1;
     cfg.impact_ticks = 4;
     cfg.recovery_ticks = 1;
+    // The opening calm too, or the whole forty-tick window is spent in it: the
+    // shipped lull is ninety seconds and this test needs a wave inside forty
+    // ticks.
+    cfg.lull_ticks = 1;
     cfg.wave_strength = 2000;
     let mut w = World::boxed();
     w.init(&cfg);

@@ -152,7 +152,26 @@ one tick to the next, and `chunk_content_hash` is doing exactly its job. Worth
 knowing before anyone reads the +21% as a meshing regression and goes looking
 for it in `build_chunk`.
 
-That is up from 0.60 ms, and the increase bought two things: the corner grid the
+**Re-measured again** after the domain warp and the third smoothing pass (see
+`docs/specs/world.md`): **35.0 chunks/tick at 2.662 ms**, 12.7% of the render
+half. This time the per-chunk cost *is* what moved — the chunk count went down
+slightly — and it moved for a known reason: `corner_height` now samples the dual
+grid bilinearly at a warped position, which is four evaluations of the four-cell
+average where it used to be one, and there is a third smoothing pass over the
+whole field on top.
+
+That is the price of a world that does not look like it is made of cells, it is
+paid once per changed chunk rather than per frame, and it leaves the render half
+with 18 ms. If it ever needs winning back, the warp is a pure function of the
+cube point and could be precomputed per corner into a table — the reason it is
+not is that a table of two floats per corner is 1.6 MB and the budget it would
+spend is the one thing this project measures more carefully than time.
+
+Simulation, over the same session: **1.47 ms/tick, 12.2% of the 12 ms budget**,
+against 1.51 ms before the geology. The plate and erosion work is all in `init`,
+so it costs nothing per tick.
+
+The first figure above is up from 0.60 ms, and that increase bought two things: the corner grid the
 normal pass needs (a second evaluation of the dual-grid average per vertex, which
 is what makes chunk-border normals agree) and the `attribs2` channel (lava,
 fertility, sediment). Both are features rather than waste. Two candidate savings
@@ -220,12 +239,25 @@ Two further consequences of tilting:
 
 ### Controls
 
-- **Right or middle drag orbits, until a spiral arms gesture mode.** `verbs.md`
-  always said "middle or right drag *(no spiral)* | orbit the planet"; nothing
-  implemented the qualifier, so both the camera and the recogniser consumed the
-  same stroke — every gesture spun the planet underneath a path being matched in
-  *screen* space. The recogniser now publishes an armed flag and the camera drops
-  the stroke when it goes up.
+- **Right or middle drag orbits; a right *click* opens the power menu.** The
+  qualifier this bullet used to carry ("until a spiral arms gesture mode") is
+  gone with the recogniser it referred to: there is no gesture mode to arm, and
+  the drag/click split is the same 5 px, 400 ms test the left button uses for the
+  magnet.
+- **The orbit is unbounded in both axes.** There used to be a 0.49pi pitch clamp,
+  which meant that dragging north eventually just *stopped* — a globe you could
+  not walk over the top of. What it was really guarding was the `lookAt` basis
+  going degenerate at the pole, and `camera.up = northish` (built as
+  `eye x east`, perpendicular to `eye` by construction) fixed that properly. Past
+  the pole the horizon flips, and that is correct rather than broken: carrying on
+  north over the pole leaves you facing south down the far side. Yaw had always
+  been free to wind without bound; pitch now is too.
+
+  A direction therefore has *two* orbit addresses — `(yaw, pitch)` and
+  `(yaw + pi, pi - pitch)`, the same place from opposite headings — and `asin`
+  only ever produces the first. `anglesFor` unwraps both toward where the camera
+  already is and takes the nearer, or aiming at anything after a pole crossing
+  would unwind a whole hemisphere to get back to the branch `asin` likes.
 - **Drag sensitivity scales with distance.** A fixed radians-per-pixel rate moves
   far more ground per pixel up close; the planet tore past at 1.35 R and crawled
   at 4.2 R.
