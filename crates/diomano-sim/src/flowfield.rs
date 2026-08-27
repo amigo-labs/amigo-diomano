@@ -524,13 +524,20 @@ mod tests {
         }
     }
 
-    /// The war depends on this: a magnet dropped on the enemy's spawn plateau
-    /// must be reachable from the *other* spawn through the contact corridor,
-    /// in the magnet component (not the fallback), on the shipped default map.
+    /// A magnet dropped on the enemy's spawn plateau is reachable from the
+    /// *other* spawn over a land bridge, in the magnet component rather than
+    /// the fallback.
+    ///
+    /// On the shipped map there is no bridge any more (see
+    /// `MapConfig::land_bridge`), and two peoples on separate islands is a
+    /// legal opening — the flow field falling back is then the correct answer,
+    /// not a defect. What this pins is the other half: that when a route
+    /// *does* exist, however it came to exist, the field finds it and the army
+    /// walks it.
     #[test]
-    fn a_magnet_on_the_enemy_spawn_is_reachable_over_the_causeway() {
+    fn a_magnet_on_the_enemy_spawn_is_reachable_over_a_land_bridge() {
         let mut w = World::boxed();
-        w.init(&MapConfig::DEFAULT);
+        w.init(&MapConfig { land_bridge: 1, ..MapConfig::DEFAULT });
         let (f0, x0, y0) = crate::settlements::STARTS[0];
         let (f1, x1, y1) = crate::settlements::STARTS[1];
         w.magnet[1] = crate::world::Magnet {

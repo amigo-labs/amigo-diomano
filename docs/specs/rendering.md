@@ -220,12 +220,25 @@ Two further consequences of tilting:
 
 ### Controls
 
-- **Right or middle drag orbits, until a spiral arms gesture mode.** `verbs.md`
-  always said "middle or right drag *(no spiral)* | orbit the planet"; nothing
-  implemented the qualifier, so both the camera and the recogniser consumed the
-  same stroke — every gesture spun the planet underneath a path being matched in
-  *screen* space. The recogniser now publishes an armed flag and the camera drops
-  the stroke when it goes up.
+- **Right or middle drag orbits; a right *click* opens the power menu.** The
+  qualifier this bullet used to carry ("until a spiral arms gesture mode") is
+  gone with the recogniser it referred to: there is no gesture mode to arm, and
+  the drag/click split is the same 5 px, 400 ms test the left button uses for the
+  magnet.
+- **The orbit is unbounded in both axes.** There used to be a 0.49pi pitch clamp,
+  which meant that dragging north eventually just *stopped* — a globe you could
+  not walk over the top of. What it was really guarding was the `lookAt` basis
+  going degenerate at the pole, and `camera.up = northish` (built as
+  `eye x east`, perpendicular to `eye` by construction) fixed that properly. Past
+  the pole the horizon flips, and that is correct rather than broken: carrying on
+  north over the pole leaves you facing south down the far side. Yaw had always
+  been free to wind without bound; pitch now is too.
+
+  A direction therefore has *two* orbit addresses — `(yaw, pitch)` and
+  `(yaw + pi, pi - pitch)`, the same place from opposite headings — and `asin`
+  only ever produces the first. `anglesFor` unwraps both toward where the camera
+  already is and takes the nearer, or aiming at anything after a pole crossing
+  would unwind a whole hemisphere to get back to the branch `asin` likes.
 - **Drag sensitivity scales with distance.** A fixed radians-per-pixel rate moves
   far more ground per pixel up close; the planet tore past at 1.35 R and crawled
   at 4.2 R.

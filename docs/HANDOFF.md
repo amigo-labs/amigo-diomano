@@ -522,13 +522,15 @@ terrain = "archipelago"
 
 [mode]
 kind = "conquest"
-waves = 7                    # [START]
+waves = 3                    # user decision; the [START] was 7
 score = "per_wave"
 
 [mode.tide]
-telegraph_ticks = 300        # [START] 10 s visible warning
-recovery_ticks  = 900        # [START] 30 s calm to rebuild
-escalation      = 115        # [START] percent per wave, integer
+telegraph_ticks = 900        # 30 s visible warning
+impact_ticks    = 600        # 20 s surge and recede
+recovery_ticks  = 25500      # 14:10 calm — a wave every 15 minutes
+lull_ticks      = 2700       # 90 s before the first wave and after the last
+escalation      = 150        # percent per wave, integer
 
 [powers.earthquake]
 enabled = true
@@ -571,15 +573,34 @@ its anchor. Escalation provides the match clock without a countdown UI.
 
 **Victory** — all `[START]`:
 
-- 7 waves. Score per wave = habitable cells under own influence, sampled at wave
-  peak. Most waves won takes the match.
+- 3 waves, **fifteen minutes apart** (user decision, superseding the `[START]` of
+  7 waves 45 seconds apart, which put a whole match inside six minutes). Score
+  per wave = habitable cells under own influence, sampled at wave peak. Most
+  waves won takes the match.
+- The opening and closing calm are `lull_ticks`, not `recovery_ticks`: at this
+  cadence a recovery is fourteen minutes, and running the two ends on it would
+  put fourteen minutes of nothing before the first telegraph and another
+  fourteen after the last wave had already decided the match.
 - Sudden death: influence reaching 0 is an immediate loss, whatever the score.
-- Target match length ~15 minutes. `[MEASURE]` in playtest.
+- Target match length ~34 minutes: three waves at the cadence plus the two lulls.
+- **Known consequence, unmeasured against a human.** The scripted opponent is
+  tick-paced and beats a player who never acts by siege at around tick 3,400,
+  while the first wave now lands at 3,900 — so an idle match against the AI ends
+  before any wave. Against a player who plays, and against another human, the
+  wave clock is the match clock as §5.5 intends. Phase 8 playtesting.
+
+**There is no starting land connection, on any profile** (user decision). The
+carved contact corridor is gone: a ridge running half the planet's circumference
+between the two spawns, laid across whatever geology happened to be under it, was
+the most artificial thing in the world. Two peoples on separate islands is a
+legal opening, both sides reclaim toward each other, and every causeway you build
+also serves your opponent — which is what the archipelago mode below was for and
+is now simply how the game starts. See `docs/specs/world.md` and
+`MapConfig::land_bridge`, which keeps the corridor available to the §6.3 corpus
+and nowhere else.
 
 Later modes: **volcano** (central crater erupts in waves; lava follows whatever
-channels currently exist, so channel-shaping *is* the fight), **archipelago** (no
-starting land connection; both sides reclaim toward each other, and every causeway
-you build also serves your opponent).
+channels currently exist, so channel-shaping *is* the fight).
 
 ---
 

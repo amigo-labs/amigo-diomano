@@ -7,6 +7,14 @@ powers 247
 free_powers 0
 ai 0
 endless 0
+land_bridge 0
+waves 3
+telegraph_ticks 900
+impact_ticks 600
+recovery_ticks 25500
+lull_ticks 2700
+escalation 150
+strength 48
 # profile: cataclysm
 ticks 2400
 c 5 0 2 4 52 52 0

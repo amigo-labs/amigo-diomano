@@ -47,7 +47,9 @@ pub fn step(w: &mut World) {
     match w.tide.phase {
         TIDE_CALM => {
             w.tide.offset = 0;
-            if w.tide.timer >= cfg.recovery_ticks {
+            // The opening lull, not a recovery: nothing has happened yet, so
+            // there is nothing to recover from. See `MapConfig::lull_ticks`.
+            if w.tide.timer >= cfg.lull_ticks {
                 enter(w, TIDE_TELEGRAPH);
             }
         }
@@ -89,7 +91,11 @@ pub fn step(w: &mut World) {
         }
         _ => {
             w.tide.offset = 0;
-            if w.tide.timer >= cfg.recovery_ticks {
+            // After the last wave there is nothing left to rebuild for, so the
+            // match closes on the short lull rather than sitting through a full
+            // recovery window with its result already determined.
+            let last = w.tide.wave.saturating_add(1) >= cfg.waves;
+            if w.tide.timer >= if last { cfg.lull_ticks } else { cfg.recovery_ticks } {
                 let next = w.tide.wave.saturating_add(1);
                 if next >= cfg.waves {
                     w.tide.phase = TIDE_DONE;
@@ -220,10 +226,17 @@ fn decide_match(w: &mut World) {
 #[must_use]
 pub fn ticks_to_impact(w: &World) -> u32 {
     match w.tide.phase {
-        TIDE_CALM => w.cfg.recovery_ticks.saturating_sub(w.tide.timer) + w.cfg.telegraph_ticks,
+        // The opening window is the lull, not a recovery — and the closing one
+        // is too, but there is no wave after it, so the number it produces is
+        // never read for anything but a sky that is about to stop mattering.
+        TIDE_CALM => w.cfg.lull_ticks.saturating_sub(w.tide.timer) + w.cfg.telegraph_ticks,
         TIDE_TELEGRAPH => w.cfg.telegraph_ticks.saturating_sub(w.tide.timer),
         TIDE_IMPACT => 0,
-        _ => w.cfg.recovery_ticks.saturating_sub(w.tide.timer) + w.cfg.telegraph_ticks,
+        _ => {
+            let last = w.tide.wave.saturating_add(1) >= w.cfg.waves;
+            let wait = if last { w.cfg.lull_ticks } else { w.cfg.recovery_ticks };
+            wait.saturating_sub(w.tide.timer) + w.cfg.telegraph_ticks
+        }
     }
 }
 
@@ -238,6 +251,7 @@ mod tests {
         cfg.telegraph_ticks = 30;
         cfg.impact_ticks = 20;
         cfg.recovery_ticks = 40;
+        cfg.lull_ticks = 25;
         cfg.waves = 3;
         cfg.wave_strength = 90;
         cfg.escalation = 200;
@@ -335,15 +349,43 @@ mod tests {
     }
 
     #[test]
+    fn a_wave_lands_every_fifteen_minutes() {
+        // User decision, superseding §5.5's 45-second `[START]`: the cadence is
+        // a wave every fifteen minutes. The cadence *is* the wave cycle —
+        // telegraph, impact, recovery — because the next telegraph begins the
+        // moment the last recovery ends.
+        let cfg = MapConfig::DEFAULT;
+        let cadence = cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks;
+        assert_eq!(cadence, 15 * 60 * 30, "a wave every {} s, not 900", cadence / 30);
+    }
+
+    #[test]
+    fn the_lulls_do_not_add_a_dead_quarter_hour_at_each_end() {
+        // The whole reason `lull_ticks` exists. Running the opening and closing
+        // windows on `recovery_ticks` would put fourteen minutes of nothing
+        // before the first telegraph and another fourteen after the last wave
+        // had already decided the match.
+        let cfg = MapConfig::DEFAULT;
+        assert!(
+            cfg.lull_ticks * 4 < cfg.recovery_ticks,
+            "a {}-second lull is not short against a {}-second recovery",
+            cfg.lull_ticks / 30,
+            cfg.recovery_ticks / 30
+        );
+    }
+
+    #[test]
     fn a_match_is_roughly_the_target_length() {
-        // §5.5 `[START]`: 7 waves, target ~15 minutes.
+        // Three waves at the fifteen-minute cadence, plus a lull at each end.
         let cfg = MapConfig::DEFAULT;
         let per_wave = cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks;
-        let total = per_wave * u32::from(cfg.waves) + cfg.recovery_ticks;
+        // The last wave closes on a lull rather than a full recovery, so the
+        // final recovery is refunded.
+        let total = per_wave * u32::from(cfg.waves) - cfg.recovery_ticks + cfg.lull_ticks * 2;
         let minutes = total / 30 / 60;
         assert!(
-            (4..=25).contains(&minutes),
-            "a full cycle is {minutes} minutes; the [START] target is ~15"
+            (25..=45).contains(&minutes),
+            "a full cycle is {minutes} minutes; three waves fifteen minutes apart is ~34"
         );
     }
 

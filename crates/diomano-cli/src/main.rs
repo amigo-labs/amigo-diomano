@@ -511,6 +511,8 @@ fn cmd_record(o: &Opts) -> Result<(), String> {
         ticks: o.ticks,
         ai: o.ai,
         endless: false,
+        land_bridge: false,
+        tide: TideSpec::shipped(),
     });
     let (w, hashes) = powers::replay(&log).map_err(|e| format!("line {}: {}", e.line, e.what))?;
     let mut out = String::new();
@@ -537,6 +539,14 @@ fn cmd_record(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
+/// The earliest tick a match may legitimately be decided at.
+///
+/// 1,275 was the first wave peak under the old 45-second cadence, and it stays
+/// the right *absolute* floor now that the tide is minutes away: a match
+/// decided inside forty seconds is a spawn that dissolved, not a war that was
+/// lost.
+const MIN_MATCH_TICKS: u32 = 1_275;
+
 /// Everything a session log's header states about the match it drives.
 struct LogSpec {
     seed: u32,
@@ -547,6 +557,54 @@ struct LogSpec {
     ticks: u32,
     ai: bool,
     endless: bool,
+    /// Carve the corridor between the two spawns. Corpus logs only.
+    land_bridge: bool,
+    /// The tide the log replays under. See `TideSpec`.
+    tide: TideSpec,
+}
+
+/// The tide cycle a log states for itself.
+///
+/// Written into the header so a fixture does not silently depend on
+/// `MapConfig::DEFAULT`: it used to, and retuning the shipped cadence therefore
+/// invalidated ten corpus matches that had nothing to do with the tide.
+#[derive(Clone, Copy)]
+struct TideSpec {
+    waves: u8,
+    telegraph: u32,
+    impact: u32,
+    recovery: u32,
+    lull: u32,
+    escalation: u16,
+    strength: i16,
+}
+
+impl TideSpec {
+    /// The shipped cadence: a wave every fifteen minutes, three of them.
+    fn shipped() -> Self {
+        let cfg = MapConfig::DEFAULT;
+        Self {
+            waves: cfg.waves,
+            telegraph: cfg.telegraph_ticks,
+            impact: cfg.impact_ticks,
+            recovery: cfg.recovery_ticks,
+            lull: cfg.lull_ticks,
+            escalation: cfg.escalation,
+            strength: cfg.wave_strength,
+        }
+    }
+
+    /// A deliberately fast tide, for the §6.3 corpus.
+    ///
+    /// A corpus match is 20,000 ticks and the shipped cadence puts one wave
+    /// every 27,000, so on the shipped numbers every one of the ten matches
+    /// would spend its whole life in the opening lull and the corpus would
+    /// cover the telegraph, the impact and the recovery exactly zero times.
+    /// Determinism is what the corpus tests; the cadence is a balance number.
+    /// So the corpus states its own, and states it in the log.
+    fn corpus() -> Self {
+        Self { waves: 7, telegraph: 300, impact: 150, recovery: 900, lull: 900, ..Self::shipped() }
+    }
 }
 
 /// Render a session log: header lines, then one line per command.
@@ -563,6 +621,14 @@ fn write_log(spec: &LogSpec) -> String {
     // omitted `ai` would silently grow an opponent if the default ever flipped.
     let _ = writeln!(log, "ai {}", u8::from(spec.ai));
     let _ = writeln!(log, "endless {}", u8::from(spec.endless));
+    let _ = writeln!(log, "land_bridge {}", u8::from(spec.land_bridge));
+    let _ = writeln!(log, "waves {}", spec.tide.waves);
+    let _ = writeln!(log, "telegraph_ticks {}", spec.tide.telegraph);
+    let _ = writeln!(log, "impact_ticks {}", spec.tide.impact);
+    let _ = writeln!(log, "recovery_ticks {}", spec.tide.recovery);
+    let _ = writeln!(log, "lull_ticks {}", spec.tide.lull);
+    let _ = writeln!(log, "escalation {}", spec.tide.escalation);
+    let _ = writeln!(log, "strength {}", spec.tide.strength);
     let _ = writeln!(
         log,
         "# profile: {}",
@@ -626,11 +692,19 @@ fn cmd_trace(o: &Opts) -> Result<(), String> {
     }
     let mut w = World::boxed();
     w.init(&cfg);
-    // The earliest legitimate decision point: the first wave peak. An outcome
-    // before it means a spawn dissolved with no war fought — the instant-defeat
-    // failure mode, worth a non-zero exit even from a diagnostic tool. The
-    // deliberate `--cataclysm` armageddon is exempt: ending early is its job.
-    let first_wave_peak = cfg.recovery_ticks + cfg.telegraph_ticks + cfg.impact_ticks / 2;
+    // An outcome before this means a spawn dissolved with no war fought — the
+    // instant-defeat failure mode, worth a non-zero exit even from a diagnostic
+    // tool. The deliberate `--cataclysm` armageddon is exempt: ending early is
+    // its job.
+    //
+    // An absolute floor rather than the first wave peak, which is what it used
+    // to be. At the shipped cadence the first wave lands at tick 3,900, and the
+    // scripted opponent can legitimately win by siege against a player who
+    // never acts well before then (§5.5 sudden death, and the playtest note in
+    // PLAN.md). Tying the floor to the tide would fail that legitimate match
+    // and pass an instant defeat on any map with a slow enough tide, which is
+    // exactly backwards.
+    let earliest_honest_decision = MIN_MATCH_TICKS;
     let mut decided_at: Option<u32> = None;
     println!("tick  walkers  settle  tiers      hand0  mana0  sea  combat  merges");
     for tick in 0..o.ticks {
@@ -703,10 +777,10 @@ fn cmd_trace(o: &Opts) -> Result<(), String> {
     }
     if let Some(t) = decided_at
         && !o.cataclysm
-        && u64::from(t) < u64::from(first_wave_peak)
+        && u64::from(t) < u64::from(earliest_honest_decision)
     {
         return Err(format!(
-            "match decided at tick {t}, before the first wave peak ({first_wave_peak}) — a spawn dissolved with no war fought"
+            "match decided at tick {t}, inside the first {earliest_honest_decision} ticks — a spawn dissolved with no war fought"
         ));
     }
     Ok(())
@@ -833,6 +907,10 @@ fn cmd_corpus(o: &Opts) -> Result<(), String> {
                 ticks,
                 ai,
                 endless: true,
+                // The corpus needs the two armies to meet; see
+                // `MapConfig::land_bridge`.
+                land_bridge: true,
+                tide: TideSpec::corpus(),
             })
         };
 

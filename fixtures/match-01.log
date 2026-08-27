@@ -7,6 +7,14 @@ powers 255
 free_powers 1
 ai 0
 endless 1
+land_bridge 1
+waves 7
+telegraph_ticks 300
+impact_ticks 150
+recovery_ticks 900
+lull_ticks 900
+escalation 150
+strength 48
 # profile: war
 ticks 20000
 c 5 0 2 4 52 52 0

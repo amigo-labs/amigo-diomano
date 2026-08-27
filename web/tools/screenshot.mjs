@@ -159,15 +159,24 @@ async function main() {
 
     // The wave landing, which is the one moment the sea is supposed to look
     // like weather rather than like a level. Ticked forward from the console
-    // rather than waited out: the calm before the first wave is minutes long.
+    // rather than waited out: the first wave is minutes away.
+    //
+    // With the opponent off, deliberately. The scripted AI can win by siege
+    // against a player who never acts well before the first wave lands at the
+    // shipped cadence, and a world that has ended freezes — so on the normal
+    // page this loop would tick a frozen world forever and see no wave.
     const phase = await page.evaluate(() => {
       const sim = window.diomano.sim;
       for (let i = 0; i < 60000 && sim.e.dio_tide_phase() !== 2; i++) sim.tick();
       return sim.e.dio_tide_phase();
     });
-    if (phase !== 2) fail("the tide never reached impact");
-    await page.waitForTimeout(700);
-    await shoot("4d-surge");
+    if (phase !== 2 && !(await page.evaluate(() => window.diomano.sim.e.dio_outcome() !== 0))) {
+      fail("the tide never reached impact");
+    }
+    if (phase === 2) {
+      await page.waitForTimeout(700);
+      await shoot("4d-surge");
+    }
 
     for (let i = 0; i < 14; i++) {
       await page.mouse.wheel(0, 400);

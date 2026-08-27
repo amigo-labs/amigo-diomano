@@ -190,69 +190,81 @@ is only sound while that holds.
 
 ## Terrain generation
 
-Seamless by construction: the noise is sampled at the cell's position **on the
-cube, in 3D**. Adjacent cells across a face boundary are adjacent in 3D too, so
-no per-face fixup exists to get wrong. Five octaves of integer value noise with
-trilinear interpolation and integer smoothstep; no floats anywhere.
+**Geology, not a noise field** (user decision, superseding §3.3's `[START]`).
+`tectonics.rs` assembles the height field from the three processes that make a
+planet, and the noise that used to *be* the terrain is demoted to roughening
+their output. The old stack — five octaves through a two-scale domain warp, with
+per-octave swizzles, shears and a midrange widening, all of it fighting the
+lattice it was drawn on — survives as `world::terrain_detail` at an amplitude
+(±190) below a plate boundary's, so it may texture a mountain range and may not
+invent one.
 
-The stack has some shape to it, all of it there because the plain four-octave
-average produced walls and blobs:
+The complaint it could not answer: every island was a smooth lump, every
+coastline was an iso-line of a scalar field, and nothing in the world had a
+*cause*. There was no reason for a range to run where it ran, for a trench to be
+beside an arc, or for one island to be near another.
 
-- **Per-octave offsets and axis swizzles.** With aligned lattices, every
-  cube-face plane sat exactly on a lattice plane of every octave, and the
-  smoothstep's zero derivative there drew straight, flat bands — and straight
-  coastlines — along all twelve cube edges. Each octave now samples at its own
-  odd offset and axis permutation; both are exact integer isometries, so seam
-  continuity is untouched.
-- **Per-octave shear**, because isometries are not enough. Every isometry of the
-  cubic lattice maps axis planes onto axis planes, so the swizzles stop the
-  octaves' flats from stacking on each other — which is what they are for — and
-  leave every lattice parallel to the cube's axes. At shift 8 that lattice is
-  two cells wide, so the grid it draws lands exactly at the scale a player looks
-  at from close range, and the world reads as rasterised. Each octave is
-  therefore also sampled through a shear (a coordinate offset by `>> 1` or
-  `>> 2` of another axis), tilting its planes 15 to 27 degrees off the axes.
-  Safe for the same reason as everything else here: a function of the 3D cube
-  point alone. `>>` is floor division for negatives, so the shear is continuous
-  through the origin, and its one-unit staircase is ~0.13 height units against a
-  16-unit terrace — three orders of magnitude below visible.
-- **Re-weighted octaves.** The old dominant octave's lattice spacing was the
-  whole cube half-extent (~2 cells per axis over the entire planet), which made
-  every map two smoothstep blobs per face. It is demoted to a continental
-  tilt; the half-spacing octave leads, and a new fine octave adds the texture
-  the old stack lacked.
-- **One ridged octave** (`ridge(n) = 65535 - |2n - 65535|`): connected
-  mountain chains instead of round bumps.
-- **Domain warp at two scales** (amplitude 600 against the shift-11 spacing of
-  2048, and 140 against the shift-9 spacing of 512 — both ~0.28 of their own
-  lattice): value noise has square isolines; sampling the height through a warp
-  of the cube point bends them into natural curves. Both warp fields are
-  continuous functions of the 3D cube point, so neither can introduce a seam,
-  and that argument does not care how many octaves of warp there are.
+1. **Plates.** Twelve of them tile the sphere as a spherical Voronoi diagram over
+   seeds drawn from the world seed; each is continental (38%) or oceanic, and
+   each has a drift made tangent to its own centre. A cell knows its plate, its
+   second-nearest plate, and how far inside the first it is.
+2. **Boundaries.** The relative drift across a boundary, measured along the
+   boundary's own normal, decides what happens there:
 
-  The coarse warp was alone here, and one warp cannot do this job: a shift-11
-  field is constant over 16 cells, so it *translates* the fine octaves rather
-  than bending them. Their own lattices stayed axis-aligned at cell scale, which
-  is the other half of the same rasterised look the shear above addresses.
-- **Midrange widening** (`widen(h) = smooth((h - 16384) * 2)`): the weighted
-  octave average clusters around the midpoint, so the nominal ±720 amplitude
-  was almost never reached and the rock threshold (380) and the renderer's
-  snowline never fired. The smoothstep remap triples the slope at the midpoint
-  and saturates smoothly.
-- **Bias as a sea-level shift, not a subtraction.** Each terrain profile's bias
-  moves where the sea sits in the distribution, then both sides are stretched
-  back to the full ±720 span — subtracting it outright also lowered every peak,
-  which is how the wetter profiles lost their mountains. Biases are measured
-  against the widened distribution (archipelago 350, pangaea -40, volcano 210)
-  and pinned by `world::tests::terrain_profiles_produce_playable_land`:
-  land fraction per profile, rock cells, real peaks, real ocean floor, across
-  four seeds each.
+   | | converging | diverging |
+   |---|---|---|
+   | continent / continent | collision range (+520) | rift valley (−180) |
+   | continent / ocean | cordillera on the continent (+360), trench on the ocean side (−620) | — |
+   | ocean / ocean | island arc (+360, narrowed to a chain) with a shallower trench | spreading ridge (+260) |
 
-**Measured after the shear and the fine warp landed**, over the test's four
-seeds: archipelago 26–43% land, pangaea 56–79%, volcano 37–58%; peaks 720–816,
-ocean floor at the -720 clamp throughout. The distribution barely moved — the
-changes rotate and bend the field, they do not rescale it — so no bias needed
-retuning, which is the result rather than the absence of one.
+   The crust's own base elevation is blended across the boundary rather than
+   stepped, which is what a continental shelf is.
+3. **Volcanism.** Six hotspots, fixed in the mantle — so a plate drifting over
+   one leaves a *chain* rather than a single cone. The cone is cubed, because a
+   volcano is a spike and not a dome.
+4. **Erosion**, in the order it happens. *Hydraulic*: twelve routing passes
+   accumulate the drainage network (a cell collects the flow of every uphill
+   neighbour), then the cut goes as flow × slope — stream power — so a trunk
+   valley cuts deeper than the gullies feeding it, which is the shape that reads
+   as a river system. *Thermal*: eight rounds of talus against a repose of a
+   terrace and a half. The talus is what makes a coast shelve instead of dropping
+   off as a flat cut-out along cell edges, and it was the pass being run least.
 
-`world::tests::terrain_is_continuous_across_every_seam` asserts that the mean
-height step across a seam is within 3x the mean step inside a face.
+Fertility comes out of the same drainage rather than a second noise field: low,
+flat and watered ground is fertile, which puts the good soil in the river
+valleys where it belongs.
+
+Seamless by construction, exactly as before: every term above is a pure function
+of the cell's position **on the cube, in 3D**, so adjacent cells across a face
+boundary are adjacent in 3D too and no per-face fixup exists to get wrong. The
+erosion passes are neighbour passes and run on the ghost ring like every other
+neighbour pass in the crate.
+
+Sea level is a **quantile**, not a bias: `set_sea_level` binary-searches the
+height that leaves the profile's requested dry fraction above it, and shifts the
+whole field by it — so zero keeps meaning sea level and the tide's numbers stay
+absolute. Profiles ask for what they want directly (archipelago 300 per mille
+dry, pangaea 620, volcano 380), where the old bias controlled land fraction only
+indirectly and had to be re-measured whenever anything upstream moved.
+`world::tests::terrain_profiles_produce_playable_land` still pins land fraction,
+rock cells, real peaks and real ocean floor across four seeds per profile.
+
+A histogram was the obvious way to find that quantile and it was wrong here: two
+kilobytes on the stack is nothing natively and is enough to overflow the wasm
+shadow stack when `init` is reached through `dio_replay`'s deeper frame. It
+surfaced as `memory access out of bounds` in the browser and in nothing else —
+`just verify-cross` doing exactly the job it exists for.
+
+### There is no road
+
+The **contact corridor is gone from real matches** (user decision). A ridge
+running half the planet's circumference between the two spawns, laid across
+whatever geology happened to be under it, was the most artificial thing in the
+world. Two peoples starting on separate islands is now a legal opening, and
+raising the land between them is the player's problem — which is the verb the
+game is about.
+
+It survives behind `MapConfig::land_bridge`, off by default, because the §6.3
+corpus needs it: the corpus asks for 200 combat resolutions across ten scripted
+matches, and armies that never meet resolve none. A corpus log states
+`land_bridge 1` for itself, the same way it now states its own tide.

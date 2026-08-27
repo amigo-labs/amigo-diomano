@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "description": "diomano browser client: Three.js renderer, camera, hand and gestures.",
+  "description": "diomano browser client: Three.js renderer, camera, hand and power menu.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
