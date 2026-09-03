@@ -99,7 +99,7 @@ pub extern "C" fn dio_init(seed: u32, terrain: u32, ai_enabled: u32) {
     world().init(&cfg);
     commands().clear();
     let m = mesh_buf();
-    m.build_indices();
+    m.build_tables();
     m.rebuild_all(world());
 }
 
