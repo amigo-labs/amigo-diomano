@@ -53,10 +53,9 @@ pub fn transfer_water(w: &mut World) {
 fn water_half(w: &mut World, parity: usize) {
     for face in 0..6usize {
         for y in 0..N {
-            for x in 0..N {
-                if (x + y) & 1 != parity {
-                    continue;
-                }
+            // The cells of this parity, in the order a full scan with a parity
+            // test visited them, without the test.
+            for x in ((parity + y) & 1..N).step_by(2) {
                 let a = idx(face, x, y);
                 if w.water[a] <= 0 {
                     continue;
@@ -137,10 +136,7 @@ pub fn transfer_lava(w: &mut World) {
 fn lava_half(w: &mut World, parity: usize) {
     for face in 0..6usize {
         for y in 0..N {
-            for x in 0..N {
-                if (x + y) & 1 != parity {
-                    continue;
-                }
+            for x in ((parity + y) & 1..N).step_by(2) {
                 let a = idx(face, x, y);
                 if w.lava[a] == 0 {
                     continue;
