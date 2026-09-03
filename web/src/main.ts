@@ -97,6 +97,8 @@ interface RawExports {
 
   dio_tick_count(): number;
   dio_sea_level(): number;
+  dio_census_combat(): number;
+  dio_census_merges(): number;
   dio_tide_phase(): number;
   dio_tide_wave(): number;
   dio_tide_offset(): number;

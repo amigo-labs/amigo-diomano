@@ -84,7 +84,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   scene.add(planet.group, water.mesh, atmosphere.group, vegetation.group);
 
   const post = createPost(renderer, scene, camera.camera, tier);
-  const audio = createAudio();
+  const audio = createAudio(LOCAL_PLAYER);
   // The readouts §8 did not allow for, and the reason the deviation was worth
   // it — see the header of `hud.ts` and the note in PLAN.md.
   const hud = createHud(sim, LOCAL_PLAYER);
@@ -157,19 +157,24 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     for (const ev of events) {
       if (ev.player === LOCAL_PLAYER) {
         if (ev.verb === VERB.RAISE || ev.verb === VERB.LOWER) {
-          audio.sculpt();
+          // Tuned to what moved: the ground's material under the brush, and
+          // what the hand is carrying.
+          audio.sculpt(
+            sim.material[sim.idx(ev.face, ev.x, ev.y)] ?? 0,
+            sim.e.dio_hand_material(LOCAL_PLAYER),
+          );
           continue;
         }
         const i = pendingCasts.findIndex((p) => p.verb === ev.verb);
         if (i >= 0) {
           pendingCasts.splice(i, 1);
-          audio.verbSfx(ev.verb);
+          audio.verbSfx(ev.verb, 1, ev);
         }
       } else if (ev.verb !== VERB.RAISE && ev.verb !== VERB.LOWER && ev.verb !== VERB.SET_HAND) {
-        // The opponent's casts, quieter. This is how the other god becomes
-        // audible — the client sees its own commands but never theirs, so
-        // the applied-verb ring is the only source (§ effects, same idea).
-        audio.verbSfx(ev.verb, 0.4);
+        // The opponent's casts, quieter and placed where they landed. This is
+        // how the other god becomes audible — the client sees its own commands
+        // but never theirs, so the applied-verb ring is the only source.
+        audio.verbSfx(ev.verb, 0.5, ev);
       }
     }
     // Casts the sim never applied: refused on cost, or a disabled power.
@@ -295,7 +300,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
         sim.e.dio_tide_offset(),
         sim.e.dio_tide_strength(),
       );
-      audio.sync(sim, dtMs);
+      audio.sync(sim, camera.camera, dtMs);
 
       // The match result, finally read by someone. The sim freezes itself
       // once the outcome is decided; the client's job is the presentation.
@@ -322,6 +327,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     view,
     effects,
     radial,
+    audio,
   };
 
   // Honest tab handling: a hidden tab pauses the world instead of silently

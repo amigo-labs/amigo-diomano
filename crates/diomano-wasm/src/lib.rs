@@ -302,6 +302,20 @@ pub extern "C" fn dio_sea_level() -> i32 {
     i32::from(world().sea_level)
 }
 
+/// Combat resolutions so far. A diagnostic counter (`world::Census`), never
+/// hashed and never read by the simulation; the client's audio diffs it tick
+/// to tick to hear a battle it otherwise has no event for.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_census_combat() -> u32 {
+    world().census.combat_resolutions
+}
+
+/// Friendly merges so far. Same status as [`dio_census_combat`].
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_census_merges() -> u32 {
+    world().census.merges
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_tide_phase() -> u32 {
     u32::from(world().tide.phase)
