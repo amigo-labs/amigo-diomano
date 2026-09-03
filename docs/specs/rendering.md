@@ -162,14 +162,41 @@ whole field on top.
 
 That is the price of a world that does not look like it is made of cells, it is
 paid once per changed chunk rather than per frame, and it leaves the render half
-with 18 ms. If it ever needs winning back, the warp is a pure function of the
-cube point and could be precomputed per corner into a table — the reason it is
-not is that a table of two floats per corner is 1.6 MB and the budget it would
-spend is the one thing this project measures more carefully than time.
+with 18 ms. The warp is a pure function of the cube point, so it *could* be
+tabulated per corner — the note here used to say such a table would be 1.6 MB,
+which was wrong by a factor of eight: 6 x 65 x 65 corners x two floats is
+203 KB.
 
-Simulation, over the same session: **1.47 ms/tick, 12.2% of the 12 ms budget**,
-against 1.51 ms before the geology. The plate and erosion work is all in `init`,
-so it costs nothing per tick.
+**Won back, 2026-09**, on one machine as a before/after over the same session:
+**3.65 → 1.87 ms at 35.0 chunks/tick**. Four changes, every vertex
+bit-identical (the seam tests compare bits and stayed green):
+
+- The warp *is* now a 203 KB table (`Mesh::build_tables`), storing the very f32
+  expressions `corner_height` evaluated inline, pinned by
+  `warp_table_matches_the_direct_computation`. 3.65 → 2.03 ms alone.
+- `chunk_content_hash` ran FNV-1a byte by byte over 31,000 cells a tick. It
+  packs a cell into two words and folds each through a splitmix finaliser;
+  `chunk_hash_sees_every_field_it_claims_to` checks each of the eight fields
+  still moves it. `hash::Fnv64` is untouched — the fixtures depend on it.
+- The second vertex pass recomputed `corner_direction` for a corner the first
+  pass had just projected; it reads the slot.
+- `smooth_heights` reads only height and material but ran three full passes
+  plus three 105 KB copies on every update, tide ticks that moved nothing but
+  water included. A fingerprint over its inputs — ghosts included, so the skip
+  is exact — gates it, the passes ping-pong between the two buffers, and the
+  perf harness prints how often it ran: **548 of 600 ticks** in the
+  sculpting-heavy perf script. That is the honest number; the skip pays in
+  quiet play, not there.
+
+The client also calls `dio_mesh_update` once per **tick** now rather than per
+frame (`game.ts`): the update is the smoothing and 96 chunk hashes even when
+nothing changed, and at 60 Hz against a 30 Hz simulation every second call was
+wasted, at 144 Hz four in five. The two uploads that read the dirty flags go
+with it, because `Mesh::update` clears them as it starts.
+
+Simulation, over the same session: **0.88 ms/tick, 7.4% of the 12 ms budget**,
+against 1.47 ms before — see `docs/specs/simulation.md` for what changed. The
+plate and erosion work is all in `init`, so it costs nothing per tick.
 
 The first figure above is up from 0.60 ms, and that increase bought two things: the corner grid the
 normal pass needs (a second evaluation of the dual-grid average per vertex, which
@@ -463,7 +490,9 @@ whose other caller passes CSS pixels, counting DPR twice.
 
 **7 at tier 2, measured** (terrain, water, cloud shell, atmosphere shell,
 starfield, settlements, walkers; vegetation makes 8 once anything has grown),
-against a `[START]` ceiling of 150. Plus three post passes.
+against a `[START]` ceiling of 150. Plus three post passes. With the tier-2
+models (see *Models* below) the flora is eight meshes and the buildings four, so
+a grown planet draws **19**.
 
 It was ~197 before, which is what the ceiling exists to catch. The fix is not
 culling — on an archipelago map every 16×16 chunk touches ocean, so per-chunk
@@ -480,6 +509,83 @@ The water geometry goes further and uses `Mesh::water_present` to build its
 index buffer over **wet chunks only**, rebuilt when the wet set changes. On a
 land-heavy map that removes most of the ocean's triangles before rasterising,
 rather than relying on the fragment shader to discard them afterwards.
+
+## Models
+
+Everything that stands on the planet is built in `renderer/models.ts` from
+three's primitives and `mergeGeometries`; nothing is downloaded (§7.5). Two
+tiers, chosen once at start-up like the effects (§7.3):
+
+- **Tier 1** is the set the game shipped with — a cone is a conifer, a box is a
+  house, the population is the 204-triangle `villager-low.glb` — because the
+  §7.6 floor is integrated graphics and a forest is up to 8,700 instances. They
+  are unchanged, byte for byte where a file is involved.
+- **Tier 2** is the same silhouettes with their parts: conifers with a trunk and
+  stacked tiers (~40 Δ), broadleaves with a root flare, branches and a lobed
+  crown (~170 Δ), palms whose trunk curves and carries fronds and coconuts
+  (~100 Δ), scrub in lumps (40 Δ); a hut under thatch, a house with a pitched
+  roof, door and chimney, an eight-sided keep with merlons, and a wall around a
+  citadel; a crystal for pickups, an obelisk for the magnet; and a 464-triangle
+  villager with a jaw, shoulders, a belt and boots from the same generator
+  (`scripts/build-figure.mjs`, which writes both files). Fingers with knuckles
+  and nails on the hand at either tier — it is two meshes.
+
+Each model carries its triangle budget in its comment. A fully grown planet at
+every cap is around **0.6 M triangles at tier 2**, which integrated graphics
+rasterises comfortably and which tier 1 never pays.
+
+**Colour is a vertex attribute.** An `InstancedMesh` has one material and so
+one colour, which is why every broadleaf used to be green from the ground up.
+Tier-2 parts carry a `color` attribute, `mergeGeometries` carries it through,
+and `hazedLambert` turns on `vertexColors` only for geometry that has it — the
+note in `vegetation.ts` about black settlements is about the case *without* the
+attribute, where three's generic value is zero. With it, `vColor` is the
+part's colour times the instance tint: brown trunks, terracotta roofs and the
+species' green in one draw call.
+
+**Variants.** A forest of one model is a forest of clones however it is
+jittered. Each species has two geometries, one instanced mesh each, chosen per
+cell by hash so a stand is a mix and a reload grows the same mix. Buildings are
+four meshes (hut, house, tower, wall) chosen by the settlement's tier and the
+block's place in the cluster. Draw calls at tier 2: 7 as before, plus 8 flora
+and 4 building meshes — 19, against the ceiling of 150.
+
+`web/tools/gallery/` lays every model of both tiers out under the game's light,
+for looking at a change without growing a forest first.
+
+## Audio
+
+Still all synthesis (§7.5); `web/src/audio/` is four files.
+
+- **The chain** (`synth.ts`): master → limiter → destination, plus a room — a
+  `ConvolverNode` whose impulse is *generated*, decaying noise darkening as it
+  goes, different in each ear. Layered voices add up, and clipping is the one
+  failure a procedural mix cannot be forgiven, so the limiter is not optional.
+- **`voice`** is the one shaped source every one-shot is a call to: oscillator
+  and/or noise, envelope, filter sweep, room send, and optionally a *cell*. A
+  voice with a cell is panned by where the cell sits in the camera's view and
+  quietened as it leaves the frame or crosses to the far side of the planet.
+  The opponent's volcano is heard over there; the earthquake under the hand is
+  heard here. Each verb has its own layered voice (a bell with its partials for
+  the magnet, sub + rumble + hiss for the volcano, a swell for the flood, …).
+- **The beds** (`ambience.ts`) follow the simulation *under the camera*. The
+  view ray is cast onto the planet once a tick and a 9 x 9 window at stride four
+  is read around the hit: forest where vegetation stands (with a slow swell),
+  lava crackle where lava lies, surf from the local erosion marker with the
+  planet-wide figure kept as a floor so a tide is still heard from orbit, and
+  wind that rises as the camera pulls out and before a wave lands. The grind of
+  ground being worked retunes to the material under the brush and to what the
+  hand carries.
+- **The population** (`events.ts`) had no sound at all. The census counters —
+  write-only from the simulation's side, still so — are exported as
+  `dio_census_combat` / `dio_census_merges` and diffed tick to tick; a rise is a
+  clash, placed at the first cell holding walkers of both gods and rate-limited
+  to six a second. Settlement slots are diffed for founding, tier rises (a bell
+  per tier) and falls, placed at the settlement and quieter for the other god's.
+
+Nothing here feeds back: the noise PRNG is a local LCG, the census is read and
+never written, and the camera is the only input the simulation does not have
+(§10).
 
 ## Lava, and the other two fields §7.4 asked for
 

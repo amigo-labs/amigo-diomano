@@ -78,7 +78,7 @@ Each step ended with its tests passing before the next began.
 ### 5. Perf harness, and choose `N` ✅
 
 - [x] `diomano-cli perf` — per-pass ms breakdown against the 12 ms budget
-- [x] Measured: **1.51 ms/tick at N = 64**, 12.6% of budget
+- [x] Measured: **1.51 ms/tick at N = 64**, 12.6% of budget (0.88 ms after §21)
 - [x] **N stays at 64**, with the measurement and the reasoning recorded in
       `docs/specs/world.md`. The `[START]` guess and the measured choice
       coincide; what changed is that the cost is now a number.
@@ -654,6 +654,44 @@ Two problems reported from play, both fixed at the root:
       read them as "start the match"), `+` / `-` / `M` in the match with the
       banner as feedback, and both values remembered in `localStorage` behind a
       try/catch, because storage that throws must not stop a game from starting
+
+### 21. Performance, models with parts, and a sound field ✅
+
+Three measured cuts, each committed with its before/after from `just perf` on
+one machine, and none moving a fixture hash (`just verify`, the corpus,
+`just verify-cross` all green before and after):
+
+- [x] **Meshing 3.65 → 1.87 ms/tick** at 35 chunks. The domain warp is a 203 KB
+      table (the old note that said 1.6 MB was off by eight); the chunk hash
+      packs a cell into two words instead of ten FNV byte steps; the second
+      vertex pass reads the direction the first pass computed; smoothing runs
+      only when height or material changed, ping-ponging its buffers instead of
+      copying — and the harness prints how often, because in the sculpting-heavy
+      perf script that is 548 of 600 ticks
+- [x] **Simulation 1.76 → 0.88 ms/tick.** A compiled gate in front of the rule
+      interpreter (`interactions_may_fire`, with a test that the table implies
+      it), tables that sleep on the ticks their predicates rule out, stride-two
+      checkerboard halves. `docs/specs/simulation.md` has the new table
+- [x] **Meshing once per tick in the client**, not per frame: at 60 Hz every
+      second `dio_mesh_update` was three smoothing passes and 96 hashes for
+      nothing. Settlement and pickup views pooled like the walkers already were
+- [x] **Models with the parts a silhouette can show, behind tier 2**
+      (`renderer/models.ts`): trunks and tiers, roots and lobed crowns, curved
+      palms with fronds, huts, houses with roofs and chimneys, keeps with
+      merlons, a wall around a citadel, a crystal, an obelisk, fingers with
+      knuckles and nails, and a 464-triangle villager from the same generator
+      that still writes the 204-triangle one for tier 1. Vertex colours carried
+      through `mergeGeometries`, two variants per species by hash; 19 draw
+      calls. `web/tools/gallery/` shows them all
+- [x] **Audio with a place.** A limiter and a generated room; every one-shot a
+      layered `voice` panned by where its cell sits in the view; beds that read
+      the simulation under the camera (forest, lava crackle, local surf, orbit
+      wind) and a grind that retunes to the material under the brush; and the
+      population audible for the first time — clashes from the census counters,
+      founding, rising and falling from the settlement slots
+- [ ] **Not measured on the §7.6 floor**, as before. The tier-2 models are
+      gated behind the same setting as the tier-2 effects for exactly that
+      reason; tier 1 is pixel-identical to what shipped
 
 ## Next
 

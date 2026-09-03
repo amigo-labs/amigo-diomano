@@ -64,27 +64,53 @@ floor):
 
 | pass | ms/tick | % of sim |
 |---|---:|---:|
-| 1 ghost border copy | 0.0118 | 0.8% |
-| 2 command application | 0.0004 | 0.0% |
-| 2a tide | 0.0146 | 1.0% |
-| 3 water transfer | 0.2202 | 14.5% |
-| 4 lava transfer | 0.0405 | 2.7% |
-| 5 material interactions | 0.6905 | 45.6% |
-| 6 granular movement | 0.1597 | 10.6% |
-| 7 vegetation growth | 0.2276 | 15.0% |
-| 8 walker movement | 0.0010 | 0.1% |
-| 9 combat resolution | 0.0230 | 1.5% |
-| 10 settlements | 0.0810 | 5.4% |
-| 11 flow field + influence | 0.0082 | 0.5% |
-| 12 mana accrual | 0.0252 | 1.7% |
-| 13 state hash | 0.0103 | 0.7% |
-| **simulation total** | **1.5139** | |
-| meshing (render budget, not sim) | 0.5984 | 16.1 chunks/tick |
+| 1 ghost border copy | 0.0131 | 1.5% |
+| 2 command application | 0.0003 | 0.0% |
+| 2a tide | 0.0144 | 1.6% |
+| 3 water transfer | 0.2083 | 23.6% |
+| 4 lava transfer | 0.0245 | 2.8% |
+| 5 material interactions | 0.0793 | 9.0% |
+| 6 granular movement | 0.2131 | 24.1% |
+| 7 vegetation growth | 0.0284 | 3.2% |
+| 8 walker movement | 0.0014 | 0.2% |
+| 9 combat resolution | 0.1354 | 15.3% |
+| 10 settlements | 0.1171 | 13.2% |
+| 11 flow field + influence | 0.0067 | 0.8% |
+| 12 mana accrual | 0.0313 | 3.5% |
+| 13 state hash | 0.0104 | 1.2% |
+| **simulation total** | **0.8839** | |
+| meshing (render budget, not sim) | 1.8731 | 35.0 chunks/tick |
 
-**12.6% of the 12 ms budget.** The rule-table evaluator dominates at 45.6%,
-which is the expected shape: it is the only pass that visits every cell and
-evaluates eight predicates over it. If the budget ever tightens, that is where
-to look first — not at the water solver.
+**7.4% of the 12 ms budget**, down from 1.76 ms (14.6%) measured on the same
+machine immediately before the 2026-09 pass, with every fixture hash unchanged
+(`just verify`, the ten-match corpus, `just verify-cross`). The rule-table
+evaluator used to dominate at 45% — the expected shape, being the one pass that
+visits every cell and evaluates eight predicates — and does not any more:
+
+- **A cell gate for `interactions`.** `apply_rules` already stops at the first
+  false predicate; what a cell that nothing touches paid for was the
+  interpreter itself, the `Field`/`Cmp` dispatch, eight times over.
+  `materials::interactions_may_fire` restates the table's gating predicates as
+  straight-line code — erode above its threshold, any lava, sediment at the soil
+  threshold, or the two dry-soil rows in full — and a cell that passes none of
+  them never enters the interpreter. If no row fires nothing changes, so testing
+  rows on the initial state is exact; `the_cell_gate_is_implied_by_the_table`
+  samples 200,000 cells at the thresholds, `gated_interactions_match_the_
+  unfiltered_pass` runs two worlds side by side. **Adding a row to
+  `INTERACTIONS` means adding a term to the gate**; the first test fails
+  otherwise. 0.71 → 0.08 ms.
+- **Dormant tables.** `vegetation` has one rule, gated on `TickMod8 == 0`, and
+  visited every cell on the other seven ticks too. `table_dormant` reads that
+  off the table: every rule carrying a false tick predicate means the pass is a
+  no-op. A rule added without a tick predicate turns the skip off by itself.
+  0.21 → 0.03 ms.
+- The checkerboard halves iterate the cells of their parity directly instead of
+  testing every cell for it.
+
+Granular movement and the water solver are now the largest passes, and both
+already skip the cells that cannot move. If the budget tightens again, combat
+and settlements — the two passes whose cost is not per cell — are the next
+place to look.
 
 Failure mode 7 in §13 is simulation budget creep: each new field is another
 pass over 24k cells at 30 Hz. `just perf` is the instrument; run it before
