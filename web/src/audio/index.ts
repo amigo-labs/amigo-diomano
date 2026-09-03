@@ -122,9 +122,10 @@ export function createAudio(localPlayer = 0): Audio {
       }
     },
 
-    verbSfx(verb, gain = 1, at): void {
+    verbSfx(verb, gainIn, at): void {
       const s = ensure();
       if (!s) return;
+      const gain = gainIn ?? 1;
       const p = place(at);
       switch (verb) {
         case VERB.MAGNET:
