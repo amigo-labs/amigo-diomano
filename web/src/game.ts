@@ -203,6 +203,9 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     sim.meshUpdate();
     planet.refreshAll();
     water.refreshAll();
+    // The tick counter restarted at zero; make the next frame go through the
+    // normal path rather than trusting a stale match.
+    lastMeshedTick = -1;
     camera.drift(0);
     ui.hide();
     hud.reset();
@@ -240,6 +243,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
 
   /** Edge detector for the radial menu, so a hint retires the first time. */
   let menuWasOpen = false;
+  /** The tick the mesh was last brought up to date for — see `render`. */
+  let lastMeshedTick = -1;
 
   const loop = createLoop({
     update() {
@@ -257,9 +262,19 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       const tick = sim.e.dio_tick_count();
       view.sync(camera.camera, tick, dtMs);
 
-      sim.meshUpdate();
-      planet.sync(sim.e.dio_sea_level());
-      water.sync();
+      // Meshing follows the *tick*, not the frame. Vertex data can only change
+      // when the simulation advanced, and `Mesh::update` is three smoothing
+      // passes plus 96 chunk hashes even when nothing did — at 60 Hz against a
+      // 30 Hz simulation that was every second call wasted, at 144 Hz four in
+      // five. The three go together: `Mesh::update` clears `meshDirty` as it
+      // starts, so a `sync` in a frame without an update would re-upload the
+      // previous tick's chunks again.
+      if (tick !== lastMeshedTick) {
+        lastMeshedTick = tick;
+        sim.meshUpdate();
+        planet.sync(sim.e.dio_sea_level());
+        water.sync();
+      }
       vegetation.sync(tick, alpha);
       hand.sync(alpha);
       radial.sync();

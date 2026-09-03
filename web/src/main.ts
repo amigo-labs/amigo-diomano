@@ -192,6 +192,8 @@ export interface VerbEventView {
 }
 
 export interface SettlementView {
+  /** The simulation's slot index — stable for the settlement's whole life. */
+  slot: number;
   face: number;
   x: number;
   y: number;
@@ -323,6 +325,14 @@ export async function loadSim(
    */
   const walkerPool: WalkerView[] = [];
   const walkerLive: WalkerView[] = [];
+  /** The same arrangement for settlements and pickups, which the renderer and
+   * the audio read every tick and never keep. */
+  const settlementPool: SettlementView[] = [];
+  const settlementLive: SettlementView[] = [];
+  const pickupPool: PickupView[] = [];
+  const pickupLive: PickupView[] = [];
+  /** Handed back when no verb landed since the caller last asked — most frames. */
+  const noEvents: VerbEventView[] = [];
 
   const sim: Sim = {
     e,
@@ -400,42 +410,59 @@ export async function loadSim(
     },
 
     settlements(): SettlementView[] {
-      const out: SettlementView[] = [];
+      // Pooled like `walkers()`, and live in the same way: the next call
+      // rewrites the array. `slot` is the simulation's slot index, which is
+      // what lets a caller tell "this settlement rose a tier" from "a new one
+      // was founded where the old one stood".
+      let n = 0;
       for (let i = 0; i < maxSettlements; i++) {
         const o = i * settlementStride;
         if ((settlementBytes.getUint8(o + SETTLEMENT.FLAGS) & 1) === 0) continue;
-        out.push({
-          face: settlementBytes.getUint8(o + SETTLEMENT.FACE),
-          x: settlementBytes.getUint8(o + SETTLEMENT.X),
-          y: settlementBytes.getUint8(o + SETTLEMENT.Y),
-          size: settlementBytes.getUint8(o + SETTLEMENT.SIZE),
-          tier: settlementBytes.getUint8(o + SETTLEMENT.TIER),
-          owner: settlementBytes.getUint8(o + SETTLEMENT.OWNER),
-          pop: settlementBytes.getUint8(o + SETTLEMENT.POP),
-        });
+        let view = settlementPool[n];
+        if (!view) {
+          view = { slot: 0, face: 0, x: 0, y: 0, size: 0, tier: 0, owner: 0, pop: 0 };
+          settlementPool[n] = view;
+        }
+        view.slot = i;
+        view.face = settlementBytes.getUint8(o + SETTLEMENT.FACE);
+        view.x = settlementBytes.getUint8(o + SETTLEMENT.X);
+        view.y = settlementBytes.getUint8(o + SETTLEMENT.Y);
+        view.size = settlementBytes.getUint8(o + SETTLEMENT.SIZE);
+        view.tier = settlementBytes.getUint8(o + SETTLEMENT.TIER);
+        view.owner = settlementBytes.getUint8(o + SETTLEMENT.OWNER);
+        view.pop = settlementBytes.getUint8(o + SETTLEMENT.POP);
+        n += 1;
       }
-      return out;
+      settlementLive.length = 0;
+      for (let i = 0; i < n; i++) settlementLive.push(settlementPool[i]!);
+      return settlementLive;
     },
 
     pickups(): PickupView[] {
-      const out: PickupView[] = [];
+      let n = 0;
       for (let i = 0; i < maxPickups; i++) {
         const o = i * pickupStride;
         if ((pickupBytes.getUint8(o + PICKUP.FLAGS) & 1) === 0) continue;
-        out.push({
-          face: pickupBytes.getUint8(o + PICKUP.FACE),
-          x: pickupBytes.getUint8(o + PICKUP.X),
-          y: pickupBytes.getUint8(o + PICKUP.Y),
-          power: pickupBytes.getUint8(o + PICKUP.POWER),
-        });
+        let view = pickupPool[n];
+        if (!view) {
+          view = { face: 0, x: 0, y: 0, power: 0 };
+          pickupPool[n] = view;
+        }
+        view.face = pickupBytes.getUint8(o + PICKUP.FACE);
+        view.x = pickupBytes.getUint8(o + PICKUP.X);
+        view.y = pickupBytes.getUint8(o + PICKUP.Y);
+        view.power = pickupBytes.getUint8(o + PICKUP.POWER);
+        n += 1;
       }
-      return out;
+      pickupLive.length = 0;
+      for (let i = 0; i < n; i++) pickupLive.push(pickupPool[i]!);
+      return pickupLive;
     },
 
     verbEvents(sinceWritten: number): { events: VerbEventView[]; written: number } {
       const written = e.dio_verb_events_written() >>> 0;
+      if (written === sinceWritten) return { events: noEvents, written };
       const events: VerbEventView[] = [];
-      if (written === sinceWritten) return { events, written };
       // Clamp to the ring: a caller more than a full ring behind has lost the
       // oldest events, and reading them anyway would replay stale ones as new.
       const first = Math.max(sinceWritten, written - verbEventCapacity);
