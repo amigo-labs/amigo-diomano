@@ -26,7 +26,8 @@ export function withTransform(
 }
 
 /**
- * Concatenate geometries into one, positions and normals only.
+ * Concatenate geometries into one: positions, normals, and colours if any part
+ * has them.
  *
  * `three/examples/jsm/utils/BufferGeometryUtils` does this and more, but the
  * only non-core three.js imports in this project are the four post-processing
@@ -42,20 +43,29 @@ export function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeom
   let total = 0;
   for (const g of flat) total += g.getAttribute("position").count;
 
+  // A `color` attribute rides along when any part carries one — `models.ts`
+  // paints trunks and roofs with it. Parts without one come out white, which
+  // under `vertexColors` multiplies to the material's own colour.
+  const coloured = flat.some((g) => g.hasAttribute("color"));
   const position = new Float32Array(total * 3);
   const normal = new Float32Array(total * 3);
+  const color = coloured ? new Float32Array(total * 3).fill(1) : null;
   let at = 0;
   for (const g of flat) {
     const p = g.getAttribute("position");
     const n = g.getAttribute("normal");
     position.set(p.array as Float32Array, at * 3);
     normal.set(n.array as Float32Array, at * 3);
+    if (color && g.hasAttribute("color")) {
+      color.set(g.getAttribute("color").array as Float32Array, at * 3);
+    }
     at += p.count;
   }
 
   const merged = new THREE.BufferGeometry();
   merged.setAttribute("position", new THREE.BufferAttribute(position, 3));
   merged.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
+  if (color) merged.setAttribute("color", new THREE.BufferAttribute(color, 3));
   return merged;
 }
 

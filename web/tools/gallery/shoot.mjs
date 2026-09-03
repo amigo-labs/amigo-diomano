@@ -1,0 +1,54 @@
+/**
+ * Screenshot the model gallery in headless Chromium.
+ *
+ * Usage:  node tools/gallery/shoot.mjs [out.png] [tier]
+ * Needs `tools/gallery/dist` (see index.html) and `public/models/*.glb`.
+ */
+import { existsSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { extname, join, normalize, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const WEB_ROOT = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const OUT = resolve(process.argv[2] ?? join(WEB_ROOT, "tools/gallery/gallery.png"));
+const TIER = process.argv[3] ? `?tier=${process.argv[3]}` : "";
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
+
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  let rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/").replace(/^\/+/, "");
+  if (rel === "" || rel === ".") rel = "index.html";
+  for (const file of [join(WEB_ROOT, "tools/gallery/dist", rel), join(WEB_ROOT, "public", rel)]) {
+    if (!file.startsWith(WEB_ROOT)) continue;
+    try {
+      if (!statSync(file).isFile()) continue;
+      res.writeHead(200, { "content-type": MIME[extname(file)] ?? "application/octet-stream" });
+      res.end(await readFile(file));
+      return;
+    } catch {}
+  }
+  res.writeHead(404).end("not found");
+});
+await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
+const { port } = server.address();
+
+const { chromium } = await import("playwright");
+const executablePath = ["/opt/pw-browsers/chromium"].find((p) => existsSync(p));
+const browser = await chromium.launch({
+  headless: true,
+  args: ["--enable-unsafe-swiftshader"],
+  ...(executablePath ? { executablePath } : {}),
+});
+const page = await browser.newPage({ viewport: { width: 1920, height: 600 } });
+page.on("pageerror", (err) => {
+  console.error(`page error: ${err.message}`);
+  process.exit(1);
+});
+await page.goto(`http://127.0.0.1:${port}/${TIER}`, { waitUntil: "load" });
+await page.waitForSelector("body[data-ready]", { timeout: 20000 });
+await page.waitForTimeout(300);
+await page.screenshot({ path: OUT, fullPage: true });
+console.log(OUT);
+await browser.close();
+server.close();

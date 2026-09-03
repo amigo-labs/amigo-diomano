@@ -29,10 +29,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const OUT = join(ROOT, "web/public/models/villager.glb");
+const MODELS = join(ROOT, "web/public/models");
 
 /**
- * The figure, as boxes. One unit tall, standing on y = 0, facing -Z.
+ * The figure, as boxes. One unit tall, standing on y = 0, facing -Z. This is
+ * the **tier-1** figure — `villager-low.glb` — drawn when a thousand of them
+ * may be on screen on integrated graphics (§7.6). The tier-2 figure is
+ * `DETAILED_PARTS` below.
  *
  * The joint heights matter beyond the silhouette: `vegetation.ts` reads limbs
  * back out of the geometry by comparing vertex height against HIP and SHOULDER,
@@ -70,41 +73,73 @@ const PARTS = [
   [[0.075, 0.025, -0.03], [0.09, 0.05, 0.19], 1],
 ];
 
-const positions = [];
-const normals = [];
-
-/** Six quads, flat-shaded, with the top face optionally tapered. */
-function box([cx, cy, cz], [sx, sy, sz], taper) {
-  const hx = sx / 2;
-  const hy = sy / 2;
-  const hz = sz / 2;
-  const tx = hx * taper;
-  const tz = hz * taper;
-  // Eight corners: bottom four at full width, top four tapered.
-  const v = [
-    [cx - hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz - hz],
-    [cx + hx, cy - hy, cz + hz], [cx - hx, cy - hy, cz + hz],
-    [cx - tx, cy + hy, cz - tz], [cx + tx, cy + hy, cz - tz],
-    [cx + tx, cy + hy, cz + tz], [cx - tx, cy + hy, cz + tz],
-  ];
-  const faces = [
-    [0, 3, 2, 1], // bottom
-    [4, 5, 6, 7], // top
-    [0, 1, 5, 4], // -z
-    [2, 3, 7, 6], // +z
-    [1, 2, 6, 5], // +x
-    [3, 0, 4, 7], // -x
-  ];
-  for (const [a, b, c, d] of faces) {
-    const e1 = sub(v[b], v[a]);
-    const e2 = sub(v[c], v[a]);
-    const n = normalise(cross(e1, e2));
-    for (const idx of [a, b, c, a, c, d]) {
-      positions.push(...v[idx]);
-      normals.push(...n);
-    }
-  }
-}
+/**
+ * The tier-2 figure — `villager.glb`. The same person with the parts a
+ * silhouette this size can actually show: a head with a jaw and a cap of hair,
+ * a neck, shoulders, a tunic with a belt over the hips, arms with elbows and
+ * hands, legs with knees and boots. ~500 triangles against the tier-1 figure's
+ * 204, which at 1,024 walkers is half a million — comfortable at tier 2, and
+ * the reason tier 1 keeps the boxes.
+ *
+ * # The joint lines still hold
+ *
+ * `vegetation.ts` classifies vertices by position: below HIP is a leg, between
+ * HIP and SHOULDER and outboard of TORSO_HALF_WIDTH is an arm, everything else
+ * is body. So every torso part between the hip and the shoulder is kept inside
+ * the torso half width — the tunic's hem included, which is why it does not
+ * flare — and the shoulder pads sit *above* the shoulder line, where they count
+ * as body and do not swing.
+ *
+ * Entries are `[centre, size, taper]` boxes as above, or
+ * `{ prism: [centre, radius, height, sides, taper] }` for the round parts.
+ */
+const DETAILED_PARTS = [
+  // head: an octagonal prism narrowing toward the crown, a jaw under it, a nose,
+  // a cap of hair, two ears
+  { prism: [[0, 0.905, 0.0], 0.105, 0.19, 8, 0.86] },
+  [[0, 0.822, 0.01], [0.15, 0.05, 0.14], 0.8],
+  [[0, 0.885, -0.11], [0.035, 0.04, 0.035], 0.9],
+  { prism: [[0, 0.985, 0.005], 0.112, 0.055, 8, 0.7] },
+  [[-0.11, 0.9, 0.01], [0.025, 0.05, 0.04], 1],
+  [[0.11, 0.9, 0.01], [0.025, 0.05, 0.04], 1],
+  // neck
+  [[0, 0.785, 0], [0.08, 0.06, 0.08], 1],
+  // shoulders, above the shoulder line so they are body
+  [[-0.15, 0.735, 0], [0.13, 0.06, 0.15], 0.75],
+  [[0.15, 0.735, 0], [0.13, 0.06, 0.15], 0.75],
+  // chest, belly, belt: all inside the torso half width
+  [[0, 0.675, 0], [0.23, 0.13, 0.17], 0.94],
+  [[0, 0.57, 0], [0.22, 0.09, 0.155], 1.04],
+  [[0, 0.505, 0], [0.23, 0.05, 0.165], 1],
+  // tunic pleats down the front
+  [[-0.06, 0.6, -0.085], [0.03, 0.2, 0.012], 1],
+  [[0.0, 0.6, -0.087], [0.03, 0.2, 0.012], 1],
+  [[0.06, 0.6, -0.085], [0.03, 0.2, 0.012], 1],
+  // hips: below the hip line, so they split left and right with the legs
+  [[0, 0.44, 0], [0.24, 0.06, 0.17], 1],
+  // arms: upper arm, elbow, forearm, hand, thumb — all outboard of the torso
+  [[-0.19, 0.64, 0], [0.085, 0.13, 0.095], 0.9],
+  [[0.19, 0.64, 0], [0.085, 0.13, 0.095], 0.9],
+  [[-0.19, 0.565, 0], [0.09, 0.04, 0.1], 1],
+  [[0.19, 0.565, 0], [0.09, 0.04, 0.1], 1],
+  [[-0.19, 0.49, -0.005], [0.07, 0.12, 0.08], 0.9],
+  [[0.19, 0.49, -0.005], [0.07, 0.12, 0.08], 0.9],
+  [[-0.19, 0.41, -0.01], [0.075, 0.08, 0.085], 0.85],
+  [[0.19, 0.41, -0.01], [0.075, 0.08, 0.085], 0.85],
+  [[-0.155, 0.43, -0.045], [0.025, 0.04, 0.03], 1],
+  [[0.155, 0.43, -0.045], [0.025, 0.04, 0.03], 1],
+  // legs: thigh, knee, shin, boot cuff, foot
+  [[-0.075, 0.335, 0], [0.105, 0.17, 0.11], 0.95],
+  [[0.075, 0.335, 0], [0.105, 0.17, 0.11], 0.95],
+  [[-0.075, 0.245, -0.005], [0.1, 0.035, 0.11], 1],
+  [[0.075, 0.245, -0.005], [0.1, 0.035, 0.11], 1],
+  [[-0.075, 0.15, 0], [0.085, 0.16, 0.09], 1.08],
+  [[0.075, 0.15, 0], [0.085, 0.16, 0.09], 1.08],
+  [[-0.075, 0.075, 0], [0.1, 0.035, 0.105], 1],
+  [[0.075, 0.075, 0], [0.1, 0.035, 0.105], 1],
+  [[-0.075, 0.025, -0.03], [0.095, 0.05, 0.2], 0.9],
+  [[0.075, 0.025, -0.03], [0.095, 0.05, 0.2], 0.9],
+];
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a, b) => [
@@ -117,74 +152,148 @@ function normalise(v) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 
-for (const [centre, size, taper] of PARTS) box(centre, size, taper);
+/** Flat-shaded triangles from parts, for one figure. */
+function build(parts) {
+  const positions = [];
+  const normals = [];
 
-const count = positions.length / 3;
-const posArray = new Float32Array(positions);
-const nrmArray = new Float32Array(normals);
+  /** One flat quad, `a b c d` counter-clockwise seen from outside. */
+  const quad = (a, b, c, d) => {
+    const n = normalise(cross(sub(b, a), sub(c, a)));
+    for (const v of [a, b, c, a, c, d]) {
+      positions.push(...v);
+      normals.push(...n);
+    }
+  };
 
-const min = [Infinity, Infinity, Infinity];
-const max = [-Infinity, -Infinity, -Infinity];
-for (let i = 0; i < count; i++) {
-  for (let k = 0; k < 3; k++) {
-    min[k] = Math.min(min[k], posArray[i * 3 + k]);
-    max[k] = Math.max(max[k], posArray[i * 3 + k]);
+  /** Six quads, flat-shaded, with the top face optionally tapered. */
+  function box([cx, cy, cz], [sx, sy, sz], taper) {
+    const hx = sx / 2;
+    const hy = sy / 2;
+    const hz = sz / 2;
+    const tx = hx * taper;
+    const tz = hz * taper;
+    // Eight corners: bottom four at full width, top four tapered.
+    const v = [
+      [cx - hx, cy - hy, cz - hz], [cx + hx, cy - hy, cz - hz],
+      [cx + hx, cy - hy, cz + hz], [cx - hx, cy - hy, cz + hz],
+      [cx - tx, cy + hy, cz - tz], [cx + tx, cy + hy, cz - tz],
+      [cx + tx, cy + hy, cz + tz], [cx - tx, cy + hy, cz + tz],
+    ];
+    const faces = [
+      [0, 3, 2, 1], // bottom
+      [4, 5, 6, 7], // top
+      [0, 1, 5, 4], // -z
+      [2, 3, 7, 6], // +z
+      [1, 2, 6, 5], // +x
+      [3, 0, 4, 7], // -x
+    ];
+    for (const [a, b, c, d] of faces) quad(v[a], v[b], v[c], v[d]);
   }
+
+  /** A right prism on a regular polygon, flat-shaded, top tapered. */
+  function prism([cx, cy, cz], radius, height, sides, taper) {
+    const lo = [];
+    const hi = [];
+    for (let i = 0; i < sides; i++) {
+      const a = (i / sides) * Math.PI * 2 + Math.PI / sides;
+      lo.push([cx + Math.sin(a) * radius, cy - height / 2, cz + Math.cos(a) * radius]);
+      hi.push([cx + Math.sin(a) * radius * taper, cy + height / 2, cz + Math.cos(a) * radius * taper]);
+    }
+    for (let i = 0; i < sides; i++) {
+      const j = (i + 1) % sides;
+      quad(lo[i], lo[j], hi[j], hi[i]);
+    }
+    // Caps as fans, wound outward.
+    for (let i = 1; i < sides - 1; i++) {
+      const n = [0, 1, 0];
+      for (const v of [hi[0], hi[i], hi[i + 1]]) {
+        positions.push(...v);
+        normals.push(...n);
+      }
+      const m = [0, -1, 0];
+      for (const v of [lo[0], lo[i + 1], lo[i]]) {
+        positions.push(...v);
+        normals.push(...m);
+      }
+    }
+  }
+
+  for (const part of parts) {
+    if (Array.isArray(part)) box(part[0], part[1], part[2]);
+    else prism(...part.prism);
+  }
+  return { positions: new Float32Array(positions), normals: new Float32Array(normals) };
 }
 
 // --- GLB assembly ----------------------------------------------------------
 // Written by hand rather than with a library: this is one mesh with two
 // attributes, and the whole container is a header, a JSON chunk and a binary
 // chunk. A dependency to emit 9 KB would be the larger thing.
-const posBytes = Buffer.from(posArray.buffer);
-const nrmBytes = Buffer.from(nrmArray.buffer);
-const bin = Buffer.concat([posBytes, nrmBytes]);
+function writeGlb(name, { positions: posArray, normals: nrmArray }) {
+  const count = posArray.length / 3;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < count; i++) {
+    for (let k = 0; k < 3; k++) {
+      min[k] = Math.min(min[k], posArray[i * 3 + k]);
+      max[k] = Math.max(max[k], posArray[i * 3 + k]);
+    }
+  }
+  const posBytes = Buffer.from(posArray.buffer);
+  const nrmBytes = Buffer.from(nrmArray.buffer);
+  const bin = Buffer.concat([posBytes, nrmBytes]);
 
-const gltf = {
-  asset: {
-    version: "2.0",
-    generator: "diomano scripts/build-figure.mjs",
-    copyright: "CC0 1.0 — authored for diomano, see docs/ASSETS.md",
-  },
-  scene: 0,
-  scenes: [{ nodes: [0] }],
-  nodes: [{ mesh: 0, name: "villager" }],
-  meshes: [{ name: "villager", primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, mode: 4 }] }],
-  accessors: [
-    { bufferView: 0, componentType: 5126, count, type: "VEC3", min, max },
-    { bufferView: 1, componentType: 5126, count, type: "VEC3" },
-  ],
-  bufferViews: [
-    { buffer: 0, byteOffset: 0, byteLength: posBytes.length, target: 34962 },
-    { buffer: 0, byteOffset: posBytes.length, byteLength: nrmBytes.length, target: 34962 },
-  ],
-  buffers: [{ byteLength: bin.length }],
-};
+  const gltf = {
+    asset: {
+      version: "2.0",
+      generator: "diomano scripts/build-figure.mjs",
+      copyright: "CC0 1.0 — authored for diomano, see docs/ASSETS.md",
+    },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0, name: "villager" }],
+    meshes: [{ name: "villager", primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, mode: 4 }] }],
+    accessors: [
+      { bufferView: 0, componentType: 5126, count, type: "VEC3", min, max },
+      { bufferView: 1, componentType: 5126, count, type: "VEC3" },
+    ],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: posBytes.length, target: 34962 },
+      { buffer: 0, byteOffset: posBytes.length, byteLength: nrmBytes.length, target: 34962 },
+    ],
+    buffers: [{ byteLength: bin.length }],
+  };
 
-const pad = (buf, to, fill) => {
-  const extra = (to - (buf.length % to)) % to;
-  return extra === 0 ? buf : Buffer.concat([buf, Buffer.alloc(extra, fill)]);
-};
-const jsonChunk = pad(Buffer.from(JSON.stringify(gltf), "utf8"), 4, 0x20);
-const binChunk = pad(bin, 4, 0);
+  const pad = (buf, to, fill) => {
+    const extra = (to - (buf.length % to)) % to;
+    return extra === 0 ? buf : Buffer.concat([buf, Buffer.alloc(extra, fill)]);
+  };
+  const jsonChunk = pad(Buffer.from(JSON.stringify(gltf), "utf8"), 4, 0x20);
+  const binChunk = pad(bin, 4, 0);
 
-const header = Buffer.alloc(12);
-header.writeUInt32LE(0x46546c67, 0); // "glTF"
-header.writeUInt32LE(2, 4);
-header.writeUInt32LE(12 + 8 + jsonChunk.length + 8 + binChunk.length, 8);
+  const header = Buffer.alloc(12);
+  header.writeUInt32LE(0x46546c67, 0); // "glTF"
+  header.writeUInt32LE(2, 4);
+  header.writeUInt32LE(12 + 8 + jsonChunk.length + 8 + binChunk.length, 8);
 
-const jsonHeader = Buffer.alloc(8);
-jsonHeader.writeUInt32LE(jsonChunk.length, 0);
-jsonHeader.writeUInt32LE(0x4e4f534a, 4); // "JSON"
+  const jsonHeader = Buffer.alloc(8);
+  jsonHeader.writeUInt32LE(jsonChunk.length, 0);
+  jsonHeader.writeUInt32LE(0x4e4f534a, 4); // "JSON"
 
-const binHeader = Buffer.alloc(8);
-binHeader.writeUInt32LE(binChunk.length, 0);
-binHeader.writeUInt32LE(0x004e4942, 4); // "BIN\0"
+  const binHeader = Buffer.alloc(8);
+  binHeader.writeUInt32LE(binChunk.length, 0);
+  binHeader.writeUInt32LE(0x004e4942, 4); // "BIN\0"
 
-mkdirSync(dirname(OUT), { recursive: true });
-const glb = Buffer.concat([header, jsonHeader, jsonChunk, binHeader, binChunk]);
-writeFileSync(OUT, glb);
-console.log(
-  `villager.glb: ${glb.length} bytes, ${count} vertices, ${count / 3} triangles, ` +
-    `hip ${HIP} shoulder ${SHOULDER} torso half width ${TORSO_HALF_WIDTH}`,
-);
+  mkdirSync(MODELS, { recursive: true });
+  const glb = Buffer.concat([header, jsonHeader, jsonChunk, binHeader, binChunk]);
+  const out = join(MODELS, name);
+  writeFileSync(out, glb);
+  console.log(
+    `${name}: ${glb.length} bytes, ${count} vertices, ${count / 3} triangles, ` +
+      `hip ${HIP} shoulder ${SHOULDER} torso half width ${TORSO_HALF_WIDTH}`,
+  );
+}
+
+writeGlb("villager-low.glb", build(PARTS));
+writeGlb("villager.glb", build(DETAILED_PARTS));
