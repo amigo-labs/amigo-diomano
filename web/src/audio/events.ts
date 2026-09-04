@@ -36,6 +36,7 @@ export function createEvents(synth: Synth): Events {
   let lastCombat = -1;
   let lastMerges = -1;
   let lastClash = -1_000;
+  let lastMerge = -1_000;
   const known = new Map<number, Known>();
   const seen = new Set<number>();
   /** Cell → bitmask of owners with a walker on it, rebuilt when combat rose. */
@@ -135,7 +136,8 @@ export function createEvents(synth: Synth): Events {
         }
         clash(at, Math.min(1, delta / 4));
       }
-      if (merges > lastMerges && tick - lastClash >= CLASH_COOLDOWN_TICKS) {
+      if (merges > lastMerges && tick - lastMerge >= CLASH_COOLDOWN_TICKS) {
+        lastMerge = tick;
         // Two bands joining: a soft, low thump, unplaced.
         synth.voice({ freq: 200, freqEnd: 140, gain: 0.05, decay: 0.12 });
       }

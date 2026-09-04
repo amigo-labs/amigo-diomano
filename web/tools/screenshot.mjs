@@ -12,7 +12,7 @@
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -48,9 +48,11 @@ function serve() {
       let rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/");
       rel = rel.replace(/^\/+/, "");
       if (rel === "" || rel === ".") rel = "index.html";
-      const candidates = [join(WEB_ROOT, "dist", rel), join(WEB_ROOT, "public", rel)];
-      for (const file of candidates) {
-        if (!file.startsWith(WEB_ROOT)) continue;
+      for (const root of [join(WEB_ROOT, "dist"), join(WEB_ROOT, "public")]) {
+        // Inside *this* root, not merely inside web/: a `..` in the path must
+        // not reach a sibling directory.
+        const file = join(root, rel);
+        if (file !== root && !file.startsWith(root + sep)) continue;
         try {
           if (!statSync(file).isFile()) continue;
           const body = await readFile(file);
