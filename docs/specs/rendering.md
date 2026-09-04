@@ -487,7 +487,11 @@ whose other caller passes CSS pixels, counting DPR twice.
   level, so it migrates during play. Sand, not darkened grass: without a
   beach every island is a melted green sticker in a blue fill.
 - Slope- and height-based texturing: steep → rock, flat → grass, high → snow.
-  Avoids UV-mapping a quadsphere entirely.
+  Avoids UV-mapping a quadsphere entirely. The five CC0 maps are sampled with
+  the hardware's maximum anisotropy: the close camera always looks at the ground
+  at a slant and the sphere curves away everywhere else, so plain mipmapping
+  picked a blurred level over most of the frame — the cheapest sharpening there
+  is, and it was off.
 - Fertile land is meadow from tick zero. Generation writes fertility and leaves
   vegetation at 0, so the grass read has to come from the potential, not from
   trees that have not grown yet. Grown vegetation then deepens it to canopy.
@@ -496,6 +500,7 @@ whose other caller passes CSS pixels, counting DPR twice.
   ground stayed unreadable. The horizon still blends into the sky ring.
 - FXAA. Not optional: instanced trees on a sphere alias badly, and MSAA would
   cost more on integrated graphics for a worse result on exactly that content.
+  Tier 2 swaps it for SMAA (below).
 - Rim light on walkers. Functional: tiny figures must separate from any terrain.
 - ACES tone mapping (via `OutputPass`) and subtle bloom.
 
@@ -505,6 +510,20 @@ whose other caller passes CSS pixels, counting DPR twice.
 - Water ripple: two procedural normal fields scrolling at different speeds and
   directions. ✅
 - Sun glitter: high-exponent specular on the ocean. ✅
+- SMAA instead of FXAA. ✅ — FXAA softens every high-contrast texel it mistakes
+  for an edge, so the ground's grain was paying for the trees' silhouettes.
+  Three passes where FXAA is one, which is why tier 1 keeps FXAA.
+- Ground that is sharp up close. ✅ The close view read as blur, and it was not
+  the texture resolution (512² tiles every two cells plus a 7x layer is over
+  250 texels per cell against ~70 pixels): it was smooth value noise. The
+  material splat's offsets and the grain octaves were all soft blobs half a cell
+  wide. The splat now reads a *ridged* fold of the same noise (creases instead
+  of bellies, `SPLAT_SHARP` 4), the grain weights lean on the finest octave, a
+  hash-per-texel speckle fades in with proximity, the surface maps carry more of
+  the picture (`DIO_TEX_CONTRAST` 0.80, a third layer 29x finer in the near
+  third of the zoom), and the fine layer's luminance gradient tilts the normal
+  so the sun lights what was only colour. All of it gated on `detail` and
+  `uTier`: nothing new is paid at orbit distance or at tier 1.
 - Night side with emissive settlement lights. ✅ — and it is not decoration:
   with no HUD, the night hemisphere is otherwise the one place where you cannot
   read who holds what.

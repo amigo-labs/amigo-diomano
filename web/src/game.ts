@@ -75,7 +75,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // the three features that broke when they were per-material copies.
   const view = createView();
   const camera = createCamera(canvas);
-  const planet = createPlanet(sim, view);
+  const planet = createPlanet(sim, view, renderer.capabilities.getMaxAnisotropy());
   const water = createWater(sim, view);
   const atmosphere = createAtmosphere(view);
   const vegetation = createVegetation(sim, tier, view);
