@@ -988,7 +988,39 @@ fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
         let n = clamp_cell(face, gx + dx, gy + dy);
         lava = lava.max(w.lava[n]);
     }
-    (lava, w.fertility[c], w.sediment[c])
+    (lava, corner_fertility(w, face, gx, gy), w.sediment[c])
+}
+
+/// Fertility at a corner, as the ground *reads*: the mean over the 4 x 4 cells
+/// around it where the face has them, the four cells otherwise.
+///
+/// Generation derives fertility from the drainage network, which varies from
+/// one cell to the next, and the shader keys the meadow on it — so the meadow
+/// used to flicker cell by cell, green beside brown beside green, and that
+/// flicker was most of what made the ground read as camouflage rather than as
+/// country. The simulation's field is untouched; this is the picture's reading
+/// of it, and a meadow is a thing several cells across. The 4 x 4 block needs
+/// two cells beyond the corner on each side, which the one-deep ghost ring
+/// cannot supply at a face edge, so the two rings nearest an edge keep the
+/// four-cell value — and the corner *on* the edge, which both faces share,
+/// therefore still averages the same four cells from either side.
+fn corner_fertility(w: &World, face: usize, gx: i32, gy: i32) -> u8 {
+    let n = N as i32;
+    if gx < 2 || gy < 2 || gx > n - 2 || gy > n - 2 {
+        let mut sum = 0i32;
+        for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+            let c = idx_i(face, (gx + dx).clamp(-1, n), (gy + dy).clamp(-1, n));
+            sum += i32::from(w.fertility[c]);
+        }
+        return (sum / 4) as u8;
+    }
+    let mut sum = 0i32;
+    for dy in -2..2 {
+        for dx in -2..2 {
+            sum += i32::from(w.fertility[idx_i(face, gx + dx, gy + dy)]);
+        }
+    }
+    (sum / 16) as u8
 }
 
 /// Material weights at a corner: rock, sand, soil, ash, on the same dual grid
@@ -1015,10 +1047,30 @@ fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
 /// at the corner are counted instead — a set all three faces agree on.
 fn corner_material_weights(w: &World, face: usize, gx: i32, gy: i32) -> [u8; 4] {
     let mut count = [0i32; 5];
-    // Two arms with literal divisors rather than one with a runtime `n`: the
-    // integer results are identical and the compiler turns `/ 3` and `/ 4` into
-    // multiplies and shifts, where a variable divisor is four hardware divisions
-    // per vertex.
+    // Three arms with literal divisors rather than one with a runtime `n`: the
+    // integer results are identical and the compiler turns `/ 3`, `/ 4` and
+    // `/ 16` into multiplies and shifts, where a variable divisor is four
+    // hardware divisions per vertex.
+    let n = N as i32;
+    if gx >= 2 && gy >= 2 && gx <= n - 2 && gy <= n - 2 {
+        // Well inside the face: the 4 x 4 block around the corner, for the same
+        // reason `corner_fertility` widens — a material boundary that wanders
+        // cell by cell is a fleck, and the ground has to come in regions to be
+        // read as ground. Not an option at a face edge (the ghost ring is one
+        // deep), and the corner on the edge must average the same four cells
+        // from both faces, so the two rings nearest an edge stay four-cell.
+        for dy in -2..2 {
+            for dx in -2..2 {
+                count[(w.material[idx_i(face, gx + dx, gy + dy)] as usize).min(4)] += 1;
+            }
+        }
+        return [
+            (255 * count[0] / 16) as u8,
+            (255 * count[1] / 16) as u8,
+            (255 * count[2] / 16) as u8,
+            (255 * count[3] / 16) as u8,
+        ];
+    }
     if let Some(cells) = cube_corner_cells(face, gx, gy) {
         for &c in &cells {
             count[(w.material[c] as usize).min(4)] += 1;
@@ -1445,8 +1497,11 @@ mod tests {
                     // (2+2 and 3+1 both give 254, a pure corner gives 255), and
                     // the eight cube corners divide by 3 and lose nothing at all
                     // — 255/3 is exact, so 1+1+1 is 85 three times.
+                    // The 4 x 4 interior average truncates `255 * k / 16` four
+                    // times, so up to four units can go missing there; 251 is
+                    // the floor for it, 252 for the four-cell corners.
                     assert!(
-                        sum >= 252,
+                        sum >= 251,
                         "face {face} ({gx},{gy}): weights {s:?} sum to only {sum}, so {} of 255 leaks into swamp on ground that has none",
                         255 - sum
                     );

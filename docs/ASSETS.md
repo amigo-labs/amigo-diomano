@@ -13,9 +13,9 @@ memory).
 
 | File | ambientCG asset | Used for | Mean | 1 / mean |
 |---|---|---|---|---|
-| `rock.webp` | Rock035 | rock material, cliff faces (slope band) | 0.092 | 10.90 |
-| `grass.webp` | Ground037 | meadow structure (luminance only, hue stays authored) | 0.556 | 1.80 |
-| `sand.webp` | Ground054 | sand material, beach band | 0.551 | 1.81 |
+| `rock.webp` | Rock030 | rock material, cliff faces (slope band) | 0.301 | 3.33 |
+| `grass.webp` | Grass005 | meadow structure (luminance only, hue stays authored) | 0.442 | 2.26 |
+| `sand.webp` | Ground033 | sand material, beach band | 0.761 | 1.31 |
 | `dirt.webp` | Ground024 | soil / ash / swamp base | 0.409 | 2.44 |
 | `snow.webp` | Snow010A | snow cap structure (luminance only) | 0.924 | 1.08 |
 
@@ -33,11 +33,20 @@ this table and `dioSurfaceMap`'s constants in `planet.ts`.**
 The means are the average of the decoded RGB over the whole file, weighted
 0.299 / 0.587 / 0.114.
 
-Pipeline: the 1K JPG colour maps, resized to 512² and encoded as WebP
-(quality 0.82). ~285 KB total — inside §7.5's 3 MB payload budget without
-needing the KTX2 machinery, which for five small colour maps would cost more
-in transcoder payload than it saves. Revisit KTX2 if the set grows or normal
-maps join it.
+Pipeline: the 1K JPG colour maps, encoded as WebP (quality 0.82) — rock, grass
+and sand at their native 1024², dirt and snow at 512². ~810 KB total — inside
+§7.5's 3 MB payload budget without needing the KTX2 machinery, which for five
+small colour maps would cost more in transcoder payload than it saves. Revisit
+KTX2 if the set grows or normal maps join it.
+
+**Three maps were replaced in 2026-09** (Rock035 → Rock030, Ground037 →
+Grass005, Ground054 → Ground033), because the close view had no recognisable
+grass, stone or sand in it. Rock035 was a dark polished slab whose tenfold
+normalisation gain turned its noise into "pixel clouds"; Ground037 was moss and
+sticks with no blade structure; Ground054 was mud. The replacements are a short
+lawn, a grey veined rock and a light beach sand — all CC0, same source. The
+conversion ran in headless Chromium (canvas → `toDataURL("image/webp")`), and
+the means above were measured on the encoded files the same way.
 
 ## The figure (`web/public/models/villager.glb`, `villager-low.glb`)
 

@@ -524,6 +524,22 @@ whose other caller passes CSS pixels, counting DPR twice.
   third of the zoom), and the fine layer's luminance gradient tilts the normal
   so the sun lights what was only colour. All of it gated on `detail` and
   `uTier`: nothing new is paid at orbit distance or at tier 1.
+- Ground you can name. ✅ Sharp was not enough: the close view was still
+  "pixel clouds", and switching the layers off one at a time showed why. With
+  the noise off the ground was a smooth wash — the maps were doing nothing —
+  and with the maps off it looked exactly as before: the whole picture *was*
+  the procedural grain. Three things followed. The near texture layer is now
+  three times **coarser** than the far one, not finer: one repeat is about
+  seven cells, so a texel is about a screen pixel at the closest zoom, which is
+  what makes a photograph read as a material (two finer layers had been tried
+  first and only made the grain finer). The procedural terms step back as the
+  camera comes in (`procedural = 1 - 0.9 * detail`) and the maps are allowed
+  gain above one. And the mesher averages fertility and material weights over
+  4 x 4 cells away from face edges (`corner_fertility`,
+  `corner_material_weights`): the simulation's fields vary cell by cell, and
+  drawn cell by cell a meadow was a fleck pattern — the simulation is untouched,
+  this is the picture's reading of it. Finally three of the five maps were
+  replaced with ones that have the structure to show (`docs/ASSETS.md`).
 - Night side with emissive settlement lights. ✅ — and it is not decoration:
   with no HUD, the night hemisphere is otherwise the one place where you cannot
   read who holds what.
