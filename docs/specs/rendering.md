@@ -103,6 +103,33 @@ outer quads degenerate to zero area — so the geometry is available if meshing 
 ever spread across frames. Reviving it means a depth of at least one terrace and
 accepting that it will be seen.
 
+### The waterline is where the ground comes up through the sea
+
+The sea used to be draped over the sea bed: each water vertex sat at the warped
+terrain height plus the *unwarped* four-cell mean of `water`, and a 0/255 dry
+flag per vertex told the shader where to stop drawing. The flag could only
+change on the midlines of the vertex grid, so a coast running diagonally to the
+cells was a staircase of one-cell steps — with the surf line and the sea-floor
+tint sitting on every step. The domain warp bent the staircase; it could not
+remove it.
+
+Now the sea is what it is: a **flat surface at the level of the water standing
+in the wet cells** (`mesh::corner_water` — `height + water`, which
+`apply_sea_level` makes exactly `sea_level` in every ocean cell; a lake is its own
+plane), and the land comes up through it. Where none of the four cells is wet the
+surface runs on under the ground at sea level and the depth buffer hides it. The
+depth attribute is that surface minus the terrain *as the terrain mesh draws it*
+— smoothed and warped — and it is **signed**, four units per byte step: the
+water shader interpolates it across the quad and ends the sea where it crosses
+zero, which is exactly where the two smooth surfaces cross. The terrain shader's
+absorption depth is floored by `-vAltitude`, the exact figure for the ocean.
+`the_sea_surface_is_flat_over_the_ocean` and
+`the_waterline_is_where_the_terrain_crosses_the_sea` pin both halves.
+
+The alpha fade over the last terrace of depth stays, but it is no longer hiding a
+polyline: shallow water is see-through, and a hard sheet of 92% alpha at the
+beach would read as glass on sand.
+
 ### Chunk-border normals were discontinuous
 
 Positions on a chunk border were proven bit-identical; normals were not, and
@@ -294,6 +321,13 @@ Two further consequences of tilting:
   there and fine in Chrome, which is the worst way for a bug like this to sit.
 - **Zoom goes to the pointer**, not to the centre of the screen. On a globe,
   zooming to the middle means every approach starts with a chase.
+
+- **The wheel does not zoom while the left button is down.** That drag is
+  raise/lower, and a zoom in the middle of it — which also swings the orbit
+  toward the pointer — moves the ground out from under the brush, so the stroke
+  lands somewhere else. `camera.ts` remembers the left button from `pointerdown`
+  and also honours the event's own button mask; the page still does not scroll,
+  the wheel just waits for the release.
 
 ### Picking is refined against the surface
 

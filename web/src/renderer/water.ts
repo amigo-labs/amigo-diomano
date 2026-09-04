@@ -70,7 +70,7 @@ const SWELL_GLSL = /* glsl */ `
 `;
 
 const VERTEX_SHADER = /* glsl */ `
-  attribute vec4 attrib;   // depth/8 / 255, influence + 128, foam, dry flag
+  attribute vec4 attrib;   // depth/8 / 255, influence + 128, foam, signed depth/4 + 128
 
   uniform float uTime;
   uniform float uSurge;
@@ -78,23 +78,23 @@ const VERTEX_SHADER = /* glsl */ `
 
   varying vec3 vWorld;
   varying vec3 vNormal;
-  varying float vDepth;
   varying float vFoam;
   varying float vInfluence;
-  varying float vDry;
+  varying float vSigned;
 
   ${SWELL_GLSL}
 
   void main() {
     vec3 up = normalize(position);
-    vDepth = attrib.r;
     vInfluence = attrib.g * 2.0 - 1.0;
     vFoam = attrib.b;
-    vDry = attrib.a;
+    // Signed height units of water over this vertex: negative where the sea
+    // surface runs on under dry land. Interpolated across the quad, its zero is
+    // the waterline — see the discard in the fragment shader.
+    vSigned = (attrib.a * 255.0 - 128.0) * 4.0;
 
-    // Height units of water over this vertex. The same decode the fragment
-    // shader does, and the reason the attribute is stored as depth/8.
-    float depth = vDepth * 255.0 * 8.0;
+    // Height units of water over this vertex, for the swell fade.
+    float depth = max(vSigned, 0.0);
     // Zero at the waterline, full by four terraces down. Shallow water really
     // does have a smaller swell, and more importantly the sea must stay welded
     // to the shore: there is no skirt under it.
@@ -140,10 +140,9 @@ const FRAGMENT_SHADER = /* glsl */ `
 
   varying vec3 vWorld;
   varying vec3 vNormal;
-  varying float vDepth;
   varying float vFoam;
   varying float vInfluence;
-  varying float vDry;
+  varying float vSigned;
 
   uniform vec3 uSunDirection;
   uniform vec3 uCameraPosition;
@@ -173,7 +172,11 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 
   void main() {
-    if (vDry < 0.5) discard;
+    // The sea ends where the ground comes up through it. The signed depth is
+    // interpolated across the quad, so this boundary is a curve inside the
+    // quad rather than a polyline on the vertex grid — and the depth test does
+    // the rest, since the surface is flat and the terrain is not.
+    if (vSigned < 0.0) discard;
 
     vec3 up = normalize(vWorld);
     vec3 viewDir = normalize(uCameraPosition - vWorld);
@@ -191,7 +194,7 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     // Beer-Lambert: turquoise shelf against a navy open sea. Both ends the
     // same value is a painted fill from orbit; the transition has to be steep.
-    float depth = vDepth * 255.0 * 8.0;
+    float depth = max(vSigned, 0.0);
     vec3 extinction = vec3(0.055, 0.022, 0.012);
     vec3 transmit = exp(-extinction * depth * 0.55);
     vec3 shallow = vec3(0.07, 0.28, 0.30);
@@ -248,13 +251,12 @@ const FRAGMENT_SHADER = /* glsl */ `
 
     // Fade out over the last terrace of depth.
     //
-    // The dry flag is 0 or 255 *per vertex*, so the discard boundary is a
-    // polyline with one segment per cell: the sea used to end in flat angular
-    // plates with 45-degree edges, which was the single most cell-shaped thing
-    // left in the picture once the terrain stopped being one. Fading the alpha
-    // to zero as the water shallows hides that boundary behind water you can
-    // already see through, and hands the shoreline over to the terrain's own
-    // beach band and the surf line, both of which are smooth fields.
+    // The waterline itself is pixel-exact now (the signed depth above, and the
+    // depth buffer against a flat sea), so this fade is no longer hiding a
+    // vertex-grid polyline. It stays because shallow water *is* see-through:
+    // the last terrace hands over to the terrain's wet-sand band and to the
+    // surf, and a hard-edged sheet of 92% alpha at the beach would read as
+    // glass laid on the sand.
     float edge = smoothstep(0.0, 16.0, depth);
     float alpha = clamp(0.92 + depth * 0.004, 0.92, 0.995) * edge;
     // Foam is the exception: a breaker is opaque white whatever the depth under

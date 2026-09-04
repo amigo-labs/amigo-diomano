@@ -543,7 +543,6 @@ impl Mesh {
                 self.water_positions[vi * 3 + 2] = dir[2] * rw;
 
                 let d8 = ((depth / 8.0) as i32).clamp(0, 255) as u8;
-                wet |= depth > 0.5;
                 self.attribs[vi * 4] = mat;
                 self.attribs[vi * 4 + 1] = veg;
                 self.attribs[vi * 4 + 2] = infl;
@@ -563,13 +562,25 @@ impl Mesh {
                 self.water_attribs[vi * 4] = d8;
                 self.water_attribs[vi * 4 + 1] = infl;
                 self.water_attribs[vi * 4 + 2] = erode;
-                // 0 or 255, not 0 or 1: the attribute is uploaded normalised, so a raw
-                // 1 arrives in the shader as 1/255 and every "is there water here"
-                // test would answer no.
-                self.water_attribs[vi * 4 + 3] = if depth > 0.5 { 255 } else { 0 };
+                // The signed depth, four height units per step, zero at 128: the
+                // shader interpolates it across a quad and ends the sea where it
+                // crosses zero, which is where the terrain crosses the surface.
+                // A byte reaches ±512 units, thirty-two terraces; a dry corner
+                // higher than that next to water is a cliff, and against a cliff
+                // the exact crossing point is invisible anyway.
+                self.water_attribs[vi * 4 + 3] = ((depth / 4.0) as i32 + 128).clamp(0, 255) as u8;
             }
         }
 
+        // Any water in the chunk or its one-cell apron: a waterline can cross a
+        // border quad whose wet cell belongs to the neighbour.
+        for j in -1..=(CHUNK as i32) {
+            let c0 = idx_i(face, cgx as i32 - 1, cgy as i32 + j);
+            if w.water[c0..c0 + CHUNK + 2].iter().any(|&d| d > 0) {
+                wet = true;
+                break;
+            }
+        }
         self.water_present[chunk] = u8::from(wet);
 
         // Normals first, skirt second. The skirt is a duplicate of the border
@@ -777,16 +788,40 @@ impl Mesh {
     }
 
     /// Water surface altitude and depth at a corner, on the same dual grid.
+    ///
+    /// # The sea is flat and the land comes up through it
+    ///
+    /// The water surface at a corner is the level of the water standing in the
+    /// wet cells around it — `height + water`, which `water::apply_sea_level`
+    /// makes exactly `sea_level` in every ocean cell, so the ocean is one flat
+    /// sphere and a lake is its own flat plane. Where none of the four cells is
+    /// wet the surface is sea level anyway: it runs on under the land and the
+    /// depth test hides it.
+    ///
+    /// The depth is that surface minus the terrain *as the terrain mesh draws
+    /// it* — smoothed and warped — and it is signed. The waterline is therefore
+    /// the curve where two smooth surfaces cross, found per pixel by the depth
+    /// buffer and by the shader's interpolated sign, rather than per vertex.
+    ///
+    /// It used to be the four-cell mean of `water`, unwarped, laid on top of the
+    /// warped terrain, with a 0/255 dry flag per vertex deciding where the sea
+    /// ends. The flag could only change on the midlines of the vertex grid, so a
+    /// coast that ran diagonally to the cells was drawn as a staircase of
+    /// one-cell steps — with the surf line and the sea-floor tint sitting on
+    /// every step. The domain warp bent the staircase; it could not remove it.
     fn corner_water(&self, w: &World, face: usize, gx: i32, gy: i32, terrain: f32) -> (f32, f32) {
-        let mut depth = 0i32;
-        let mut n = 0i32;
+        let mut surface = i32::from(w.sea_level);
+        let mut any_wet = false;
         for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
             let c = idx_i(face, (gx + dx).clamp(-1, N as i32), (gy + dy).clamp(-1, N as i32));
-            depth += i32::from(w.water[c]);
-            n += 1;
+            if w.water[c] > 0 {
+                let level = i32::from(w.height[c]) + i32::from(w.water[c]);
+                surface = if any_wet { surface.max(level) } else { level };
+                any_wet = true;
+            }
         }
-        let d = (depth / n.max(1)) as f32;
-        (terrain + d, d)
+        let s = surface as f32;
+        (s, s - terrain)
     }
 }
 
@@ -1508,16 +1543,100 @@ mod tests {
         assert!(wet > 0, "no chunk holds water on an archipelago map");
         assert!(wet < CHUNKS, "every chunk holds water; the flag saves nothing");
 
-        // The flag must agree with the field it summarises.
+        // The flag must agree with the field it summarises: set wherever the
+        // chunk or its one-cell apron holds water, clear where neither does.
         for chunk in 0..CHUNKS {
             let (face, gx, gy) = chunk_origin(chunk);
-            let any = (0..CHUNK)
-                .flat_map(|j| (0..CHUNK).map(move |i| (i, j)))
-                .any(|(i, j)| w.water[idx(face, gx + i, gy + j)] > 0);
-            if any {
-                assert_eq!(m.water_present[chunk], 1, "chunk {chunk} holds water but reads dry");
+            let any = (-1..=CHUNK as i32)
+                .flat_map(|j| (-1..=CHUNK as i32).map(move |i| (i, j)))
+                .any(|(i, j)| w.water[idx_i(face, gx as i32 + i, gy as i32 + j)] > 0);
+            assert_eq!(
+                m.water_present[chunk] != 0,
+                any,
+                "chunk {chunk} flag disagrees with its cells"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sea_surface_is_flat_over_the_ocean() {
+        // Every corner whose four cells are all under the sea sits on exactly the
+        // sea-level sphere, bit for bit: the ocean is one surface, not a sheet
+        // draped over the sea bed.
+        let (w, m) = meshed();
+        let sea = i32::from(w.sea_level);
+        let radius = BASE_RADIUS + sea as f32 * HEIGHT_TO_RADIUS;
+        let mut checked = 0;
+        for chunk in 0..CHUNKS {
+            let (face, cgx, cgy) = chunk_origin(chunk);
+            for gj in 1..VERTS_PER_EDGE - 1 {
+                for gi in 1..VERTS_PER_EDGE - 1 {
+                    let gx = cgx as i32 + gi as i32 - 1;
+                    let gy = cgy as i32 + gj as i32 - 1;
+                    let ocean = [(-1, -1), (0, -1), (-1, 0), (0, 0)].iter().all(|&(dx, dy)| {
+                        let c = idx_i(
+                            face,
+                            (gx + dx).clamp(-1, N as i32),
+                            (gy + dy).clamp(-1, N as i32),
+                        );
+                        w.water[c] > 0 && i32::from(w.height[c]) + i32::from(w.water[c]) == sea
+                    });
+                    if !ocean {
+                        continue;
+                    }
+                    let vi = chunk * VERTS_PER_CHUNK + gj * VERTS_PER_EDGE + gi;
+                    let p = [
+                        m.water_positions[vi * 3],
+                        m.water_positions[vi * 3 + 1],
+                        m.water_positions[vi * 3 + 2],
+                    ];
+                    let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+                    assert!(
+                        (r - radius).abs() < 1e-6,
+                        "ocean vertex {vi} is at radius {r}, not {radius}"
+                    );
+                    checked += 1;
+                }
             }
         }
+        assert!(checked > 1000, "only {checked} ocean corners on a pangaea map");
+    }
+
+    #[test]
+    fn the_waterline_is_where_the_terrain_crosses_the_sea() {
+        // The signed depth attribute and the two positions must tell one story:
+        // positive exactly where the water surface is above the ground the
+        // terrain mesh draws, and it must change sign somewhere — a coast exists.
+        let (_w, m) = meshed();
+        let mut wet = 0;
+        let mut dry = 0;
+        for chunk in 0..CHUNKS {
+            if m.water_present[chunk] == 0 {
+                continue;
+            }
+            for k in 0..VERTS_PER_CHUNK {
+                let vi = chunk * VERTS_PER_CHUNK + k;
+                let signed = (i32::from(m.water_attribs[vi * 4 + 3]) - 128) as f32 * 4.0;
+                let rw = {
+                    let p = &m.water_positions[vi * 3..vi * 3 + 3];
+                    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+                };
+                let rt = {
+                    let p = &m.positions[vi * 3..vi * 3 + 3];
+                    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+                };
+                let geometric = (rw - rt) / HEIGHT_TO_RADIUS;
+                // Four units of quantisation, and the byte saturates at ±512.
+                if geometric.abs() < 500.0 {
+                    assert!(
+                        (geometric - signed).abs() <= 4.5,
+                        "vertex {vi}: depth {geometric} vs attribute {signed}"
+                    );
+                }
+                if signed > 0.0 { wet += 1 } else { dry += 1 }
+            }
+        }
+        assert!(wet > 0 && dry > 0, "no waterline: {wet} wet, {dry} dry vertices");
     }
 
     #[test]

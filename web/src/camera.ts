@@ -108,6 +108,8 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   let targetDistance = distance;
 
   let panning = false;
+  /** Left button held: the hand is raising or lowering land. */
+  let sculpting = false;
   let lastX = 0;
   let lastY = 0;
   /** Intro pan state. Interpolates yaw/pitch directly: the 71 ms smoothing
@@ -129,7 +131,9 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
     // Any press ends the intro tour — the player's intent wins.
     introActive = false;
     // Middle or right button pans; left is the hand (§8: direct drag is
-    // raise/lower, and it must stay frictionless).
+    // raise/lower, and it must stay frictionless). Remembered, because the
+    // wheel must not zoom under a stroke — see `onWheel`.
+    if (ev.button === 0) sculpting = true;
     if (ev.button !== 2 && ev.button !== 1) return;
     // Middle-click is platform autoscroll on some browsers, and that fires on
     // mousedown regardless of what the pointer handler does afterwards.
@@ -165,12 +169,22 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   };
 
   const onPointerUp = (ev: PointerEvent): void => {
-    panning = false;
+    if (ev.button === 0 || ev.type === "pointercancel") sculpting = false;
+    if (ev.button !== 0 || ev.type === "pointercancel") panning = false;
     if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
   };
 
   const onWheel = (ev: WheelEvent): void => {
     ev.preventDefault();
+    // Not while the left button is down. That drag is raise/lower (§8), and a
+    // zoom in the middle of it — which also swings the orbit toward the
+    // pointer — moves the ground out from under the brush, so the stroke lands
+    // somewhere else. The page still does not scroll; the wheel just waits.
+    // Both the remembered state and the event's own button mask, because a
+    // wheel event that arrives without a matching pointerdown (a stroke begun
+    // off-canvas) still carries the mask, and a synthetic one carries only the
+    // state.
+    if (sculpting || (ev.buttons & 1) !== 0) return;
     introActive = false;
     const before = targetDistance;
     targetDistance = clamp(

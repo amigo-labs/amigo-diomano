@@ -463,7 +463,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // pure rock 300 units above sea level — the same pixels, exactly black, on
     // main. Something here produces a NaN or a hard zero for that case and this
     // gate does not touch it. Left as a known defect rather than a guess.
-    float depth = vAttrib.a * 255.0 * 8.0;
+    // Depth from the vertex attribute — the sea surface over the smoothed,
+    // warped ground, so it is continuous along a coast — floored by the exact
+    // figure for the ocean, which is simply how far below the waterline this
+    // pixel is. The attribute still matters for lakes, which stand above it.
+    float depth = max(vAttrib.a * 255.0 * 8.0, -vAltitude * ${(1 / HEIGHT_TO_RADIUS).toFixed(1)});
     float submerged = 1.0 - above;
     albedo *= mix(1.0, exp(-depth * 0.0045), submerged);
     albedo = mix(albedo, vec3(0.04, 0.06, 0.05), smoothstep(12.0, 90.0, depth) * submerged);
