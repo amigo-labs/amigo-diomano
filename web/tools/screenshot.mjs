@@ -45,7 +45,15 @@ function serve() {
       const url = new URL(req.url ?? "/", "http://localhost");
       // Pathname is always absolute. join() treats a segment starting with /
       // as a new root, so "/main.js" would skip WEB_ROOT/dist entirely.
-      let rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/");
+      // Malformed percent-encoding throws; a bad request must not take the
+      // server down mid-screenshot.
+      let rel;
+      try {
+        rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/");
+      } catch {
+        res.writeHead(400).end("bad request");
+        return;
+      }
       rel = rel.replace(/^\/+/, "");
       if (rel === "" || rel === ".") rel = "index.html";
       for (const root of [join(WEB_ROOT, "dist"), join(WEB_ROOT, "public")]) {

@@ -17,7 +17,15 @@ const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; cha
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
-  let rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/").replace(/^\/+/, "");
+  // Malformed percent-encoding throws; a bad request must not take the server
+  // down mid-screenshot.
+  let rel;
+  try {
+    rel = normalize(decodeURIComponent(url.pathname)).replaceAll("\\", "/").replace(/^\/+/, "");
+  } catch {
+    res.writeHead(400).end("bad request");
+    return;
+  }
   if (rel === "" || rel === ".") rel = "index.html";
   for (const root of [join(WEB_ROOT, "tools/gallery/dist"), join(WEB_ROOT, "public")]) {
     // Inside *this* root, not merely inside web/: a `..` in the path must not
