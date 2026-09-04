@@ -6,3 +6,5 @@ web/public/*.wasm
 *.log.tmp
 .DS_Store
 web/screenshots
+web/tools/gallery/dist
+web/tools/gallery/*.png

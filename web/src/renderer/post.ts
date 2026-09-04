@@ -1,9 +1,10 @@
 /**
  * Post-processing. HANDOFF §7.3.
  *
- * Tier 1: FXAA and a tight bloom that only catches lava. FXAA is not
- * optional: instanced trees on a sphere alias badly. Tier 3 (SSAO, DoF,
- * god rays) is out of scope.
+ * Tier 1: FXAA and a tight bloom that only catches lava. Anti-aliasing is not
+ * optional: instanced trees on a sphere alias badly. Tier 2 swaps FXAA for
+ * SMAA, which keeps texture detail FXAA smears. Tier 3 (SSAO, DoF, god rays)
+ * is out of scope.
  *
  * Tone mapping is ACES and lives on the renderer rather than in a pass, so it
  * applies before the composer's colour space conversion.
@@ -13,6 +14,7 @@ import * as THREE from "three";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { SMAAPass } from "three/examples/jsm/postprocessing/SMAAPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { FXAAShader } from "three/examples/jsm/shaders/FXAAShader.js";
@@ -47,8 +49,13 @@ export function createPost(
   // under-detects edges in shadow while over-smoothing highlights — on exactly
   // the aliasing-instanced-trees content §7.3 makes FXAA non-optional for.
   composer.addPass(new OutputPass());
-  const fxaa = new ShaderPass(FXAAShader);
-  composer.addPass(fxaa);
+  // Tier 2 takes SMAA: it resolves the same tree edges without FXAA's habit of
+  // softening every high-contrast texel it mistakes for an edge — the ground's
+  // grain was paying for the trees' silhouettes. Tier 1 keeps FXAA, which is
+  // one cheap pass where SMAA is three. Both want sRGB input, so both sit here.
+  const fxaa = tier >= 2 ? null : new ShaderPass(FXAAShader);
+  if (fxaa) composer.addPass(fxaa);
+  else composer.addPass(new SMAAPass());
 
   const setSize = (width: number, height: number): void => {
     // `EffectComposer.setSize` already multiplies by its pixel ratio for every
@@ -60,7 +67,7 @@ export function createPost(
     // FXAA works in texels, so it needs the *buffer* size, not the CSS size.
     // Getting this wrong is invisible on a 1x display and blurs everything on a
     // retina one.
-    const res = fxaa.material.uniforms.resolution;
+    const res = fxaa?.material.uniforms.resolution;
     if (res) res.value.set(1 / (width * dpr), 1 / (height * dpr));
   };
   // CSS pixels, matching what `resize` is called with. `domElement.width` is the

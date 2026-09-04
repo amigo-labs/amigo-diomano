@@ -18,6 +18,7 @@ import * as THREE from "three";
 import type { OrbitCamera } from "./camera";
 import type { Sim } from "./main";
 import { mergeGeometries, withTransform } from "./renderer/geometry";
+import { taperedBox } from "./renderer/models";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirection, pickCell } from "./renderer/planet";
 import { MOD, POWER, VERB, readModifier } from "./verbs";
 
@@ -107,47 +108,75 @@ export function createHand(
   const proximalParts: THREE.BufferGeometry[] = [];
   const distalParts: THREE.BufferGeometry[] = [];
 
+  /**
+   * A segment of finger: a box that narrows toward its tip, laid along -z
+   * from the origin. `taperedBox` stands on y; a quarter turn about x lays
+   * it forward, which is the direction the fingers run from the knuckle line.
+   */
+  const segment = (w: number, length: number, h: number, taper: number): THREE.BufferGeometry =>
+    withTransform(taperedBox(w, length, h, taper), (g) => g.rotateX(-Math.PI / 2));
+
   proximalParts.push(
     withTransform(new THREE.BoxGeometry(HAND.palm[0], HAND.palm[1], HAND.palm[2]), (g) => {
       // A cupped palm: the heel sits a little lower than the knuckles, which is
       // most of what stops a box reading as a box.
       g.rotateX(-0.12);
     }),
+    // The heel of the hand: a second, lower pad behind the palm, so the
+    // underside has the two planes a palm has rather than one.
+    withTransform(new THREE.BoxGeometry(HAND.palm[0] * 0.78, HAND.palm[1] * 0.9, 0.3), (g) => {
+      g.rotateX(-0.2);
+      g.translate(0, -0.05, HAND.palm[2] / 2 - 0.08);
+    }),
   );
   for (const [offset, proximal, distal, splay] of HAND.fingers) {
-    // The proximal segment runs forward from the knuckle line, splayed.
+    // The proximal segment runs forward from the knuckle line, splayed, and
+    // narrows a little toward the joint.
     proximalParts.push(
-      withTransform(new THREE.BoxGeometry(HAND.thickness, HAND.thickness * 0.85, proximal), (g) => {
-        g.translate(0, 0, -proximal / 2);
+      withTransform(segment(HAND.thickness, proximal, HAND.thickness * 0.85, 0.88), (g) => {
         g.rotateY(splay);
         g.translate(offset, 0.01, KNUCKLE_Z);
       }),
-    );
-    // The distal segment is authored *relative to the knuckle line*, because
-    // that is where its group's origin will be.
-    distalParts.push(
+      // The knuckle itself, a slightly larger cube on the line: what makes a
+      // finger read as jointed rather than as a stick.
       withTransform(
-        new THREE.BoxGeometry(HAND.thickness * 0.86, HAND.thickness * 0.72, distal),
+        new THREE.BoxGeometry(HAND.thickness * 1.08, HAND.thickness * 0.95, HAND.thickness * 0.9),
         (g) => {
-          g.translate(0, 0, -distal / 2);
           g.rotateY(splay);
-          g.translate(offset, 0.01, -proximal);
+          g.translate(offset, 0.02, KNUCKLE_Z);
         },
       ),
     );
+    // The distal segment is authored *relative to the knuckle line*, because
+    // that is where its group's origin will be. It tapers to the fingertip,
+    // and carries a nail plate on its back.
+    distalParts.push(
+      withTransform(segment(HAND.thickness * 0.86, distal, HAND.thickness * 0.72, 0.7), (g) => {
+        g.rotateY(splay);
+        g.translate(offset, 0.01, -proximal);
+      }),
+      withTransform(new THREE.BoxGeometry(HAND.thickness * 0.42, 0.012, distal * 0.36), (g) => {
+        g.translate(0, HAND.thickness * 0.72 * 0.44, -distal * 0.74);
+        g.rotateY(splay);
+        g.translate(offset, 0.01, -proximal);
+      }),
+    );
   }
   // The thumb, off the side and angled forward — the one part that makes a hand
-  // read as a hand rather than as a mitten.
+  // read as a hand rather than as a mitten. Its base is a wedge of the palm.
   proximalParts.push(
-    withTransform(new THREE.BoxGeometry(HAND.thickness * 1.15, HAND.thickness, 0.34), (g) => {
-      g.translate(0, 0, -0.17);
+    withTransform(taperedBox(0.26, 0.2, 0.3, 0.6), (g) => {
+      g.rotateZ(-Math.PI / 2);
+      g.rotateY(0.5);
+      g.translate(-HAND.palm[0] / 2 + 0.1, -0.02, KNUCKLE_Z + 0.42);
+    }),
+    withTransform(segment(HAND.thickness * 1.15, 0.34, HAND.thickness, 0.9), (g) => {
       g.rotateY(0.95);
       g.translate(-HAND.palm[0] / 2 + 0.04, 0.0, KNUCKLE_Z + 0.3);
     }),
   );
   distalParts.push(
-    withTransform(new THREE.BoxGeometry(HAND.thickness, HAND.thickness * 0.8, 0.26), (g) => {
-      g.translate(0, 0, -0.13);
+    withTransform(segment(HAND.thickness, 0.26, HAND.thickness * 0.8, 0.68), (g) => {
       g.rotateY(0.95);
       g.translate(-HAND.palm[0] / 2 + 0.04, 0.0, KNUCKLE_Z + 0.3 - 0.34);
       // Back into knuckle-relative space, like the fingers.

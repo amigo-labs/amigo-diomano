@@ -33,7 +33,8 @@ import * as THREE from "three";
 import type { Sim } from "../main";
 import type { QualityTier } from "../main";
 import { SKY_GLSL } from "./atmosphere";
-import { mergeGeometries, readGlb, withTransform } from "./geometry";
+import { readGlb } from "./geometry";
+import { SPECIES, buildingModels, floraModels, propModels } from "./models";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
 import type { View } from "./view";
 
@@ -173,7 +174,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
    * as distance.
    */
   const species = (geometry: THREE.BufferGeometry, colour: number, cap: number) => {
-    const mesh = new THREE.InstancedMesh(geometry, hazedLambert(view, colour), cap);
+    const mesh = new THREE.InstancedMesh(geometry, hazedLambert(view, colour, geometry), cap);
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
     mesh.frustumCulled = false;
@@ -181,77 +182,52 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     return mesh;
   };
 
-  // A cone this slender reads as a conifer at the scales below; a fatter one
-  // reads as a traffic cone. Open-ended: the base is never visible — the thing
-  // stands on the ground — and it is a third of the triangles.
-  const coniferGeometry = new THREE.ConeGeometry(0.3, 1.0, 5, 1, true);
-  coniferGeometry.translate(0, 0.5, 0);
-  const conifers = species(coniferGeometry, 0x36802a, MAX_CONIFERS);
-
-  // A trunk and a crown, which is the whole difference: a broadleaf read at
-  // this scale is a blob held up off the ground, and a conifer is a blob that
-  // reaches it.
-  const broadleafGeometry = mergeGeometries([
-    withTransform(new THREE.CylinderGeometry(0.07, 0.11, 0.52, 5, 1, true), (g) =>
-      g.translate(0, 0.26, 0),
-    ),
-    withTransform(new THREE.IcosahedronGeometry(0.42, 0), (g) => {
-      g.scale(1.0, 0.78, 1.0);
-      g.translate(0, 0.74, 0);
-    }),
-  ]);
-  const broadleaves = species(broadleafGeometry, 0x4f9c33, MAX_BROADLEAVES);
-
-  // A palm is its silhouette: a bare leaning stem with everything at the top.
-  // Six fronds, each a flat wedge angled out and drooping, because a palm drawn
-  // with a round crown is just a small broadleaf.
-  const frondGeometries: THREE.BufferGeometry[] = [];
-  for (let i = 0; i < 6; i++) {
-    const frond = new THREE.PlaneGeometry(0.24, 0.86);
-    // Pivot at the stem end, so the rotations below swing the frond rather than
-    // sliding it.
-    frond.translate(0, -0.43, 0);
-    frond.rotateX(-Math.PI / 2);
-    frond.rotateZ(0.55);
-    frond.rotateY((i / 6) * Math.PI * 2);
-    frond.translate(0, 0.92, 0);
-    frondGeometries.push(frond);
-  }
-  const palmGeometry = mergeGeometries([
-    withTransform(new THREE.CylinderGeometry(0.045, 0.075, 0.94, 4, 1, true), (g) => {
-      g.translate(0, 0.47, 0);
-      // A lean, so a stand of palms is not a row of posts.
-      g.rotateZ(0.13);
-    }),
-    ...frondGeometries,
-  ]);
-  const palms = species(palmGeometry, 0x67a83c, MAX_PALMS);
-
-  // Scrub: the cheapest thing that reads as ground cover rather than as a small
-  // tree. Wider than it is tall, and it never gets a trunk.
-  const scrubGeometry = new THREE.ConeGeometry(0.55, 0.4, 6, 1, true);
-  scrubGeometry.translate(0, 0.2, 0);
-  const scrub = species(scrubGeometry, 0x5c7a2c, MAX_SCRUB);
+  // The geometry lives in `models.ts`, by tier: the primitives the game
+  // shipped with at tier 1, trees with trunks and tiers and fronds at tier 2.
+  // Each species has one or two variants, one instanced mesh each, and the
+  // cap is shared between them so a fully grown planet costs the same number
+  // of instances at either tier.
+  const models = floraModels(tier);
+  const caps = [MAX_CONIFERS, MAX_BROADLEAVES, MAX_PALMS, MAX_SCRUB];
+  const floraCaps: number[][] = models.geometries.map((variants, kind) =>
+    variants.map(() => Math.ceil((caps[kind] ?? 0) / variants.length)),
+  );
+  const flora: THREE.InstancedMesh[][] = models.geometries.map((variants, kind) =>
+    variants.map((g, v) => species(g, models.colours[kind] ?? 0xffffff, floraCaps[kind]?.[v] ?? 0)),
+  );
 
   /** Species indices into `flora`, so the rules below read as what they mean. */
-  const CONIFER = 0;
-  const BROADLEAF = 1;
-  const PALM = 2;
-  const SCRUB = 3;
-  const flora = [conifers, broadleaves, palms, scrub] as const;
+  const CONIFER = SPECIES.conifer;
+  const BROADLEAF = SPECIES.broadleaf;
+  const PALM = SPECIES.palm;
+  const SCRUB = SPECIES.scrub;
 
   // Settlements are drawn as a *cluster* of blocks whose count is their tier.
   // Population distribution at a glance is half of "the planet is the
   // scoreboard", and one box scaled up by tier is the same silhouette at every
   // tier — a village and a town differed only in how many pixels they covered.
-  const buildingGeometry = new THREE.BoxGeometry(1, 1, 1);
-  buildingGeometry.translate(0, 0.5, 0);
-  const buildingMaterial = settlementMaterial(view);
-  const buildings = new THREE.InstancedMesh(buildingGeometry, buildingMaterial, MAX_BLOCKS);
-  buildings.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  buildings.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BLOCKS * 3), 3);
-  buildings.frustumCulled = false;
-  buildings.count = 0;
+  //
+  // At tier 2 the blocks are buildings: a hut, a house, a tower and a wall
+  // segment, each its own instanced mesh so a village and a citadel differ in
+  // shape and not only in count. Tier 1 keeps the box for all four.
+  const houses = buildingModels(tier);
+  const building = (geometry: THREE.BufferGeometry) => {
+    const mesh = new THREE.InstancedMesh(
+      geometry,
+      settlementMaterial(view, houses.colour, geometry),
+      MAX_BLOCKS,
+    );
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_BLOCKS * 3), 3);
+    mesh.frustumCulled = false;
+    mesh.count = 0;
+    return mesh;
+  };
+  const huts = building(houses.hut);
+  const homes = building(houses.house);
+  const towers = building(houses.tower);
+  const walls = building(houses.wall);
+  const buildings = [huts, homes, towers, walls];
 
   // Walkers: tiny, and they must separate from any terrain, so they get a rim
   // light in the shader rather than relying on contrast (§7.3 tier 1).
@@ -299,8 +275,12 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
    * file stays a plain glTF that anything can produce — see `FIGURE`.
    */
   const loadFigure = async (): Promise<void> => {
-    const response = await fetch("/models/villager.glb");
-    if (!response.ok) throw new Error(`villager.glb: ${response.status}`);
+    // Two figures from the same generator: the detailed one at tier 2, the
+    // original boxes at tier 1, where a thousand of them may be on screen on
+    // integrated graphics.
+    const file = tier >= 2 ? "/models/villager.glb" : "/models/villager-low.glb";
+    const response = await fetch(file);
+    if (!response.ok) throw new Error(`${file}: ${response.status}`);
     const geometry = readGlb(await response.arrayBuffer());
 
     const position = geometry.getAttribute("position");
@@ -336,8 +316,9 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   // One-shot pickups (§5.3): free single-use powers lying on the terrain.
   // Contested map objects, so they have to be findable from orbit — hence a
   // bright unlit octahedron rather than something that shades into the ground.
+  const props = propModels(tier);
   const pickupMesh = new THREE.InstancedMesh(
-    new THREE.OctahedronGeometry(1, 0),
+    props.pickup,
     new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.9 }),
     MAX_PICKUPS,
   );
@@ -350,17 +331,15 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   // "my leader is safe on the magnet" is unusable advice if you cannot see
   // where the magnet is. A spire, because it has to be findable from orbit and
   // anything lying flat on the ground is not.
-  const magnetGeometry = new THREE.ConeGeometry(0.16, 1.0, 4);
-  magnetGeometry.translate(0, 0.5, 0);
-  const magnets = new THREE.InstancedMesh(magnetGeometry, walkerMaterial(view), 2);
+  const magnets = new THREE.InstancedMesh(props.magnet, walkerMaterial(view), 2);
   magnets.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   magnets.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2 * 3), 3);
   magnets.frustumCulled = false;
   magnets.count = 0;
 
   // Lighting lives in `atmosphere.ts`, with the sun it represents.
-  if (tier >= 2) group.add(...flora);
-  group.add(buildings, walkers, pickupMesh, magnets);
+  if (tier >= 2) group.add(...flora.flat());
+  group.add(...buildings, walkers, pickupMesh, magnets);
 
   const dummy = new THREE.Object3D();
   const up = new THREE.Vector3(0, 1, 0);
@@ -480,8 +459,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
    * off sand plus fertility is what a palm fringe actually is.
    */
   const rebuildFlora = (): void => {
-    const counts = [0, 0, 0, 0];
-    const caps = [MAX_CONIFERS, MAX_BROADLEAVES, MAX_PALMS, MAX_SCRUB];
+    const counts = flora.map((variants) => variants.map(() => 0));
     const seaLevel = sim.e.dio_sea_level();
 
     for (let face = 0; face < 6; face++) {
@@ -516,12 +494,21 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
             continue;
           }
 
-          const mesh = flora[kind];
-          const cap = caps[kind] ?? 0;
+          // Which of the species' variants this cell grows: hashed, so a stand
+          // is a mix and a reload grows the same mix.
+          const variants = flora[kind];
+          const variantCounts = counts[kind];
+          if (!variants || !variantCounts) continue;
+          const variant = Math.min(
+            variants.length - 1,
+            Math.floor(hash01(face, x, y, 7) * variants.length),
+          );
+          const mesh = variants[variant];
           if (!mesh) continue;
+          const cap = floraCaps[kind]?.[variant] ?? 0;
 
           for (let stem = 0; stem < stems; stem++) {
-            let n = counts[kind] ?? 0;
+            let n = variantCounts[variant] ?? 0;
             if (n >= cap) break;
             // Offset inside the sampled block, so the lattice disappears.
             const jx = onFace(x + 0.5 + (hash01(face, x, y, stem * 3 + 1) - 0.5) * SAMPLE_STRIDE);
@@ -545,18 +532,22 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
             else colour.setRGB(tint * 0.92, tint, tint * 0.78);
             mesh.instanceColor?.setXYZ(n, colour.r, colour.g, colour.b);
             n += 1;
-            counts[kind] = n;
+            variantCounts[variant] = n;
           }
         }
       }
     }
 
     for (let kind = 0; kind < flora.length; kind++) {
-      const mesh = flora[kind];
-      if (!mesh) continue;
-      mesh.count = counts[kind] ?? 0;
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      const variants = flora[kind];
+      if (!variants) continue;
+      for (let v = 0; v < variants.length; v++) {
+        const mesh = variants[v];
+        if (!mesh) continue;
+        mesh.count = counts[kind]?.[v] ?? 0;
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
     }
   };
 
@@ -721,13 +712,27 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 
       // --- settlements -------------------------------------------------------
       const settlements = sim.settlements();
-      let b = 0;
+      const built = [0, 0, 0, 0];
+      /** Write one building of `kind`, if its mesh has room. */
+      const erect = (kind: number, radius: number, scale: number, turn: number): void => {
+        const mesh = buildings[kind];
+        const n = built[kind] ?? 0;
+        if (!mesh || n >= MAX_BLOCKS) return;
+        place(mesh, n, radius, scale, turn);
+        mesh.instanceColor?.setXYZ(n, colour.r, colour.g, colour.b);
+        built[kind] = n + 1;
+      };
       for (const s of settlements) {
         // Warm for the first god, cool for the second — the same two moods the
         // terrain shader blends by influence.
         colour.setRGB(s.owner === 0 ? 0.95 : 0.62, 0.82, s.owner === 0 ? 0.6 : 0.98);
         const blocks = Math.min(6, 1 + s.tier);
-        for (let k = 0; k < blocks && b < MAX_BLOCKS; k++) {
+        // What the tier builds: huts, then houses, then a keep at the centre of
+        // a town — so a village and a citadel differ in kind, not only in count.
+        // At tier 1 all four meshes are the same box and this is only a split.
+        const centre = s.tier >= 4 ? 2 : s.tier >= 2 ? 1 : 0;
+        const outer = s.tier >= 3 ? 1 : 0;
+        for (let k = 0; k < blocks; k++) {
           // The first block sits on the centre; the rest ring it, so a tier
           // rise adds buildings to a village instead of inflating one house.
           const angle = hash01(s.face, s.x, s.y, k) * Math.PI * 2;
@@ -736,14 +741,27 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
           const fy = onFace(s.y + 0.5 + Math.sin(angle) * spread);
           cellDirectionInto(dir, s.face, fx, fy, sim.N);
           const scale = cellScale * (k === 0 ? 0.42 : 0.26 + hash01(s.face, s.x, s.y, k) * 0.12);
-          place(buildings, b, surfaceAt(s.face, fx, fy), scale, angle);
-          buildings.instanceColor?.setXYZ(b, colour.r, colour.g, colour.b);
-          b += 1;
+          erect(k === 0 ? centre : outer, surfaceAt(s.face, fx, fy), scale, angle);
+        }
+        // A citadel gets a wall: eight segments laid tangentially around the
+        // cluster, at the radius the outer buildings reach.
+        if (blocks >= 5) {
+          for (let k = 0; k < 8; k++) {
+            const angle = (k / 8) * Math.PI * 2;
+            const fx = onFace(s.x + 0.5 + Math.cos(angle) * 1.25);
+            const fy = onFace(s.y + 0.5 + Math.sin(angle) * 1.25);
+            cellDirectionInto(dir, s.face, fx, fy, sim.N);
+            erect(3, surfaceAt(s.face, fx, fy), cellScale * 0.9, angle + Math.PI / 2);
+          }
         }
       }
-      buildings.count = b;
-      buildings.instanceMatrix.needsUpdate = true;
-      if (buildings.instanceColor) buildings.instanceColor.needsUpdate = true;
+      for (let kind = 0; kind < buildings.length; kind++) {
+        const mesh = buildings[kind];
+        if (!mesh) continue;
+        mesh.count = built[kind] ?? 0;
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      }
 
       // --- pickups -----------------------------------------------------------
       const drops = sim.pickups();
@@ -817,17 +835,23 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 function hazedLambert(
   view: View,
   colour: number,
+  geometry?: THREE.BufferGeometry,
   extra = "",
   walk?: { vertex: string; main: string },
 ): THREE.MeshLambertMaterial {
-  // No `vertexColors: true`. It defines `USE_COLOR`, and `color_vertex.glsl`
-  // then runs `vColor *= color` against a `color` attribute that does not exist
-  // on this geometry. `MeshLambertMaterial` — unlike `ShaderMaterial` — has no
-  // `defaultAttributeValues`, so the generic attribute is (0,0,0,1), `vColor`
-  // collapses to zero, and every settlement and walker rendered *black*. The
-  // per-instance colour arrives through `instanceColor`, which sets
-  // `USE_INSTANCING_COLOR` on its own and needs no help from the material.
-  const material = new THREE.MeshLambertMaterial({ color: colour });
+  // `vertexColors` only when the geometry actually carries a `color`
+  // attribute. It defines `USE_COLOR`, and `color_vertex.glsl` then runs
+  // `vColor *= color`; `MeshLambertMaterial` — unlike `ShaderMaterial` — has
+  // no `defaultAttributeValues`, so against a geometry *without* the attribute
+  // the generic value is (0,0,0,1), `vColor` collapses to zero, and every
+  // settlement and walker rendered *black*. With the attribute present (the
+  // tier-2 models in `models.ts`) it is the trunk's brown and the roof's red,
+  // multiplied by the per-instance colour, which arrives through
+  // `instanceColor` and sets `USE_INSTANCING_COLOR` on its own.
+  const material = new THREE.MeshLambertMaterial({
+    color: colour,
+    vertexColors: geometry?.hasAttribute("color") ?? false,
+  });
   material.onBeforeCompile = (shader) => {
     // Shared by reference — see `view.ts`.
     shader.uniforms.uSunDirection = view.sunDirection;
@@ -926,10 +950,15 @@ function inject(source: string, marker: string, replacement: string): string {
  * tier 2 rather than tier 3: with no HUD, the night hemisphere is otherwise the
  * one place where you cannot read who holds what.
  */
-function settlementMaterial(view: View): THREE.MeshLambertMaterial {
+function settlementMaterial(
+  view: View,
+  colour: number,
+  geometry: THREE.BufferGeometry,
+): THREE.MeshLambertMaterial {
   return hazedLambert(
     view,
-    0xd8cbb0,
+    colour,
+    geometry,
     /* glsl */ `
       // Lights come on where the sun has gone down, and only there.
       float dioNight = smoothstep(0.12, -0.25, dot(normalize(vDioWorld), uSunDirection));
@@ -942,6 +971,7 @@ function walkerMaterial(view: View): THREE.MeshLambertMaterial {
   return hazedLambert(
     view,
     0xffffff,
+    undefined,
     /* glsl */ `
       vec3 dioView = normalize(vViewPosition);
       float dioRim = pow(1.0 - max(dot(normalize(vNormal), dioView), 0.0), 2.0);

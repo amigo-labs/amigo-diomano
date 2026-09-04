@@ -309,6 +309,7 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
         w.tick(&[]);
     }
 
+    let smooth_runs_before = mesh.smooth_runs;
     let wall = Instant::now();
     for tick in 0..ticks {
         let mut buf = CommandBuf::new();
@@ -392,10 +393,11 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
     let sim_ms = ms(sim_total);
     println!("{:<28} {:>10.4}", "SIMULATION TOTAL", sim_ms);
     println!(
-        "{:<28} {:>10.4}   ({:.1} chunks/tick)",
+        "{:<28} {:>10.4}   ({:.1} chunks/tick, smoothing ran on {} of {ticks} ticks)",
         "meshing (render budget)",
         ms(extra_mesh),
-        chunks_remeshed as f64 / f
+        chunks_remeshed as f64 / f,
+        mesh.smooth_runs.saturating_sub(smooth_runs_before)
     );
     println!("{:<28} {:>10.4}", "wall clock per tick", wall.as_nanos() as f64 / 1e6 / f);
 

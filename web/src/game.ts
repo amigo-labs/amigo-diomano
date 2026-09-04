@@ -75,7 +75,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // the three features that broke when they were per-material copies.
   const view = createView();
   const camera = createCamera(canvas);
-  const planet = createPlanet(sim, view);
+  const planet = createPlanet(sim, view, renderer.capabilities.getMaxAnisotropy());
   const water = createWater(sim, view);
   const atmosphere = createAtmosphere(view);
   const vegetation = createVegetation(sim, tier, view);
@@ -84,7 +84,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   scene.add(planet.group, water.mesh, atmosphere.group, vegetation.group);
 
   const post = createPost(renderer, scene, camera.camera, tier);
-  const audio = createAudio();
+  const audio = createAudio(LOCAL_PLAYER);
   // The readouts §8 did not allow for, and the reason the deviation was worth
   // it — see the header of `hud.ts` and the note in PLAN.md.
   const hud = createHud(sim, LOCAL_PLAYER);
@@ -157,19 +157,24 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     for (const ev of events) {
       if (ev.player === LOCAL_PLAYER) {
         if (ev.verb === VERB.RAISE || ev.verb === VERB.LOWER) {
-          audio.sculpt();
+          // Tuned to what moved: the ground's material under the brush, and
+          // what the hand is carrying.
+          audio.sculpt(
+            sim.material[sim.idx(ev.face, ev.x, ev.y)] ?? 0,
+            sim.e.dio_hand_material(LOCAL_PLAYER),
+          );
           continue;
         }
         const i = pendingCasts.findIndex((p) => p.verb === ev.verb);
         if (i >= 0) {
           pendingCasts.splice(i, 1);
-          audio.verbSfx(ev.verb);
+          audio.verbSfx(ev.verb, 1, ev);
         }
       } else if (ev.verb !== VERB.RAISE && ev.verb !== VERB.LOWER && ev.verb !== VERB.SET_HAND) {
-        // The opponent's casts, quieter. This is how the other god becomes
-        // audible — the client sees its own commands but never theirs, so
-        // the applied-verb ring is the only source (§ effects, same idea).
-        audio.verbSfx(ev.verb, 0.4);
+        // The opponent's casts, quieter and placed where they landed. This is
+        // how the other god becomes audible — the client sees its own commands
+        // but never theirs, so the applied-verb ring is the only source.
+        audio.verbSfx(ev.verb, 0.5, ev);
       }
     }
     // Casts the sim never applied: refused on cost, or a disabled power.
@@ -203,6 +208,9 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     sim.meshUpdate();
     planet.refreshAll();
     water.refreshAll();
+    // The tick counter restarted at zero; make the next frame go through the
+    // normal path rather than trusting a stale match.
+    lastMeshedTick = -1;
     camera.drift(0);
     ui.hide();
     hud.reset();
@@ -240,6 +248,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
 
   /** Edge detector for the radial menu, so a hint retires the first time. */
   let menuWasOpen = false;
+  /** The tick the mesh was last brought up to date for — see `render`. */
+  let lastMeshedTick = -1;
 
   const loop = createLoop({
     update() {
@@ -257,9 +267,19 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       const tick = sim.e.dio_tick_count();
       view.sync(camera.camera, tick, dtMs);
 
-      sim.meshUpdate();
-      planet.sync(sim.e.dio_sea_level());
-      water.sync();
+      // Meshing follows the *tick*, not the frame. Vertex data can only change
+      // when the simulation advanced, and `Mesh::update` is three smoothing
+      // passes plus 96 chunk hashes even when nothing did — at 60 Hz against a
+      // 30 Hz simulation that was every second call wasted, at 144 Hz four in
+      // five. The three go together: `Mesh::update` clears `meshDirty` as it
+      // starts, so a `sync` in a frame without an update would re-upload the
+      // previous tick's chunks again.
+      if (tick !== lastMeshedTick) {
+        lastMeshedTick = tick;
+        sim.meshUpdate();
+        planet.sync(sim.e.dio_sea_level());
+        water.sync();
+      }
       vegetation.sync(tick, alpha);
       hand.sync(alpha);
       radial.sync();
@@ -280,7 +300,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
         sim.e.dio_tide_offset(),
         sim.e.dio_tide_strength(),
       );
-      audio.sync(sim, dtMs);
+      audio.sync(sim, camera.camera, dtMs);
 
       // The match result, finally read by someone. The sim freezes itself
       // once the outcome is decided; the client's job is the presentation.
@@ -307,6 +327,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     view,
     effects,
     radial,
+    audio,
   };
 
   // Honest tab handling: a hidden tab pauses the world instead of silently

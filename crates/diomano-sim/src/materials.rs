@@ -355,14 +355,97 @@ pub fn apply_rules(w: &mut World, c: usize, rules: &[Rule]) {
     }
 }
 
+/// True when no rule in `rules` can fire this tick, whatever the cell holds.
+///
+/// A rule with a tick predicate — `TickMod8 == 0`, `TickMod60 == 0` — is off
+/// for every cell on the ticks where that predicate is false, and if every rule
+/// in the table carries one that is false now, the whole pass is a no-op that
+/// still visits 24,576 cells. `VEGETATION` is exactly that table on seven of
+/// eight ticks. Derived from the data rather than hard-coded, so a rule added
+/// without a tick predicate turns the skip off by itself.
+///
+/// The tick fields read `w.tick` and nothing else, so the cell passed to
+/// `holds` is irrelevant; zero is as good as any.
+fn table_dormant(w: &World, rules: &[Rule]) -> bool {
+    rules.iter().all(|rule| {
+        rule.preds
+            .iter()
+            .flatten()
+            .any(|p| matches!(p.field, Field::TickMod8 | Field::TickMod60) && !holds(w, 0, p))
+    })
+}
+
+/// Could any row of [`INTERACTIONS`] fire on this cell?
+///
+/// `apply_rules` already stops at a rule's first false predicate, so what a
+/// cell that nothing touches pays for is the interpreter itself — the `Field`
+/// match, the `Option` flattening, the `Cmp` match — eight times over. This is
+/// the table's gating predicates restated as straight-line code, so that only
+/// cells with a chance of changing enter the interpreter at all. It halved the
+/// most expensive pass in the tick.
+///
+/// # Why this is exact
+///
+/// If no rule fires, no field changes, so evaluating every rule against the
+/// cell's *initial* state is exact by induction over the table. The gate must
+/// therefore be true whenever some rule's predicates all hold initially — it is
+/// the disjunction, row by row, of a predicate that row needs:
+///
+/// - rows 1–2, erosion over sand / ash: `Erode > 32`
+/// - rows 3–5, the three lava rows: `Lava > 0`
+/// - row 6, sediment builds soil: `Sediment >= 128`
+/// - row 7, bare dry soil loses fertility: `DryTicks >= 600`, `TickMod60 == 0`,
+///   `Fertility > 0` — all three, because with `DryTicks` alone every bare cell
+///   on the planet would pass on every tick
+/// - row 8, exhausted soil becomes sand: `DryTicks >= 600`, `Fertility == 0`,
+///   `Material == soil`
+///
+/// **Adding a row to `INTERACTIONS` means adding a term here.**
+/// `the_cell_gate_is_implied_by_the_table` fails otherwise, and
+/// `gated_interactions_match_the_unfiltered_pass` is the end-to-end check.
+#[inline]
+fn interactions_may_fire(w: &World, c: usize) -> bool {
+    if w.erode[c] > 32 || w.lava[c] > 0 || w.sediment[c] >= 128 {
+        return true;
+    }
+    if i32::from(w.dry_ticks[c]) < DRY_DECAY_AFTER {
+        return false;
+    }
+    (w.tick.is_multiple_of(60) && w.fertility[c] > 0)
+        || (w.fertility[c] == 0 && w.material[c] == MAT_SOIL)
+}
+
 /// Material interactions, single pass (§4.1 pass 5).
 pub fn interactions(w: &mut World) {
+    interactions_impl(w, true);
+}
+
+/// [`interactions`] without the cell gate, for the test that proves the gate
+/// changes nothing.
+#[cfg(test)]
+fn interactions_unfiltered(w: &mut World) {
+    interactions_impl(w, false);
+}
+
+fn interactions_impl(w: &mut World, gated: bool) {
+    if table_dormant(w, INTERACTIONS) {
+        // Never true for this table — its first row has no tick predicate —
+        // but the mechanism is the same one `vegetation` relies on, and stating
+        // it here is what keeps the two passes symmetric.
+        return;
+    }
     compute_water_near(w);
     for face in 0..6usize {
         for y in 0..N {
             for x in 0..N {
                 let c = idx(face, x, y);
-                apply_rules(w, c, INTERACTIONS);
+                // The dryness bookkeeping below stays in this loop, gated or
+                // not: `consume_nearby_water` takes water from *neighbours*, and
+                // a neighbour earlier in scan order has already read its own
+                // water for the counter. Splitting the loop would change it.
+                if !gated || interactions_may_fire(w, c) {
+                    apply_rules(w, c, INTERACTIONS);
+                }
                 // Dryness bookkeeping feeds the last two rows. Updated after the
                 // rules so a cell that was watered this tick reads as wet for a
                 // full tick before its counter restarts.
@@ -408,6 +491,9 @@ fn compute_water_near(w: &mut World) {
 /// separate is what makes regrowth a recovery mechanic instead of a permanent
 /// loss — burn a forest and the fertility that survives regrows it.
 pub fn vegetation(w: &mut World) {
+    if table_dormant(w, VEGETATION) {
+        return;
+    }
     for face in 0..6usize {
         for y in 0..N {
             for x in 0..N {
@@ -432,10 +518,9 @@ pub fn granular(w: &mut World) {
 fn granular_half(w: &mut World, parity: usize) {
     for face in 0..6usize {
         for y in 0..N {
-            for x in 0..N {
-                if (x + y) & 1 != parity {
-                    continue;
-                }
+            // The cells of this parity, in the same order a full scan with a
+            // parity test visited them, without the test.
+            for x in ((parity + y) & 1..N).step_by(2) {
                 let a = idx(face, x, y);
                 let repose = match w.material[a] {
                     MAT_SAND => REPOSE_SAND,
@@ -743,6 +828,126 @@ mod tests {
             }
         }
         t
+    }
+
+    #[test]
+    fn dormant_tables_are_recognised_from_their_predicates() {
+        let mut w = flat_world(3);
+        for tick in 0..130u32 {
+            w.tick = tick;
+            assert_eq!(table_dormant(&w, VEGETATION), tick % 8 != 0, "tick {tick}");
+            assert!(!table_dormant(&w, INTERACTIONS), "INTERACTIONS has an untimed row");
+        }
+        // One timed row does not put a table to sleep while an untimed one is in it.
+        let mixed = [VEGETATION[0], INTERACTIONS[0]];
+        w.tick = 3;
+        assert!(!table_dormant(&w, &mixed));
+        assert!(table_dormant(&w, &[]), "an empty table has nothing to run");
+    }
+
+    #[test]
+    fn the_cell_gate_is_implied_by_the_table() {
+        // For every rule, "all predicates hold on the initial state" must imply
+        // the gate. Sampled at the thresholds the rules use, where an off-by-one
+        // in the gate would hide.
+        let mut w = flat_world(5);
+        let mut rng = crate::hash::Rng::new(0xC0FFEE);
+        let pick = |rng: &mut crate::hash::Rng, v: &[i32]| v[rng.below(v.len() as u32) as usize];
+        let c = idx(2, 10, 10);
+        for _ in 0..200_000 {
+            w.tick = pick(&mut rng, &[0, 1, 59, 60, 120, 480]) as u32;
+            w.erode[c] = pick(&mut rng, &[0, 31, 32, 33, 255]) as u8;
+            w.lava[c] = pick(&mut rng, &[0, 0, 1, 255]) as u8;
+            w.sediment[c] = pick(&mut rng, &[0, 127, 128, 255]) as u8;
+            w.dry_ticks[c] = pick(&mut rng, &[0, 599, 600, 601, 65535]) as u16;
+            w.fertility[c] = pick(&mut rng, &[0, 0, 1, 140, 255]) as u8;
+            w.material[c] = pick(&mut rng, &[0, 1, 2, 3, 4]) as u8;
+            w.vegetation[c] = pick(&mut rng, &[0, 1, 200]) as u8;
+            w.water[c] = pick(&mut rng, &[0, 1, 15, 16, 48, 49, 500]) as i16;
+            w.water_near[c] = pick(&mut rng, &[0, 15, 16, 500]) as i16;
+            let fires = INTERACTIONS
+                .iter()
+                .any(|rule| rule.preds.iter().flatten().all(|p| holds(&w, c, p)));
+            if fires {
+                assert!(
+                    interactions_may_fire(&w, c),
+                    "a rule fires but the gate is shut: tick {} erode {} lava {} sed {} dry {} fert {} mat {}",
+                    w.tick,
+                    w.erode[c],
+                    w.lava[c],
+                    w.sediment[c],
+                    w.dry_ticks[c],
+                    w.fertility[c],
+                    w.material[c]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gated_interactions_match_the_unfiltered_pass() {
+        // Two identical worlds, ticked identically, then one runs the gated pass
+        // and the other the unfiltered one, at the ticks the gate treats
+        // differently. Lava, sediment and exhausted soil are planted first so
+        // every row of the table actually has something to do.
+        for &(seed, terrain) in &[(0x5EEDu32, 0u8), (7, 1), (99, 2)] {
+            let mut cfg = MapConfig::DEFAULT;
+            cfg.seed = seed;
+            cfg.terrain = terrain;
+            let mut a = World::boxed();
+            let mut b = World::boxed();
+            a.init(&cfg);
+            b.init(&cfg);
+            let plant = |w: &mut World| {
+                for face in 0..6usize {
+                    for k in 0..N {
+                        let c = idx(face, k, (k * 7) % N);
+                        if w.height[c] > 0 {
+                            w.lava[c] = 40;
+                        }
+                        let d = idx(face, (k * 5) % N, k);
+                        w.sediment[d] = 200;
+                        let e = idx(face, (k * 3) % N, (k * 11) % N);
+                        w.dry_ticks[e] = 700;
+                        if k % 2 == 0 {
+                            w.fertility[e] = 0;
+                            w.material[e] = MAT_SOIL;
+                        }
+                    }
+                }
+                w.ghost_copy_all();
+            };
+            for _ in 0..300 {
+                a.tick(&[]);
+                b.tick(&[]);
+            }
+            plant(&mut a);
+            plant(&mut b);
+            assert_eq!(a.state_hash(), b.state_hash());
+            // Ticks 300, 301 and then 359: %60 of 0, 1 and 59.
+            for step in [0usize, 1, 58] {
+                for _ in 0..step {
+                    a.tick(&[]);
+                    b.tick(&[]);
+                }
+                a.ghost_copy_all();
+                b.ghost_copy_all();
+                interactions(&mut a);
+                interactions_unfiltered(&mut b);
+                assert_eq!(
+                    a.state_hash(),
+                    b.state_hash(),
+                    "seed {seed:#x} terrain {terrain} tick {}",
+                    a.tick
+                );
+                assert!(
+                    a.dry_ticks.iter().eq(b.dry_ticks.iter()),
+                    "dry_ticks diverged at tick {}",
+                    a.tick
+                );
+                assert!(a.water_near.iter().eq(b.water_near.iter()));
+            }
+        }
     }
 
     #[test]

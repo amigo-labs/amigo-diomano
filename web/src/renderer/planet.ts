@@ -180,31 +180,66 @@ const FRAGMENT_SHADER = /* glsl */ `
     of competing with it. The clamp bounds what a very dark map's brightest
     speck can do once it has been scaled up by ten.
   */
-  const float DIO_TEX_CONTRAST = 0.62;
+  const float DIO_TEX_CONTRAST = 0.80;
 
   /**
-    A surface map at two scales: the material, and its grain.
+    A surface map at two scales: one for orbit, one for the ground.
 
-    A 512-pixel map projected over a whole planet has one texel to a couple of
-    metres of ground, so up close it is a smooth wash and the only structure
-    left is the procedural noise. Sampling the *same* map again seven times
-    finer and folding it in as the camera approaches costs one extra fetch on
-    the close half of the zoom range and nothing at all on the far half, where
-    the branch is not taken — no new asset, no payload, no second set of means
-    to keep in step.
+    The far layer repeats every two cells, which from orbit is fine colour
+    noise and exactly right. Up close it is wrong in the other direction: a
+    512-texel photograph squeezed into two cells is three or four texels per
+    screen pixel, and a photograph minified that far is not grass or stone any
+    more, it is a statistical grain — the "pixel clouds" the ground used to be
+    made of. The near layer therefore samples the *same* map three times
+    COARSER, so that one repeat is about seven cells and a texel is about a
+    screen pixel at the closest zoom, where blades, grains and cracks are the
+    size the eye expects them. It fades in with proximity and takes over most
+    of the modulation as it does; from orbit it is not sampled at all.
 
-    Both layers are normalised before they meet, so the fine one modulates the
-    coarse one around 1.0 rather than multiplying two absolute brightnesses
-    together and squaring the contrast.
+    A repeat of seven cells would show as tiling, so the near layer's lookup is
+    pushed around by a low, slow noise — a few cells of drift over a dozen —
+    which is the standard way to make a tiled photograph stop being one.
+
+    Two earlier versions of this layer went the other way, seven and then
+    twenty-nine times *finer*, on the theory that close-up detail is small
+    detail. It made the grain finer and the ground no more legible: what makes
+    a texture read as a material is the texel-to-pixel ratio, not the
+    frequency.
   */
-  const float DIO_DETAIL_SCALE = 7.0;
-  vec3 dioSurfaceMap(sampler2D t, vec3 p, vec3 nrm, float scale, float invMean, float detail) {
+  const float DIO_NEAR_SCALE = 0.3;
+  vec3 dioNearPoint(vec3 p) {
+    // Gentle: a tenth of the repeat over a dozen cells. Stronger drift hid the
+    // tiling better and smeared the photograph into the same mush it was
+    // meant to cure.
+    vec3 drift = vec3(dioNoise(p * 2.0), dioNoise(p * 2.0 + 17.0), dioNoise(p * 2.0 - 9.0)) - 0.5;
+    return p + drift * 0.035;
+  }
+  /**
+    'strength' is how much of the picture the map is allowed to be up close,
+    per material. The first rock map (Rock035) was a dark polished slab whose
+    mean was a tenth of the others', so normalising it multiplied its noise and
+    its compression artefacts by ten as well — at full strength the largest
+    single source of "pixel clouds" on a planet that is 70% rock. It has been
+    replaced (docs/ASSETS.md); the per-material knob stays, because the maps
+    differ in how much contrast they were photographed with.
+  */
+  vec3 dioSurfaceMap(sampler2D t, vec3 p, vec3 nrm, float scale, float invMean, float detail, float strength) {
     vec3 coarse = clamp(dioTriplanar(t, p, nrm, scale) * invMean, 0.22, 2.4);
     if (detail > 0.004) {
-      vec3 fine = clamp(dioTriplanar(t, p, nrm, scale * DIO_DETAIL_SCALE) * invMean, 0.35, 1.9);
-      coarse *= mix(vec3(1.0), fine, detail * 0.7);
+      vec3 near = clamp(dioTriplanar(t, dioNearPoint(p), nrm, scale * DIO_NEAR_SCALE) * invMean, 0.45, 1.8);
+      coarse = mix(coarse, near, detail * 0.85);
     }
-    return mix(vec3(1.0), coarse, DIO_TEX_CONTRAST);
+    // Up close the map is allowed to be the picture; from orbit it is a tint.
+    // 'strength' above 1 amplifies the map's deviation from its mean: the
+    // ground maps are low-contrast photographs (moss, sand), and at unit gain
+    // their structure vanished under the shading — measured by switching the
+    // noise off and finding a smooth wash where the grass should have been.
+    return mix(vec3(1.0), coarse, mix(DIO_TEX_CONTRAST, strength, detail));
+  }
+
+  /** Luminance of the near layer, for the bump that lights it. */
+  float dioFineLum(sampler2D t, vec3 p, vec3 nrm, float scale, float invMean) {
+    return dot(dioTriplanar(t, dioNearPoint(p), nrm, scale * DIO_NEAR_SCALE), vec3(0.299, 0.587, 0.114)) * invMean;
   }
 
   // The five materials of world.rs: rock, sand, soil, ash, swamp.
@@ -219,8 +254,32 @@ const FRAGMENT_SHADER = /* glsl */ `
   // hard the decision then is. 0.42 / 3.0: enough spread that the winner in an
   // overlap is genuinely the noise's choice, sharp enough that the transition
   // is a fringe of a cell rather than a fade across one.
-  const float SPLAT_SPREAD = 0.42;
-  const float SPLAT_SHARP = 3.0;
+  const float SPLAT_SPREAD = 0.50;
+  const float SPLAT_SHARP = 4.0;
+
+  /**
+    A ridged reading of the noise: creases where the raw field crosses its
+    midpoint. Value noise on its own is all bellies — smooth blobs the size of
+    half a cell, which is exactly what the ground read as: blur. Folded, the
+    same field has edges, and a material boundary pushed around by it gets
+    corners instead of bulges.
+  */
+  float dioRidged(vec3 p) {
+    return 1.0 - abs(2.0 * dioNoise(p) - 1.0);
+  }
+
+  /**
+    The offset a material weight is pushed by. Mostly a *slow* field — patches
+    four or five cells across — with the creased field above riding on it. The
+    slow part is what makes the ground come in regions: a meadow, a beach, an
+    outcrop, each big enough to be recognised as one thing. Offsets at cell
+    frequency alone shredded every material into flecks of every other, and a
+    fleck of grass beside a fleck of sand beside a fleck of rock is camouflage,
+    not terrain.
+  */
+  float dioSplatNoise(vec3 q) {
+    return 0.65 * dioNoise(q * 11.0) + 0.35 * dioRidged(q * 46.0);
+  }
 
   /*
     The material mixture at this fragment, as five weights.
@@ -244,11 +303,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // One offset per material, so no two boundaries break up in the same place.
     // 46 is a little over a cell at N = 64: fine enough to read as material,
     // coarse enough that a texel still covers less than a noise cell.
-    float nr = dioNoise(up * 46.0);
-    float ns = dioNoise(up * 46.0 + vec3(31.7, 11.3, 57.1));
-    float no = dioNoise(up * 46.0 + vec3(-19.4, 63.2, 27.9));
-    float na = dioNoise(up * 46.0 + vec3(48.6, -37.1, 9.5));
-    float nw = dioNoise(up * 46.0 + vec3(7.2, 24.8, -51.3));
+    float nr = dioSplatNoise(up);
+    float ns = dioSplatNoise(up + vec3(31.7, 11.3, 57.1));
+    float no = dioSplatNoise(up + vec3(-19.4, 63.2, 27.9));
+    float na = dioSplatNoise(up + vec3(48.6, -37.1, 9.5));
+    float nw = dioSplatNoise(up + vec3(7.2, 24.8, -51.3));
     float r = pow(max(raw.x + (nr - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
     float s = pow(max(raw.y + (ns - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
     float o = pow(max(raw.z + (no - 0.5) * SPLAT_SPREAD, 0.0), SPLAT_SHARP);
@@ -303,11 +362,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     if (uTexMix > 0.001) {
       // The reciprocal of each map's own mean colour, measured over the files
       // in web/public/tex and recorded in docs/ASSETS.md. See dioSurfaceMap.
-      tRock = dioSurfaceMap(uTexRock, vWorld, n, 16.0, 10.90, detail);
-      tSand = dioSurfaceMap(uTexSand, vWorld, n, 26.0, 1.81, detail);
-      tGrass = dioSurfaceMap(uTexGrass, vWorld, n, 22.0, 1.80, detail);
-      tSnow = dioSurfaceMap(uTexSnow, vWorld, n, 18.0, 1.08, detail);
-      vec3 tDirt = dioSurfaceMap(uTexDirt, vWorld, n, 20.0, 2.44, detail);
+      tRock = dioSurfaceMap(uTexRock, vWorld, n, 16.0, 3.33, detail, 1.3);
+      tSand = dioSurfaceMap(uTexSand, vWorld, n, 26.0, 1.31, detail, 1.8);
+      tGrass = dioSurfaceMap(uTexGrass, vWorld, n, 22.0, 2.26, detail, 1.9);
+      tSnow = dioSurfaceMap(uTexSnow, vWorld, n, 18.0, 1.08, detail, 1.2);
+      vec3 tDirt = dioSurfaceMap(uTexDirt, vWorld, n, 20.0, 2.44, detail, 1.6);
       // The same weights as the palette, so structure and colour never disagree
       // about which material a fragment is. Soil, ash and swamp all take the
       // dirt map, as they did when this was a step chain on the material id.
@@ -320,7 +379,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     float n1 = dioNoise(up * 14.0);
     float n2 = dioNoise(up * 36.0);
     float n3 = dioNoise(up * 90.0);
-    float grain = n1 * 0.50 + n2 * 0.32 + n3 * 0.18;
+    // Weighted toward the finest octave. The coarse ones are hills of tone
+    // several cells wide; the ground reads its grain from the fine one, and a
+    // mix dominated by the coarse pair was most of what looked like blur.
+    float grain = n1 * 0.25 + n2 * 0.30 + n3 * 0.45;
 
     // The finest octave above is ~3 cells wide, so up close the ground was a
     // smooth fill — most of what read as plastic. Two micro octaves fade in
@@ -335,8 +397,22 @@ const FRAGMENT_SHADER = /* glsl */ `
       micro = mc * 0.6 + dioNoise(up * 1500.0) * 0.4;
     }
 
-    albedo *= 0.82 + grain * 0.34 + (mid - 0.5) * 0.16;
-    albedo *= 1.0 + (micro - 0.5) * 0.34 * detail;
+    // The procedural grain is what the ground is made of from orbit, where
+    // the maps are a tint. Up close the maps are the picture and the noise
+    // steps back, or it lies over the photograph as a haze of blotches and
+    // nothing in it can be recognised.
+    float procedural = 1.0 - 0.9 * detail;
+    albedo *= 1.0 + (grain * 0.34 + (mid - 0.5) * 0.24 - 0.18) * procedural;
+    albedo *= 1.0 + (micro - 0.5) * 0.08 * detail;
+    // Speckle at texel scale, unfiltered: a hash per cell of a fine lattice,
+    // not interpolated. Interpolated noise cannot produce a hard grain at any
+    // frequency; this is the one term here that can, and it is what makes the
+    // ground under the hand read as granular rather than airbrushed. Faded
+    // with the square of proximity so it never shimmers from further out.
+    if (uTier > 1.5 && detail > 0.001) {
+      float speckle = dioHash(floor(up * 3000.0));
+      albedo *= 1.0 + (speckle - 0.5) * 0.05 * detail * detail;
+    }
     // Large-scale warm/cool drift, so no two regions of a continent are quite
     // the same colour — uniform albedo over a smooth mesh is the other half of
     // the plastic look.
@@ -363,7 +439,28 @@ const FRAGMENT_SHADER = /* glsl */ `
     if (detail > 0.001) {
       float mx = dioNoise(normalize(up + tangent * 0.0018) * 620.0);
       float my = dioNoise(normalize(up + bitangent * 0.0018) * 620.0);
-      bumped += (tangent * (mc - mx) + bitangent * (mc - my)) * 1.8 * detail;
+      bumped += (tangent * (mc - mx) + bitangent * (mc - my)) * 0.6 * detail;
+      // And the texture's own structure, lit: the fine layer's luminance
+      // gradient tilts the normal, so the sun picks out what was only colour.
+      // The dominant material's map, three more fetches, tier 2 and close.
+      if (uTier > 1.5 && uTexMix > 0.001) {
+        float step = 0.00025;
+        float l0; float lx; float ly;
+        if (matW.x >= matW.y && matW.x >= matW.z + matW.w + matSwamp) {
+          l0 = dioFineLum(uTexRock, vWorld, n, 16.0, 3.33);
+          lx = dioFineLum(uTexRock, vWorld + tangent * step, n, 16.0, 3.33);
+          ly = dioFineLum(uTexRock, vWorld + bitangent * step, n, 16.0, 3.33);
+        } else if (matW.y >= matW.z + matW.w + matSwamp) {
+          l0 = dioFineLum(uTexSand, vWorld, n, 26.0, 1.31);
+          lx = dioFineLum(uTexSand, vWorld + tangent * step, n, 26.0, 1.31);
+          ly = dioFineLum(uTexSand, vWorld + bitangent * step, n, 26.0, 1.31);
+        } else {
+          l0 = dioFineLum(uTexDirt, vWorld, n, 20.0, 2.44);
+          lx = dioFineLum(uTexDirt, vWorld + tangent * step, n, 20.0, 2.44);
+          ly = dioFineLum(uTexDirt, vWorld + bitangent * step, n, 20.0, 2.44);
+        }
+        bumped += (tangent * (l0 - lx) + bitangent * (l0 - ly)) * 3.0 * detail * uTexMix;
+      }
     }
     n = normalize(bumped);
 
@@ -383,7 +480,10 @@ const FRAGMENT_SHADER = /* glsl */ `
     // Meadow comes in patches, not as a uniform tint keyed on fertility alone:
     // real grassland is mottled where the ground holds water, and the mottling
     // is what stops a green area reading as a decal.
-    float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 52.0) * 0.65 + fert * 0.35);
+    // The patches are several cells across, with only a little cell-scale
+    // variation on top: at cell frequency alone the meadow was a green-and-dun
+    // fleck pattern, which is the opposite of what a patch is for.
+    float meadowPatch = smoothstep(0.30, 0.70, dioNoise(up * 9.0) * 0.5 + dioNoise(up * 52.0) * 0.15 + fert * 0.35);
     // Grass keeps its authored hue and takes only the texture's *luminance*
     // as structure: green photo times green palette oversaturates. The gain is
     // gone with the rest of them — dioSurfaceMap already centres the map on
@@ -463,7 +563,11 @@ const FRAGMENT_SHADER = /* glsl */ `
     // pure rock 300 units above sea level — the same pixels, exactly black, on
     // main. Something here produces a NaN or a hard zero for that case and this
     // gate does not touch it. Left as a known defect rather than a guess.
-    float depth = vAttrib.a * 255.0 * 8.0;
+    // Depth from the vertex attribute — the sea surface over the smoothed,
+    // warped ground, so it is continuous along a coast — floored by the exact
+    // figure for the ocean, which is simply how far below the waterline this
+    // pixel is. The attribute still matters for lakes, which stand above it.
+    float depth = max(vAttrib.a * 255.0 * 8.0, -vAltitude * ${(1 / HEIGHT_TO_RADIUS).toFixed(1)});
     float submerged = 1.0 - above;
     albedo *= mix(1.0, exp(-depth * 0.0045), submerged);
     albedo = mix(albedo, vec3(0.04, 0.06, 0.05), smoothstep(12.0, 90.0, depth) * submerged);
@@ -544,7 +648,15 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
-export function createPlanet(sim: Sim, view: View): Planet {
+/**
+ * `maxAnisotropy` is `renderer.capabilities.getMaxAnisotropy()`. The camera
+ * looks at the ground at a slant whenever it is close (`camera.ts` tilts it),
+ * and the sphere curves away everywhere else, so without anisotropic filtering
+ * mipmapping picks a blurred level over most of the frame. Sixteen taps along
+ * the slant is the single cheapest sharpening available and costs nothing on
+ * hardware of this decade.
+ */
+export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
   const group = new THREE.Group();
 
   // CC0 surface textures (docs/ASSETS.md), loaded behind the title card. The
@@ -574,6 +686,8 @@ export function createPlanet(sim: Sim, view: View): Planet {
     t.wrapS = THREE.RepeatWrapping;
     t.wrapT = THREE.RepeatWrapping;
     t.colorSpace = THREE.SRGBColorSpace;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.anisotropy = maxAnisotropy;
     return t;
   };
 

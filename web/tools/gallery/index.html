@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>diomano — model gallery</title>
+    <style>
+      html, body { margin: 0; background: #1c2230; overflow: hidden; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <!--
+      Every procedural model from `renderer/models.ts` and the figure, laid out
+      on a grid under the same Lambert light the game uses, tier 1 in the top
+      row and tier 2 below it. A development aid, not part of the client build:
+      when a model is changed this is where it can be looked at without
+      growing a forest first. `?tier=1` shows only tier 1, `?tier=2` only tier 2.
+
+      Build and view:  cd web && bunx vite build --config tools/gallery/vite.config.ts
+                       then serve tools/gallery/dist, or take a screenshot with
+                       node tools/gallery/shoot.mjs
+    -->
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

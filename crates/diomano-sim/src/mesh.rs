@@ -56,6 +56,14 @@ pub const TOTAL_VERTS: usize = CHUNKS * VERTS_PER_CHUNK;
 /// One shared index buffer: every chunk has identical topology, so 96 copies of
 /// the same 1944 indices would be 96 times the memory for no reason.
 pub const INDICES_PER_CHUNK: usize = (VERTS_PER_EDGE - 1) * (VERTS_PER_EDGE - 1) * 6;
+/// Dual-grid corners per planet: `0..=N` along both axes of each face.
+pub const CORNER_SLOTS: usize = 6 * (N + 1) * (N + 1);
+
+/// Index into a per-corner table for `(face, gx, gy)`, `gx, gy` in `0..=N`.
+#[inline]
+const fn corner_slot(face: usize, gx: i32, gy: i32) -> usize {
+    (face * (N + 1) + gy as usize) * (N + 1) + gx as usize
+}
 
 /// Planet radius at height 0, in render units.
 pub const BASE_RADIUS: f32 = 1.0;
@@ -194,8 +202,40 @@ pub struct Mesh {
     /// The scalar heights behind `scratch_corners`, so the second pass can read
     /// the one it needs instead of averaging the dual grid a second time.
     scratch_heights: [f32; VERTS_PER_CHUNK],
+    /// The unit direction behind each `scratch_corners` slot.
+    ///
+    /// The second vertex pass used to call `corner_direction` again for the
+    /// corner the first pass had just projected — two tangent series and an
+    /// inverse square root per vertex, for a number already in hand. The skirt
+    /// ring reads the border slot it duplicates, exactly as it does for the
+    /// height, so the water surface sits on the same ray as the ground.
+    scratch_dirs: [f32; VERTS_PER_CHUNK * 3],
     /// Content hash per chunk; a chunk is re-meshed only when this changes.
     chunk_hash: [u64; CHUNKS],
+    /// The domain warp of [`Mesh::corner_height`], tabulated: the warped dual-grid
+    /// sample coordinate `(x, y)` for every corner of every face.
+    ///
+    /// `lattice_warp` is a pure function of `(face, gx, gy)` and was being
+    /// evaluated afresh for all 361 corners of every chunk rebuilt — sixteen
+    /// integer hashes and two trilinear blends per corner, some 12,600 times a
+    /// tick. The values never change, so they are computed once in
+    /// [`Mesh::build_tables`]: 6 x 65 x 65 corners x two floats is 203 KB, and
+    /// the same `f32` expressions `corner_height` used to build inline are what
+    /// is stored, so the sampled height is bit-identical to the untabulated one.
+    warp_xy: [f32; CORNER_SLOTS * 2],
+    /// Fingerprint of everything `smooth_heights` reads — `height` on every
+    /// cell including the ghost ring, `material` on the live cells — as of the
+    /// last time it ran. Equal fingerprint, equal output, so the three Laplacian
+    /// passes are skipped: a tide moving water over unchanged ground dirties a
+    /// third of the chunks without moving a single height.
+    smooth_input_hash: u64,
+    /// How many times the smoothing passes actually ran. Read by the perf
+    /// harness, so the skip rate is a printed number rather than a guess.
+    pub smooth_runs: u32,
+    /// Non-zero once [`Mesh::build_tables`] has run. The wasm shell holds a
+    /// zeroed `static Mesh`, so a guard in `update` builds the tables on first
+    /// use rather than trusting every host to call the right thing first.
+    tables_built: u32,
     /// 1 where the chunk contains any water at all.
     ///
     /// §7.3 caps draw calls at 150 and the terrain alone is 96 chunks, so the
@@ -230,7 +270,12 @@ impl Mesh {
             smooth_pass1: [0; CELLS],
             scratch_corners: [0.0; VERTS_PER_CHUNK * 3],
             scratch_heights: [0.0; VERTS_PER_CHUNK],
+            scratch_dirs: [0.0; VERTS_PER_CHUNK * 3],
             chunk_hash: [0; CHUNKS],
+            warp_xy: [0.0; CORNER_SLOTS * 2],
+            smooth_input_hash: 0,
+            smooth_runs: 0,
+            tables_built: 0,
             water_present: [0; CHUNKS],
             dirty: [0; CHUNKS],
             remeshed: 0,
@@ -254,8 +299,31 @@ impl Mesh {
             }
             alloc::boxed::Box::from_raw(p)
         };
-        m.build_indices();
+        m.build_tables();
         m
+    }
+
+    /// Everything that depends only on the topology: the shared index buffer
+    /// and the warp table. Runs once per `Mesh`; `update` guards against a host
+    /// that forgot.
+    pub fn build_tables(&mut self) {
+        self.build_indices();
+        for face in 0..6usize {
+            for gy in 0..=N as i32 {
+                for gx in 0..=N as i32 {
+                    let k = corner_slot(face, gx, gy) * 2;
+                    // The very expressions `corner_height` used to evaluate
+                    // inline, so the table cannot disagree with the function it
+                    // replaces. Where the fade is zero the entry is unused —
+                    // `corner_height` takes the unwarped branch first.
+                    let fade = warp_fade(gx, gy);
+                    let (dx, dy) = lattice_warp(face, gx, gy);
+                    self.warp_xy[k] = gx as f32 + dx * fade;
+                    self.warp_xy[k + 1] = gy as f32 + dy * fade;
+                }
+            }
+        }
+        self.tables_built = 1;
     }
 
     /// Fill the shared index buffer. Topology never changes, so this runs once.
@@ -301,18 +369,33 @@ impl Mesh {
     /// reports and what makes "only dirty chunks re-mesh" checkable rather than
     /// asserted.
     pub fn update(&mut self, w: &World) -> u32 {
-        self.smooth_heights(w);
+        if self.tables_built == 0 {
+            self.build_tables();
+        }
+        // Hash first, smooth second: if no chunk changed nothing reads
+        // `smooth`, and if only water changed the smoothing inputs did not.
         self.dirty = [0; CHUNKS];
         let mut count = 0u32;
         for chunk in 0..CHUNKS {
             let h = chunk_content_hash(w, chunk);
-            if h == self.chunk_hash[chunk] {
-                continue;
+            if h != self.chunk_hash[chunk] {
+                self.chunk_hash[chunk] = h;
+                self.dirty[chunk] = 1;
+                count += 1;
             }
-            self.chunk_hash[chunk] = h;
-            self.build_chunk(w, chunk);
-            self.dirty[chunk] = 1;
-            count += 1;
+        }
+        if count > 0 {
+            let inputs = smooth_input_hash(w);
+            if inputs != self.smooth_input_hash {
+                self.smooth_input_hash = inputs;
+                self.smooth_heights(w);
+                self.smooth_runs = self.smooth_runs.wrapping_add(1);
+            }
+            for chunk in 0..CHUNKS {
+                if self.dirty[chunk] != 0 {
+                    self.build_chunk(w, chunk);
+                }
+            }
         }
         self.remeshed = count;
         count
@@ -321,6 +404,7 @@ impl Mesh {
     /// Force a full rebuild, e.g. after `init`.
     pub fn rebuild_all(&mut self, w: &World) {
         self.chunk_hash = [0; CHUNKS];
+        self.smooth_input_hash = 0;
         self.update(w);
     }
 
@@ -339,30 +423,31 @@ impl Mesh {
     /// height continuity that `face_boundary_vertices_coincide_exactly` pins
     /// would quietly stop holding.
     fn smooth_heights(&mut self, w: &World) {
+        // The first pass reads the world; every later one reads what the
+        // previous pass wrote. The two buffers alternate roles instead of being
+        // copied — three passes, so the result lands in `smooth`, which is what
+        // the assertion below pins.
+        const _: () =
+            assert!(SMOOTH_PASSES.len() % 2 == 1, "an even pass count ends in smooth_pass1");
         for (pass, &strength) in SMOOTH_PASSES.iter().enumerate() {
+            let (dst, src) = if pass % 2 == 0 {
+                (&mut self.smooth, &self.smooth_pass1)
+            } else {
+                (&mut self.smooth_pass1, &self.smooth)
+            };
+            let read = |c: usize| if pass == 0 { i32::from(w.height[c]) * 256 } else { src[c] };
             for face in 0..6usize {
                 for y in 0..N {
                     for x in 0..N {
                         let c = idx(face, x, y);
-                        // The first pass reads the world; every later one reads
-                        // what the previous pass wrote.
-                        let h = if pass == 0 {
-                            i32::from(w.height[c]) * 256
-                        } else {
-                            self.smooth_pass1[c]
-                        };
+                        let h = read(c);
                         let mut sum = 0i32;
                         for dir in 0..4usize {
-                            let n = neighbour_flat(c, dir);
-                            sum += if pass == 0 {
-                                i32::from(w.height[n]) * 256
-                            } else {
-                                self.smooth_pass1[n]
-                            };
+                            sum += read(neighbour_flat(c, dir));
                         }
                         let mean = sum / 4;
                         let k = SMOOTH_WEIGHT[(w.material[c] as usize).min(4)] * strength / 256;
-                        self.smooth[c] = h + (mean - h) * k / 256;
+                        dst[c] = h + (mean - h) * k / 256;
                     }
                 }
             }
@@ -373,9 +458,8 @@ impl Mesh {
             // `face_boundary_vertices_coincide_exactly` pins quietly stops
             // holding. The last copy is the one the corner grid reads.
             for k in 0..GHOST_ENTRIES {
-                self.smooth[GHOST_DST[k] as usize] = self.smooth[GHOST_SRC[k] as usize];
+                dst[GHOST_DST[k] as usize] = dst[GHOST_SRC[k] as usize];
             }
-            self.smooth_pass1.copy_from_slice(&self.smooth);
         }
     }
 
@@ -409,6 +493,9 @@ impl Mesh {
                 let slot = gj * VERTS_PER_EDGE + gi;
                 self.scratch_heights[slot] = terrain;
                 let k = slot * 3;
+                self.scratch_dirs[k] = dir[0];
+                self.scratch_dirs[k + 1] = dir[1];
+                self.scratch_dirs[k + 2] = dir[2];
                 self.scratch_corners[k] = dir[0] * r;
                 self.scratch_corners[k + 1] = dir[1] * r;
                 self.scratch_corners[k + 2] = dir[2] * r;
@@ -436,10 +523,16 @@ impl Mesh {
                 let (lava, fert, sed) = corner_attribs2(w, face, gx, gy);
                 let splat = corner_material_weights(w, face, gx, gy);
 
-                let dir = corner_direction(face, gx, gy);
-
+                // The same slot's direction: `(cgx + i, cgy + j)` with `i, j`
+                // clamped to `0..=CHUNK` is exactly the corner the first pass
+                // projected there, its `clamp(0, N)` being a no-op inside a face.
                 let vi = vbase + gj * VERTS_PER_EDGE + gi;
                 let src = slot * 3;
+                let dir = [
+                    self.scratch_dirs[src],
+                    self.scratch_dirs[src + 1],
+                    self.scratch_dirs[src + 2],
+                ];
                 self.positions[vi * 3] = self.scratch_corners[src];
                 self.positions[vi * 3 + 1] = self.scratch_corners[src + 1];
                 self.positions[vi * 3 + 2] = self.scratch_corners[src + 2];
@@ -450,7 +543,6 @@ impl Mesh {
                 self.water_positions[vi * 3 + 2] = dir[2] * rw;
 
                 let d8 = ((depth / 8.0) as i32).clamp(0, 255) as u8;
-                wet |= depth > 0.5;
                 self.attribs[vi * 4] = mat;
                 self.attribs[vi * 4 + 1] = veg;
                 self.attribs[vi * 4 + 2] = infl;
@@ -470,13 +562,25 @@ impl Mesh {
                 self.water_attribs[vi * 4] = d8;
                 self.water_attribs[vi * 4 + 1] = infl;
                 self.water_attribs[vi * 4 + 2] = erode;
-                // 0 or 255, not 0 or 1: the attribute is uploaded normalised, so a raw
-                // 1 arrives in the shader as 1/255 and every "is there water here"
-                // test would answer no.
-                self.water_attribs[vi * 4 + 3] = if depth > 0.5 { 255 } else { 0 };
+                // The signed depth, four height units per step, zero at 128: the
+                // shader interpolates it across a quad and ends the sea where it
+                // crosses zero, which is where the terrain crosses the surface.
+                // A byte reaches ±512 units, thirty-two terraces; a dry corner
+                // higher than that next to water is a cliff, and against a cliff
+                // the exact crossing point is invisible anyway.
+                self.water_attribs[vi * 4 + 3] = ((depth / 4.0) as i32 + 128).clamp(0, 255) as u8;
             }
         }
 
+        // Any water in the chunk or its one-cell apron: a waterline can cross a
+        // border quad whose wet cell belongs to the neighbour.
+        for j in -1..=(CHUNK as i32) {
+            let c0 = idx_i(face, cgx as i32 - 1, cgy as i32 + j);
+            if w.water[c0..c0 + CHUNK + 2].iter().any(|&d| d > 0) {
+                wet = true;
+                break;
+            }
+        }
         self.water_present[chunk] = u8::from(wet);
 
         // Normals first, skirt second. The skirt is a duplicate of the border
@@ -628,6 +732,21 @@ impl Mesh {
             let sum: i32 = cells.iter().map(|&c| self.smooth[c]).sum();
             return (sum / 3) as f32 / 256.0;
         }
+        if warp_fade(gx, gy) <= 0.0 {
+            return self.dual_height(face, gx, gy);
+        }
+        let k = corner_slot(face, gx, gy) * 2;
+        self.dual_height_at(face, self.warp_xy[k], self.warp_xy[k + 1])
+    }
+
+    /// The untabulated form of [`Mesh::corner_height`], kept so a test can pin
+    /// the table against the computation it replaced.
+    #[cfg(test)]
+    fn corner_height_direct(&self, face: usize, gx: i32, gy: i32) -> f32 {
+        if let Some(cells) = cube_corner_cells(face, gx, gy) {
+            let sum: i32 = cells.iter().map(|&c| self.smooth[c]).sum();
+            return (sum / 3) as f32 / 256.0;
+        }
         let fade = warp_fade(gx, gy);
         if fade <= 0.0 {
             return self.dual_height(face, gx, gy);
@@ -669,16 +788,40 @@ impl Mesh {
     }
 
     /// Water surface altitude and depth at a corner, on the same dual grid.
+    ///
+    /// # The sea is flat and the land comes up through it
+    ///
+    /// The water surface at a corner is the level of the water standing in the
+    /// wet cells around it — `height + water`, which `water::apply_sea_level`
+    /// makes exactly `sea_level` in every ocean cell, so the ocean is one flat
+    /// sphere and a lake is its own flat plane. Where none of the four cells is
+    /// wet the surface is sea level anyway: it runs on under the land and the
+    /// depth test hides it.
+    ///
+    /// The depth is that surface minus the terrain *as the terrain mesh draws
+    /// it* — smoothed and warped — and it is signed. The waterline is therefore
+    /// the curve where two smooth surfaces cross, found per pixel by the depth
+    /// buffer and by the shader's interpolated sign, rather than per vertex.
+    ///
+    /// It used to be the four-cell mean of `water`, unwarped, laid on top of the
+    /// warped terrain, with a 0/255 dry flag per vertex deciding where the sea
+    /// ends. The flag could only change on the midlines of the vertex grid, so a
+    /// coast that ran diagonally to the cells was drawn as a staircase of
+    /// one-cell steps — with the surf line and the sea-floor tint sitting on
+    /// every step. The domain warp bent the staircase; it could not remove it.
     fn corner_water(&self, w: &World, face: usize, gx: i32, gy: i32, terrain: f32) -> (f32, f32) {
-        let mut depth = 0i32;
-        let mut n = 0i32;
+        let mut surface = i32::from(w.sea_level);
+        let mut any_wet = false;
         for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
             let c = idx_i(face, (gx + dx).clamp(-1, N as i32), (gy + dy).clamp(-1, N as i32));
-            depth += i32::from(w.water[c]);
-            n += 1;
+            if w.water[c] > 0 {
+                let level = i32::from(w.height[c]) + i32::from(w.water[c]);
+                surface = if any_wet { surface.max(level) } else { level };
+                any_wet = true;
+            }
         }
-        let d = (depth / n.max(1)) as f32;
-        (terrain + d, d)
+        let s = surface as f32;
+        (s, s - terrain)
     }
 }
 
@@ -845,7 +988,39 @@ fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
         let n = clamp_cell(face, gx + dx, gy + dy);
         lava = lava.max(w.lava[n]);
     }
-    (lava, w.fertility[c], w.sediment[c])
+    (lava, corner_fertility(w, face, gx, gy), w.sediment[c])
+}
+
+/// Fertility at a corner, as the ground *reads*: the mean over the 4 x 4 cells
+/// around it where the face has them, the four cells otherwise.
+///
+/// Generation derives fertility from the drainage network, which varies from
+/// one cell to the next, and the shader keys the meadow on it — so the meadow
+/// used to flicker cell by cell, green beside brown beside green, and that
+/// flicker was most of what made the ground read as camouflage rather than as
+/// country. The simulation's field is untouched; this is the picture's reading
+/// of it, and a meadow is a thing several cells across. The 4 x 4 block needs
+/// two cells beyond the corner on each side, which the one-deep ghost ring
+/// cannot supply at a face edge, so the two rings nearest an edge keep the
+/// four-cell value — and the corner *on* the edge, which both faces share,
+/// therefore still averages the same four cells from either side.
+fn corner_fertility(w: &World, face: usize, gx: i32, gy: i32) -> u8 {
+    let n = N as i32;
+    if gx < 2 || gy < 2 || gx > n - 2 || gy > n - 2 {
+        let mut sum = 0i32;
+        for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+            let c = idx_i(face, (gx + dx).clamp(-1, n), (gy + dy).clamp(-1, n));
+            sum += i32::from(w.fertility[c]);
+        }
+        return (sum / 4) as u8;
+    }
+    let mut sum = 0i32;
+    for dy in -2..2 {
+        for dx in -2..2 {
+            sum += i32::from(w.fertility[idx_i(face, gx + dx, gy + dy)]);
+        }
+    }
+    (sum / 16) as u8
 }
 
 /// Material weights at a corner: rock, sand, soil, ash, on the same dual grid
@@ -872,24 +1047,52 @@ fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
 /// at the corner are counted instead — a set all three faces agree on.
 fn corner_material_weights(w: &World, face: usize, gx: i32, gy: i32) -> [u8; 4] {
     let mut count = [0i32; 5];
-    let n = if let Some(cells) = cube_corner_cells(face, gx, gy) {
+    // Three arms with literal divisors rather than one with a runtime `n`: the
+    // integer results are identical and the compiler turns `/ 3`, `/ 4` and
+    // `/ 16` into multiplies and shifts, where a variable divisor is four
+    // hardware divisions per vertex.
+    let n = N as i32;
+    if gx >= 2 && gy >= 2 && gx <= n - 2 && gy <= n - 2 {
+        // Well inside the face: the 4 x 4 block around the corner, for the same
+        // reason `corner_fertility` widens — a material boundary that wanders
+        // cell by cell is a fleck, and the ground has to come in regions to be
+        // read as ground. Not an option at a face edge (the ghost ring is one
+        // deep), and the corner on the edge must average the same four cells
+        // from both faces, so the two rings nearest an edge stay four-cell.
+        for dy in -2..2 {
+            for dx in -2..2 {
+                count[(w.material[idx_i(face, gx + dx, gy + dy)] as usize).min(4)] += 1;
+            }
+        }
+        return [
+            (255 * count[0] / 16) as u8,
+            (255 * count[1] / 16) as u8,
+            (255 * count[2] / 16) as u8,
+            (255 * count[3] / 16) as u8,
+        ];
+    }
+    if let Some(cells) = cube_corner_cells(face, gx, gy) {
         for &c in &cells {
             count[(w.material[c] as usize).min(4)] += 1;
         }
-        3
+        [
+            (255 * count[0] / 3) as u8,
+            (255 * count[1] / 3) as u8,
+            (255 * count[2] / 3) as u8,
+            (255 * count[3] / 3) as u8,
+        ]
     } else {
         for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
             let c = idx_i(face, (gx + dx).clamp(-1, N as i32), (gy + dy).clamp(-1, N as i32));
             count[(w.material[c] as usize).min(4)] += 1;
         }
-        4
-    };
-    [
-        (255 * count[0] / n) as u8,
-        (255 * count[1] / n) as u8,
-        (255 * count[2] / n) as u8,
-        (255 * count[3] / n) as u8,
-    ]
+        [
+            (255 * count[0] / 4) as u8,
+            (255 * count[1] / 4) as u8,
+            (255 * count[2] / 4) as u8,
+            (255 * count[3] / 4) as u8,
+        ]
+    }
 }
 
 /// The three live cells meeting at a cube corner, if `(gx, gy)` is one.
@@ -1024,27 +1227,73 @@ pub const fn chunk_origin(chunk: usize) -> (usize, usize, usize) {
 /// would leave a visible step at its edge.
 fn chunk_content_hash(w: &World, chunk: usize) -> u64 {
     let (face, gx, gy) = chunk_origin(chunk);
-    let mut h = crate::hash::Fnv64::new();
+    let mut h = MIX_SEED;
     for j in -1..=(CHUNK as i32) {
-        for i in -1..=(CHUNK as i32) {
-            let c = idx_i(face, gx as i32 + i, gy as i32 + j);
-            h.write_i16(w.height[c]);
-            h.write_i16(w.water[c]);
-            h.write_u8(w.material[c]);
-            h.write_u8(w.vegetation[c]);
-            h.write_i8(w.influence[c]);
+        // A row of the chunk plus its apron is contiguous in storage.
+        let c0 = idx_i(face, gx as i32 - 1, gy as i32 + j);
+        for c in c0..c0 + CHUNK + 2 {
             // Everything the vertex buffers carry has to be in here, or the chunk
             // is not re-meshed when it changes and the attribute silently goes
             // stale. Lava is the one that matters: it is a fluid that moves every
             // tick, so a lava front over unchanged ground would otherwise never
             // reach the GPU and a volcano would look like nothing happened.
-            h.write_u8(w.lava[c]);
-            h.write_u8(w.fertility[c]);
-            h.write_u8(w.sediment[c]);
+            //
+            // Two words per cell, each field in its own bit range, rather than
+            // ten FNV byte steps: this ran over 31,000 cells a tick and the
+            // dependent multiply chain was a measurable share of the meshing.
+            let a = u64::from(w.height[c] as u16)
+                | u64::from(w.water[c] as u16) << 16
+                | u64::from(w.material[c]) << 32
+                | u64::from(w.vegetation[c]) << 40
+                | u64::from(w.influence[c] as u8) << 48
+                | u64::from(w.lava[c]) << 56;
+            let b = u64::from(w.fertility[c]) | u64::from(w.sediment[c]) << 8;
+            h = mix(mix(h, a), b);
         }
     }
     // Never let a zero hash mean "unchanged" for a never-built chunk.
-    h.finish() | 1
+    h | 1
+}
+
+/// Fingerprint of the inputs of [`Mesh::smooth_heights`]: every cell's height,
+/// ghosts included, and every cell's material. Hashing the ghosts too is what
+/// makes "equal fingerprint, equal output" exact regardless of when the host
+/// last refreshed them.
+fn smooth_input_hash(w: &World) -> u64 {
+    let mut h = MIX_SEED ^ 0x5EED;
+    for c in (0..CELLS).step_by(4) {
+        let word = u64::from(w.height[c] as u16)
+            | u64::from(w.height[c + 1] as u16) << 16
+            | u64::from(w.height[c + 2] as u16) << 32
+            | u64::from(w.height[c + 3] as u16) << 48;
+        h = mix(h, word);
+    }
+    for c in (0..CELLS).step_by(8) {
+        let mut word = 0u64;
+        for k in 0..8 {
+            word |= u64::from(w.material[c + k]) << (k * 8);
+        }
+        h = mix(h, word);
+    }
+    h
+}
+const _: () = assert!(CELLS.is_multiple_of(8), "smooth_input_hash packs cells eight at a time");
+
+const MIX_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Fold one word into a running hash: xor, then the splitmix64 finaliser.
+///
+/// Every step is a bijection on the 64-bit state, so a change to any single
+/// word anywhere in the sequence changes the result — the same guarantee the
+/// byte-wise FNV this replaced gave, at one multiply chain per word instead of
+/// per byte. Render-side only: `hash::Fnv64` stays as it is, because the state
+/// hash and every fixture depend on it.
+#[inline]
+const fn mix(h: u64, word: u64) -> u64 {
+    let mut z = (h ^ word).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z ^= z >> 29;
+    z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 32)
 }
 
 #[cfg(test)]
@@ -1248,8 +1497,11 @@ mod tests {
                     // (2+2 and 3+1 both give 254, a pure corner gives 255), and
                     // the eight cube corners divide by 3 and lose nothing at all
                     // — 255/3 is exact, so 1+1+1 is 85 three times.
+                    // The 4 x 4 interior average truncates `255 * k / 16` four
+                    // times, so up to four units can go missing there; 251 is
+                    // the floor for it, 252 for the four-cell corners.
                     assert!(
-                        sum >= 252,
+                        sum >= 251,
                         "face {face} ({gx},{gy}): weights {s:?} sum to only {sum}, so {} of 255 leaks into swamp on ground that has none",
                         255 - sum
                     );
@@ -1346,16 +1598,100 @@ mod tests {
         assert!(wet > 0, "no chunk holds water on an archipelago map");
         assert!(wet < CHUNKS, "every chunk holds water; the flag saves nothing");
 
-        // The flag must agree with the field it summarises.
+        // The flag must agree with the field it summarises: set wherever the
+        // chunk or its one-cell apron holds water, clear where neither does.
         for chunk in 0..CHUNKS {
             let (face, gx, gy) = chunk_origin(chunk);
-            let any = (0..CHUNK)
-                .flat_map(|j| (0..CHUNK).map(move |i| (i, j)))
-                .any(|(i, j)| w.water[idx(face, gx + i, gy + j)] > 0);
-            if any {
-                assert_eq!(m.water_present[chunk], 1, "chunk {chunk} holds water but reads dry");
+            let any = (-1..=CHUNK as i32)
+                .flat_map(|j| (-1..=CHUNK as i32).map(move |i| (i, j)))
+                .any(|(i, j)| w.water[idx_i(face, gx as i32 + i, gy as i32 + j)] > 0);
+            assert_eq!(
+                m.water_present[chunk] != 0,
+                any,
+                "chunk {chunk} flag disagrees with its cells"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sea_surface_is_flat_over_the_ocean() {
+        // Every corner whose four cells are all under the sea sits on exactly the
+        // sea-level sphere, bit for bit: the ocean is one surface, not a sheet
+        // draped over the sea bed.
+        let (w, m) = meshed();
+        let sea = i32::from(w.sea_level);
+        let radius = BASE_RADIUS + sea as f32 * HEIGHT_TO_RADIUS;
+        let mut checked = 0;
+        for chunk in 0..CHUNKS {
+            let (face, cgx, cgy) = chunk_origin(chunk);
+            for gj in 1..VERTS_PER_EDGE - 1 {
+                for gi in 1..VERTS_PER_EDGE - 1 {
+                    let gx = cgx as i32 + gi as i32 - 1;
+                    let gy = cgy as i32 + gj as i32 - 1;
+                    let ocean = [(-1, -1), (0, -1), (-1, 0), (0, 0)].iter().all(|&(dx, dy)| {
+                        let c = idx_i(
+                            face,
+                            (gx + dx).clamp(-1, N as i32),
+                            (gy + dy).clamp(-1, N as i32),
+                        );
+                        w.water[c] > 0 && i32::from(w.height[c]) + i32::from(w.water[c]) == sea
+                    });
+                    if !ocean {
+                        continue;
+                    }
+                    let vi = chunk * VERTS_PER_CHUNK + gj * VERTS_PER_EDGE + gi;
+                    let p = [
+                        m.water_positions[vi * 3],
+                        m.water_positions[vi * 3 + 1],
+                        m.water_positions[vi * 3 + 2],
+                    ];
+                    let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+                    assert!(
+                        (r - radius).abs() < 1e-6,
+                        "ocean vertex {vi} is at radius {r}, not {radius}"
+                    );
+                    checked += 1;
+                }
             }
         }
+        assert!(checked > 1000, "only {checked} ocean corners on a pangaea map");
+    }
+
+    #[test]
+    fn the_waterline_is_where_the_terrain_crosses_the_sea() {
+        // The signed depth attribute and the two positions must tell one story:
+        // positive exactly where the water surface is above the ground the
+        // terrain mesh draws, and it must change sign somewhere — a coast exists.
+        let (_w, m) = meshed();
+        let mut wet = 0;
+        let mut dry = 0;
+        for chunk in 0..CHUNKS {
+            if m.water_present[chunk] == 0 {
+                continue;
+            }
+            for k in 0..VERTS_PER_CHUNK {
+                let vi = chunk * VERTS_PER_CHUNK + k;
+                let signed = (i32::from(m.water_attribs[vi * 4 + 3]) - 128) as f32 * 4.0;
+                let rw = {
+                    let p = &m.water_positions[vi * 3..vi * 3 + 3];
+                    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+                };
+                let rt = {
+                    let p = &m.positions[vi * 3..vi * 3 + 3];
+                    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
+                };
+                let geometric = (rw - rt) / HEIGHT_TO_RADIUS;
+                // Four units of quantisation, and the byte saturates at ±512.
+                if geometric.abs() < 500.0 {
+                    assert!(
+                        (geometric - signed).abs() <= 4.5,
+                        "vertex {vi}: depth {geometric} vs attribute {signed}"
+                    );
+                }
+                if signed > 0.0 { wet += 1 } else { dry += 1 }
+            }
+        }
+        assert!(wet > 0 && dry > 0, "no waterline: {wet} wet, {dry} dry vertices");
     }
 
     #[test]
@@ -1531,6 +1867,177 @@ mod tests {
         assert!(m.update(&w) > 0, "clearing lava did not dirty any chunk");
         for vi in 0..TOTAL_VERTS {
             assert_eq!(m.attribs2[vi * 4], 0, "lava outlived the field it came from");
+        }
+    }
+
+    #[test]
+    fn warp_table_matches_the_direct_computation() {
+        // The table stores the very `f32` expressions `corner_height` used to
+        // evaluate inline, so it must agree bit for bit — and so must the
+        // heights sampled through it, on real terrain.
+        let (_w, m) = meshed();
+        for face in 0..6usize {
+            for gy in 0..=N as i32 {
+                for gx in 0..=N as i32 {
+                    let k = corner_slot(face, gx, gy) * 2;
+                    let fade = warp_fade(gx, gy);
+                    let (dx, dy) = lattice_warp(face, gx, gy);
+                    assert_eq!(m.warp_xy[k].to_bits(), (gx as f32 + dx * fade).to_bits());
+                    assert_eq!(m.warp_xy[k + 1].to_bits(), (gy as f32 + dy * fade).to_bits());
+                    assert_eq!(
+                        m.corner_height(face, gx, gy).to_bits(),
+                        m.corner_height_direct(face, gx, gy).to_bits(),
+                        "corner ({face}, {gx}, {gy}) differs through the table"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tables_are_built_on_first_use_if_nobody_asked() {
+        // The wasm shell holds a zeroed `static Mesh`; a host that skips
+        // `build_tables` must still get the same planet.
+        let (w, reference) = meshed();
+        let mut m = Mesh::boxed();
+        m.warp_xy = [0.0; CORNER_SLOTS * 2];
+        m.indices = [0; INDICES_PER_CHUNK];
+        m.tables_built = 0;
+        m.rebuild_all(&w);
+        assert_eq!(m.tables_built, 1);
+        assert!(
+            m.positions
+                .iter()
+                .zip(reference.positions.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+        assert_eq!(m.indices, reference.indices);
+    }
+
+    #[test]
+    fn chunk_hash_sees_every_field_it_claims_to() {
+        // Each hashed field, bumped by one in the chunk's interior and in its
+        // apron, must move the hash; fields the vertex buffers do not carry must
+        // not; and a neighbouring chunk must not notice either.
+        let (mut w, _m) = meshed();
+        let chunk = 40;
+        let (face, gx, gy) = chunk_origin(chunk);
+        let inside = idx(face, gx + 8, gy + 8);
+        // One cell outside the chunk — a ghost cell when the chunk sits on a
+        // face edge, which the hash reads exactly like any other apron cell.
+        let apron = idx_i(face, gx as i32 - 1, gy as i32 + 8);
+        let before = chunk_content_hash(&w, chunk);
+        let neighbour_before = chunk_content_hash(&w, 41);
+        let mut seen = alloc::vec::Vec::new();
+        for cell in [inside, apron] {
+            // Each bump is a xor, so applying it twice restores the cell.
+            let bumps: [(&str, &dyn Fn(&mut World)); 8] = [
+                ("height", &|w| w.height[cell] ^= 1),
+                ("water", &|w| w.water[cell] ^= 1),
+                ("material", &|w| w.material[cell] ^= 1),
+                ("vegetation", &|w| w.vegetation[cell] ^= 1),
+                ("influence", &|w| w.influence[cell] ^= 1),
+                ("lava", &|w| w.lava[cell] ^= 1),
+                ("fertility", &|w| w.fertility[cell] ^= 1),
+                ("sediment", &|w| w.sediment[cell] ^= 1),
+            ];
+            for (name, bump) in bumps {
+                bump(&mut w);
+                let h = chunk_content_hash(&w, chunk);
+                assert_ne!(h, before, "{name} at {cell} did not change the hash");
+                assert!(!seen.contains(&h), "{name} at {cell} collided with another bump");
+                seen.push(h);
+                bump(&mut w);
+            }
+        }
+        w.erode[inside] += 1;
+        w.dry_ticks[inside] += 1;
+        w.water_near[inside] += 1;
+        assert_eq!(chunk_content_hash(&w, chunk), before, "scratch fields must not dirty a chunk");
+        w.height[inside] += 1;
+        assert_eq!(
+            chunk_content_hash(&w, 41),
+            neighbour_before,
+            "chunk 41 saw chunk 40's interior"
+        );
+        assert_eq!(before & 1, 1, "the never-built sentinel bit is not set");
+    }
+
+    #[test]
+    fn smoothing_is_skipped_only_when_its_inputs_are_unchanged() {
+        let (mut w, mut m) = meshed();
+        let runs = m.smooth_runs;
+        assert_eq!(m.update(&w), 0);
+        assert_eq!(m.smooth_runs, runs, "a still world re-smoothed");
+
+        // Water alone dirties chunks but is not a smoothing input.
+        let (face, gx, gy) = chunk_origin(40);
+        w.water[idx(face, gx + 8, gy + 8)] += 64;
+        assert!(m.update(&w) >= 1, "changed water did not dirty its chunk");
+        assert_eq!(m.smooth_runs, runs, "changed water re-smoothed the planet");
+
+        // A ghost cell's height is read by pass zero, so it counts.
+        w.height[GHOST_DST[7] as usize] += 64;
+        m.update(&w);
+        assert_eq!(m.smooth_runs, runs + 1, "a ghost height change was not noticed");
+
+        // So does a live cell's material.
+        w.material[idx(face, gx + 8, gy + 8)] ^= 1;
+        m.update(&w);
+        assert_eq!(m.smooth_runs, runs + 2, "a material change was not noticed");
+
+        // After all of that, the skipped and unskipped worlds agree bit for bit:
+        // the smoothed field everywhere, and the vertices of every chunk the last
+        // update rebuilt. (Chunks it did not rebuild may lag by the sub-unit
+        // tail of the three-pass Laplacian beyond the one-cell apron, which is
+        // as true before this change as after it.)
+        let mut fresh = Mesh::boxed();
+        fresh.rebuild_all(&w);
+        assert_eq!(m.smooth, fresh.smooth);
+        for chunk in 0..CHUNKS {
+            if m.dirty[chunk] == 0 {
+                continue;
+            }
+            let range = chunk * VERTS_PER_CHUNK * 3..(chunk + 1) * VERTS_PER_CHUNK * 3;
+            assert!(
+                m.positions[range.clone()]
+                    .iter()
+                    .zip(fresh.positions[range].iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+                "chunk {chunk} was built from a stale smoothing"
+            );
+        }
+    }
+
+    #[test]
+    fn skirt_ring_reads_the_border_corners_direction() {
+        // The water surface and the ground of a skirt vertex must sit on the
+        // same ray as the border vertex it duplicates, which is what makes the
+        // second pass's slot lookup equivalent to recomputing the direction.
+        let (_w, m) = meshed();
+        for chunk in [0, 40, 95] {
+            let vbase = chunk * VERTS_PER_CHUNK;
+            let (face, cgx, cgy) = chunk_origin(chunk);
+            for gj in 0..VERTS_PER_EDGE {
+                for gi in 0..VERTS_PER_EDGE {
+                    let i = (gi as i32 - 1).clamp(0, CHUNK as i32);
+                    let j = (gj as i32 - 1).clamp(0, CHUNK as i32);
+                    let dir = corner_direction(face, cgx as i32 + i, cgy as i32 + j);
+                    let vi = vbase + gj * VERTS_PER_EDGE + gi;
+                    let wp = [
+                        m.water_positions[vi * 3],
+                        m.water_positions[vi * 3 + 1],
+                        m.water_positions[vi * 3 + 2],
+                    ];
+                    let r = (wp[0] * wp[0] + wp[1] * wp[1] + wp[2] * wp[2]).sqrt();
+                    for k in 0..3 {
+                        assert!(
+                            (wp[k] / r - dir[k]).abs() < 1e-5,
+                            "chunk {chunk} slot ({gi},{gj}) is off its ray"
+                        );
+                    }
+                }
+            }
         }
     }
 

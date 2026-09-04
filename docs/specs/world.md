@@ -46,7 +46,9 @@ This is a deviation from HANDOFF §5.4, which implies `n` is per-map data. See
 **Measured, 2026-08:** see `docs/specs/simulation.md` for the per-pass numbers.
 Simulation cost at N = 64 is **1.51 ms/tick** on the development machine against
 a 12 ms budget — 12.6% of budget, 7.9x headroom. Cost is close to linear in cell
-count, so that headroom would nominally support N up to ~176.
+count, so that headroom would nominally support N up to ~176. (Re-measured
+2026-09 at **0.88 ms/tick** after the cell gate and dormant tables of
+`simulation.md`; the reasoning below is unchanged by it.)
 
 **N stays at 64.** The measurement was taken on a development container, not on
 the §7.6 reference floor (an office machine with Intel UHD 630 / Iris Xe class
