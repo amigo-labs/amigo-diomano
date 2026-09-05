@@ -329,10 +329,16 @@ mod tests {
         let mut w = ai_world();
         let mut buf = CommandBuf::new();
         let before = w.state_hash();
+        let ai_before = w.ai;
         for _ in 0..500 {
             buf.clear();
             step(&mut w, &mut buf);
         }
+        // Its bookkeeping *is* hashed — it decides the commands it emits, and it
+        // runs on both peers — so put that back before comparing: what must be
+        // untouched is everything else.
+        assert_ne!(w.ai, ai_before, "500 steps did not advance the opponent's own state");
+        w.ai = ai_before;
         assert_eq!(
             w.state_hash(),
             before,

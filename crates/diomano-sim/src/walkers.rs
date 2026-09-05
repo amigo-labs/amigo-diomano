@@ -93,7 +93,10 @@ pub fn remove(w: &mut World, id: usize) {
             w.settlements[home].pop = w.settlements[home].pop.saturating_sub(released);
         }
     }
-    if wk.flags & WALKER_LEADER != 0 {
+    // Only the magnet's *current* leader drops it. The flag alone is not enough:
+    // it is a cache of `magnet.leader`, and a walker whose magnet was re-placed
+    // must not drag the new placement to wherever it later falls.
+    if wk.flags & WALKER_LEADER != 0 && w.magnet[owner].leader == id as u16 {
         // "If the leader dies the magnet drops there" (§5.1).
         let p = owner;
         w.magnet[p].active = 1;
@@ -129,6 +132,10 @@ fn step_walker(w: &mut World, id: usize) {
     let field = if wk.flags & WALKER_CHAMPION != 0 { 1 - owner } else { owner };
     let dir = w.flow[field][here];
     if dir == NO_FLOW || dir as usize >= 4 {
+        // Standing still — possibly *on* the magnet, whose own cell carries no
+        // flow direction. A walker already there when the magnet lands on it
+        // never moves and, without this, never became its leader.
+        claim_magnet(w, id, owner, face, cx, cy);
         return;
     }
     let dir = dir as usize;
@@ -195,8 +202,13 @@ fn cross_seam(face: usize, nx: Fx, ny: Fx, dir: usize) -> (usize, Fx, Fx) {
 
     // The coordinate running along the edge we left through.
     let t = if dir == DIR_N || dir == DIR_S { nx } else { ny }.clamp(0, EXTENT - 1);
-    // A flip reverses cell `i` to `N - 1 - i`, i.e. continuous `t` to `N - t`.
-    let mapped = if rule.flip { (EXTENT - t).clamp(0, EXTENT - 1) } else { t };
+    // A flip reverses cell `i` to `N - 1 - i`. For a continuous coordinate the
+    // mirror is `EXTENT - 1 - t`, one ulp short of `EXTENT - t`: cell `i` is the
+    // half-open interval `[i, i + 1)`, and `EXTENT - t` maps its *start* to the
+    // start of cell `N - i` — one cell past the seam table's answer. Positions
+    // live on a `SPEED` lattice, so "exactly at the start" is a routine case,
+    // not a rounding curiosity.
+    let mapped = if rule.flip { EXTENT - 1 - t } else { t };
     let entry = if rule.at_max { EXTENT - 1 - overshoot } else { overshoot };
 
     let (x, y) = match rule.axis {
@@ -232,6 +244,11 @@ pub fn make_champion(w: &mut World, player: usize) -> bool {
         };
         id
     };
+    // The magnet transfers to the champion, so whoever led it stops leading —
+    // including a leader that was not promotable and is therefore not `id`.
+    if leader != u16::MAX && (leader as usize) < w.walkers.len() {
+        w.walkers[leader as usize].flags &= !WALKER_LEADER;
+    }
     let wk = w.walkers[id];
     w.walkers[id].flags = (wk.flags | WALKER_CHAMPION) & !WALKER_LEADER;
     w.walkers[id].strength = wk.strength.saturating_mul(3).max(6);
@@ -324,33 +341,96 @@ mod tests {
 
     #[test]
     fn seam_crossing_lands_where_the_seam_table_says_it_should() {
-        for face in 0..6usize {
-            for dir in 0..4usize {
-                for t in [0i32, 7, 31, 63] {
-                    // Position just past the edge in `dir`.
-                    let (px, py) = match dir {
-                        DIR_N => ((t << 16) + ONE / 2, EXTENT + ONE / 4),
-                        DIR_E => (EXTENT + ONE / 4, (t << 16) + ONE / 2),
-                        DIR_S => ((t << 16) + ONE / 2, -(ONE / 4)),
-                        _ => (-(ONE / 4), (t << 16) + ONE / 2),
-                    };
-                    let (nf, nx, ny) = cross_seam(face, px, py, dir);
-                    let (sf, sx, sy, _) = match dir {
-                        DIR_N => step(face, t, N as i32 - 1, dir),
-                        DIR_E => step(face, N as i32 - 1, t, dir),
-                        DIR_S => step(face, t, 0, dir),
-                        _ => step(face, 0, t, dir),
-                    };
-                    assert_eq!(nf, sf, "face mismatch for ({face},{dir},{t})");
-                    assert_eq!(
-                        (crate::fixed::floor_int(nx), crate::fixed::floor_int(ny)),
-                        (sx, sy),
-                        "cell mismatch for ({face},{dir},{t})"
-                    );
-                    assert!((0..EXTENT).contains(&nx) && (0..EXTENT).contains(&ny));
+        // Every sub-cell offset the along-edge coordinate can have, including
+        // exactly the cell's start: the first version of this test probed only
+        // the centre, which is the one offset at which the old `EXTENT - t`
+        // mirror happened to agree with the seam table.
+        for frac in [0, ONE / 16, ONE / 2, ONE - 1] {
+            for face in 0..6usize {
+                for dir in 0..4usize {
+                    for t in [0i32, 7, 31, 63] {
+                        // Position just past the edge in `dir`.
+                        let along = (t << 16) + frac;
+                        let (px, py) = match dir {
+                            DIR_N => (along, EXTENT + ONE / 4),
+                            DIR_E => (EXTENT + ONE / 4, along),
+                            DIR_S => (along, -(ONE / 4)),
+                            _ => (-(ONE / 4), along),
+                        };
+                        let (nf, nx, ny) = cross_seam(face, px, py, dir);
+                        let (sf, sx, sy, _) = match dir {
+                            DIR_N => step(face, t, N as i32 - 1, dir),
+                            DIR_E => step(face, N as i32 - 1, t, dir),
+                            DIR_S => step(face, t, 0, dir),
+                            _ => step(face, 0, t, dir),
+                        };
+                        assert_eq!(nf, sf, "face mismatch for ({face},{dir},{t}+{frac})");
+                        assert_eq!(
+                            (crate::fixed::floor_int(nx), crate::fixed::floor_int(ny)),
+                            (sx, sy),
+                            "cell mismatch for ({face},{dir},{t}+{frac})"
+                        );
+                        assert!((0..EXTENT).contains(&nx) && (0..EXTENT).contains(&ny));
+                    }
                 }
             }
         }
+    }
+
+    /// Re-placing the magnet retires its leader, all the way down to the flag
+    /// on the walker. With only `magnet.leader` reset, the old leader kept its
+    /// flag, and `remove` — "if the leader dies the magnet drops there" — later
+    /// moved the player's *new* magnet to wherever that walker happened to die.
+    #[test]
+    fn a_replaced_magnet_retires_the_old_leader() {
+        let mut w = open_world();
+        w.mana[0] = 1_000 << 16;
+        let id = spawn(&mut w, 0, 2, 20, 20, 2, NO_SETTLEMENT).unwrap() as usize;
+        let place = |w: &mut World, x: u16, y: u16| {
+            let cmd = crate::world::Command {
+                tick: 0,
+                x,
+                y,
+                player: 0,
+                verb: crate::world::VERB_MAGNET,
+                face: 2,
+                modifier: 0,
+            };
+            crate::powers::apply(w, 0, &cmd);
+        };
+
+        // The magnet lands on the walker's own cell; standing there is enough to
+        // claim it (the target cell has no flow direction, so it never moves).
+        place(&mut w, 20, 20);
+        movement(&mut w);
+        assert_eq!(w.magnet[0].leader, id as u16, "a walker on the magnet did not claim it");
+        assert_ne!(w.walkers[id].flags & WALKER_LEADER, 0);
+
+        // The player moves on.
+        place(&mut w, 40, 40);
+        assert_eq!(w.magnet[0].leader, u16::MAX);
+        assert_eq!(w.walkers[id].flags & WALKER_LEADER, 0, "the old leader kept its flag");
+
+        // Its death must leave the new placement alone.
+        remove(&mut w, id);
+        assert_eq!(
+            (w.magnet[0].face, w.magnet[0].x, w.magnet[0].y),
+            (2, 40, 40),
+            "a retired leader dragged the magnet to where it died"
+        );
+        assert_eq!(w.magnet[0].active, 1);
+    }
+
+    /// The belt to that fix's braces: even with a stale flag, `remove` consults
+    /// the magnet's own idea of who leads before moving it.
+    #[test]
+    fn only_the_magnets_current_leader_drops_it_on_death() {
+        let mut w = open_world();
+        w.magnet[0] = Magnet { face: 2, x: 10, y: 10, active: 1, leader: u16::MAX, _pad: 0 };
+        let id = spawn(&mut w, 0, 2, 20, 20, 2, NO_SETTLEMENT).unwrap() as usize;
+        w.walkers[id].flags |= WALKER_LEADER; // stale: the magnet does not know it
+        remove(&mut w, id);
+        assert_eq!((w.magnet[0].face, w.magnet[0].x, w.magnet[0].y), (2, 10, 10));
     }
 
     #[test]

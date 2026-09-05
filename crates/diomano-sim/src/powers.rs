@@ -15,7 +15,7 @@ use crate::world::{
     MAT_SWAMP, MAX_PICKUPS, MapConfig, N, PICKUP_ALIVE, PLAYERS, POWER_COUNT, Pickup, TERRACE,
     TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, TERRAIN_VOLCANO, VERB_ARMAGEDDON, VERB_CHAMPION,
     VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_RAISE, VERB_SET_HAND, VERB_SWAMP,
-    VERB_VOLCANO, World, idx, verb_power, walk,
+    VERB_VOLCANO, WALKER_LEADER, World, idx, verb_power, walk,
 };
 
 /// Highest `sea_base` the flood verb can reach: two terraces above the
@@ -90,6 +90,15 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         VERB_RAISE => sculpt(w, player, face, cx, cy, radius, true),
         VERB_LOWER => sculpt(w, player, face, cx, cy, radius, false),
         VERB_MAGNET => {
+            // The old leader stops leading. The flag has to come off the walker
+            // as well as the magnet: `walkers::remove` drops the magnet wherever
+            // a flagged walker dies, so a stale flag let a long-dead placement
+            // override the player's current one — the one command in the game,
+            // undone by a walker the player had stopped following minutes ago.
+            let old = w.magnet[player].leader;
+            if old != u16::MAX && (old as usize) < w.walkers.len() {
+                w.walkers[old as usize].flags &= !WALKER_LEADER;
+            }
             w.magnet[player].face = face as u8;
             w.magnet[player].x = cx as u8;
             w.magnet[player].y = cy as u8;
@@ -167,7 +176,15 @@ fn fluid(
                     w.lava[c] += take as u8;
                     w.hand[player].amount -= take as u16;
                 } else {
-                    w.water[c] = w.water[c].saturating_add(take as i16);
+                    // Charge the hand only for what the cell can hold, as the
+                    // lava branch does: saturating the depth while debiting the
+                    // full amount would destroy matter (pillar 4).
+                    let room = i32::from(i16::MAX) - i32::from(w.water[c]);
+                    let take = take.min(room);
+                    if take <= 0 {
+                        continue;
+                    }
+                    w.water[c] += take as i16;
                     w.hand[player].amount -= take as u16;
                 }
             } else {

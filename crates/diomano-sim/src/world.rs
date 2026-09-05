@@ -1171,16 +1171,15 @@ impl World {
     }
 
     /// Re-settle a cell against the current sea level after its height moved.
+    ///
+    /// Only the sunk case needs handling here. Terrain that rises out from under
+    /// standing water keeps its depth — the land comes up through the sea — and
+    /// `transfer_water` drains the excess to the neighbours on the next tick.
     fn refresh_cell_water(&mut self, c: usize) {
         let surface = i32::from(self.height[c]) + i32::from(self.water[c]);
         let sea = i32::from(self.sea_level);
         if surface < sea {
             self.water[c] = (sea - i32::from(self.height[c])).clamp(0, i32::from(i16::MAX)) as i16;
-        } else if self.water[c] > 0 && i32::from(self.height[c]) > sea {
-            // Terrain rose out from under standing water; keep the depth but do
-            // not let it exceed what the cell can hold above sea level.
-            let keep = i32::from(self.water[c]);
-            self.water[c] = keep.clamp(0, i32::from(i16::MAX)) as i16;
         }
     }
 
@@ -1250,6 +1249,10 @@ impl World {
                     h.write_u8(self.vegetation[c]);
                     h.write_u8(self.fertility[c]);
                     h.write_u8(self.sediment[c]);
+                    // Drives the last two §4.4 rows. A divergence here would
+                    // otherwise stay invisible for the 600 ticks it takes to
+                    // reach `fertility`.
+                    h.write_u16(self.dry_ticks[c]);
                 }
             }
         }
@@ -1309,12 +1312,29 @@ impl World {
             h.write_u8(self.magnet[p].x);
             h.write_u8(self.magnet[p].y);
             h.write_u16(self.magnet[p].leader);
+            // Decides the match in `tide::decide_match`; a peer that scored a
+            // wave differently must not look synchronised until the end card.
+            for &s in &self.score[p] {
+                h.write_u16(s);
+            }
         }
         h.write_u8(self.tide.phase);
         h.write_u8(self.tide.wave);
+        h.write_u8(self.tide.scored);
         h.write_u32(self.tide.timer);
         h.write_i16(self.tide.offset);
         h.write_i16(self.tide.strength);
+        // The scripted opponent's bookkeeping decides which commands it emits,
+        // and it runs on both peers, so it is as much lockstep state as the
+        // walkers it commands.
+        h.write_u16(self.ai.script_pc);
+        h.write_u16(self.ai.repeat);
+        h.write_u32(self.ai.timer);
+        h.write_u32(self.ai.cursor);
+        h.write_u8(self.ai.anchor_face);
+        h.write_u8(self.ai.anchor_x);
+        h.write_u8(self.ai.anchor_y);
+        h.write_u8(self.ai.phase);
         h.write_u8(self.outcome);
         h.write_u64(self.rng.state);
         h.finish()
@@ -1441,8 +1461,18 @@ impl World {
         for p in 0..PLAYERS {
             // Q16.16 accumulator: fractional mana per tick is the norm, and
             // truncating it every tick would make small holdings pay nothing.
-            let per_tick = (acc[p] * mult[p]) << 16;
-            self.mana[p] = self.mana[p].saturating_add(per_tick / (MANA_DIVISOR * 16));
+            //
+            // `cells * mult / MANA_DIVISOR` mana units per tick, in Q16.16, is
+            // `cells * mult * 65536 / 256`. Written as the multiplication it
+            // reduces to rather than as `(cells * mult) << 16` — the shift is
+            // the one arithmetic operator `overflow-checks` does not guard the
+            // value of, and past `cells * mult >= 32768` (one citadel's reach on
+            // a continent) it silently discarded the high bits and turned the
+            // income of the player with the *most* land negative.
+            // `acc * mult` itself fits (24,576 cells x 1,808 at most); the last
+            // factor is where a full planet under one god would leave `i32`.
+            let per_tick = (acc[p] * mult[p]).saturating_mul(65_536 / MANA_DIVISOR);
+            self.mana[p] = self.mana[p].saturating_add(per_tick);
             self.mana[p] = self.mana[p].min(9_999 << 16);
         }
     }
@@ -1920,8 +1950,158 @@ mod tests {
         assert_ne!(w.state_hash(), base);
         w.influence[c] = w.influence[c].wrapping_sub(1);
 
+        // The fields that were once left out, each of which decides something a
+        // peer could disagree on: soil rot, the winner, the wave sample flag and
+        // what the scripted opponent does next.
+        w.dry_ticks[c] = w.dry_ticks[c].wrapping_add(1);
+        assert_ne!(w.state_hash(), base, "dry_ticks is not hashed");
+        w.dry_ticks[c] = w.dry_ticks[c].wrapping_sub(1);
+        assert_eq!(w.state_hash(), base);
+
+        w.score[1][0] = w.score[1][0].wrapping_add(1);
+        assert_ne!(w.state_hash(), base, "score is not hashed");
+        w.score[1][0] = w.score[1][0].wrapping_sub(1);
+
+        w.tide.scored ^= 1;
+        assert_ne!(w.state_hash(), base, "tide.scored is not hashed");
+        w.tide.scored ^= 1;
+
+        w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
+        assert_ne!(w.state_hash(), base, "the scripted opponent's state is not hashed");
+        w.ai.script_pc = w.ai.script_pc.wrapping_sub(1);
+        assert_eq!(w.state_hash(), base);
+
         w.lava[c] = 7;
         assert_ne!(w.state_hash(), base);
+    }
+
+    /// Mana income must grow with held land, all the way up to the largest
+    /// holding the planet allows.
+    ///
+    /// `(cells * mult) << 16` did not: the shift discards the bits it pushes out
+    /// without `overflow-checks` noticing, so past 32,768 the income of the
+    /// player with the most land went *negative*. One citadel on a continent is
+    /// enough to get there.
+    #[test]
+    fn mana_income_never_wraps_however_much_land_is_held() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        // Every live cell habitable and held by player 0, with a full settlement
+        // array of citadels behind it: the maximum `acc * mult` can ever reach.
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    w.height[c] = 400;
+                    w.water[c] = 0;
+                    w.material[c] = MAT_SOIL;
+                    w.influence[c] = 100;
+                }
+            }
+        }
+        for s in &mut w.settlements {
+            s.flags = SETTLE_ALIVE;
+            s.owner = 0;
+            s.tier = 4;
+        }
+        // Far past the old limit (24,576 x 1,808 against 32,768), and past `i32`
+        // in Q16.16: the income must saturate at the cap, never wrap.
+        w.mana = [0; PLAYERS];
+        w.accrue_mana();
+        assert_eq!(w.mana_units(0), 9_999, "a planet-sized income did not saturate at the cap");
+        assert_eq!(w.mana_units(1), 0);
+
+        // And a modest, realistic holding just past the old threshold: 2,000
+        // cells with one citadel is `acc * mult = 46,000`.
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        let mut held = 0usize;
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    w.influence[c] = 0;
+                    if held < 2_000 && w.habitable(c) {
+                        w.influence[c] = 50;
+                        held += 1;
+                    }
+                }
+            }
+        }
+        for s in &mut w.settlements {
+            *s = Settlement::default();
+        }
+        w.settlements[0] = Settlement {
+            progress: TIER_THRESHOLD[4],
+            face: 0,
+            x: 10,
+            y: 10,
+            size: 9,
+            tier: 4,
+            owner: 0,
+            pop: 0,
+            flags: SETTLE_ALIVE,
+        };
+        assert!(
+            held * 23 >= 32_768,
+            "pangaea offered only {held} habitable cells; scenario too small"
+        );
+        let before = w.mana[0];
+        w.accrue_mana();
+        assert!(w.mana[0] > before, "holding {held} cells with a citadel lost mana");
+        assert_eq!(
+            w.mana[0] - before,
+            (held as i32) * 23 * 256,
+            "income is not cells * mult / 256"
+        );
+    }
+
+    /// The wire bytes, pinned to literals.
+    ///
+    /// `web/src/netcode/frame.ts` implements the same layout in TypeScript and
+    /// pins the same five vectors (`the_codec_matches_the_rust_layout` in
+    /// `web/tools/verify-lockstep.ts`). Two encoders for one wire format is a
+    /// desync waiting to happen; two tests against one set of bytes is what
+    /// keeps them from drifting apart. Change these bytes on both sides or not
+    /// at all.
+    #[test]
+    fn command_wire_bytes_are_pinned_for_the_typescript_codec() {
+        let vectors: [(Command, [u8; 8]); 5] = [
+            (
+                Command { tick: 0, x: 0, y: 0, player: 0, verb: 0, face: 0, modifier: 0 },
+                [0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                Command { tick: 1, x: 32, y: 32, player: 1, verb: 2, face: 4, modifier: 0 },
+                [0x12, 0x01, 0x10, 0x20, 0x02, 0x00, 0x00, 0x00],
+            ),
+            (
+                Command { tick: 123_456, x: 63, y: 63, player: 1, verb: 10, face: 5, modifier: 7 },
+                [0x5a, 0x8f, 0x1f, 0x3f, 0x80, 0xc4, 0x03, 0x00],
+            ),
+            (
+                Command {
+                    tick: 0x7FFF_FFFF,
+                    x: 511,
+                    y: 511,
+                    player: 3,
+                    verb: 15,
+                    face: 7,
+                    modifier: 63,
+                },
+                [0xff; 8],
+            ),
+            (
+                Command { tick: 2, x: 5, y: 300, player: 0, verb: 3, face: 2, modifier: 1 },
+                [0x83, 0x82, 0x02, 0x2c, 0x05, 0x00, 0x00, 0x00],
+            ),
+        ];
+        for (c, bytes) in vectors {
+            assert_eq!(c.encode(), bytes, "encoding of {c:?} moved");
+            assert_eq!(Command::decode(bytes), c, "decoding of {bytes:?} moved");
+        }
     }
 
     /// The census is instrumentation, not state. If it entered the hash, adding a

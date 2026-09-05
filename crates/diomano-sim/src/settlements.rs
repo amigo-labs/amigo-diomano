@@ -1214,12 +1214,19 @@ mod tests {
     /// Cells each player influences right now — the quantity sudden death
     /// watches (tide.rs::check_sudden_death).
     fn influence_held(w: &World) -> [u32; PLAYERS] {
+        // Live cells only: the ghost ring mirrors the border rows, and counting
+        // it double-counted 1,536 cells in every threshold below.
         let mut held = [0u32; PLAYERS];
-        for &i in &w.influence {
-            if i32::from(i) > 0 {
-                held[0] += 1;
-            } else if i32::from(i) < 0 {
-                held[1] += 1;
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let i = i32::from(w.influence[idx(face, x, y)]);
+                    if i > 0 {
+                        held[0] += 1;
+                    } else if i < 0 {
+                        held[1] += 1;
+                    }
+                }
             }
         }
         held

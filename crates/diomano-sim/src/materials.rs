@@ -428,13 +428,16 @@ fn interactions_unfiltered(w: &mut World) {
 }
 
 fn interactions_impl(w: &mut World, gated: bool) {
-    if table_dormant(w, INTERACTIONS) {
-        // Never true for this table — its first row has no tick predicate —
-        // but the mechanism is the same one `vegetation` relies on, and stating
-        // it here is what keeps the two passes symmetric.
-        return;
+    // Never true for this table — its first row has no tick predicate — but
+    // the mechanism is the same one `vegetation` relies on, and stating it
+    // here is what keeps the two passes symmetric. It gates the *rules* only:
+    // the dryness counter below is not a table row and has to advance every
+    // tick, or a `TickMod` predicate added to every row would silently slow
+    // soil rot by that factor.
+    let dormant = table_dormant(w, INTERACTIONS);
+    if !dormant {
+        compute_water_near(w);
     }
-    compute_water_near(w);
     for face in 0..6usize {
         for y in 0..N {
             for x in 0..N {
@@ -443,7 +446,7 @@ fn interactions_impl(w: &mut World, gated: bool) {
                 // not: `consume_nearby_water` takes water from *neighbours*, and
                 // a neighbour earlier in scan order has already read its own
                 // water for the counter. Splitting the loop would change it.
-                if !gated || interactions_may_fire(w, c) {
+                if !dormant && (!gated || interactions_may_fire(w, c)) {
                     apply_rules(w, c, INTERACTIONS);
                 }
                 // Dryness bookkeeping feeds the last two rows. Updated after the
