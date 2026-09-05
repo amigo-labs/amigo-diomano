@@ -8,8 +8,10 @@
  * The command encoding here is not a new format. It is `Command::encode` from
  * `crates/diomano-sim/src/world.rs` — the same 8 bytes, the same bit layout,
  * documented in `docs/specs/verbs.md`. Two encoders for one wire format is a
- * desync waiting to happen, so `frame::the_codec_matches_the_rust_layout` in
- * `netcode.test.ts` pins these against vectors produced by the Rust side.
+ * desync waiting to happen, so both are pinned to the same literal byte vectors:
+ * `command_wire_bytes_are_pinned_for_the_typescript_codec` in `world.rs` and
+ * `the_codec_matches_the_rust_layout` in `web/tools/verify-lockstep.ts`. Change
+ * the bytes on both sides or on neither.
  */
 
 /** A single player command. Mirrors `world::Command`. */

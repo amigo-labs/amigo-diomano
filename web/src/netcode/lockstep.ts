@@ -46,7 +46,19 @@ export const TICKS_PER_PACKET = 2;
 export const HASH_INTERVAL_TICKS = 30;
 
 /**
- * Every packet carries the whole *unsimulated* input window, not just what is new.
+ * How far behind us the peer can be, in ticks.
+ *
+ * We simulate tick T only once we hold the peer's frame for T, and the peer
+ * publishes `INPUT_DELAY_TICKS` ahead of its own tick. Standing at `now` therefore
+ * proves the peer has published through `now - 1` at least, so it is at
+ * `now - 1 - INPUT_DELAY_TICKS` or later. Everything older it has simulated and
+ * can never need again; everything from there on it may still be waiting for.
+ * The bound is symmetric, so the peer can be at most this far *ahead* as well.
+ */
+export const MAX_PEER_LAG_TICKS = INPUT_DELAY_TICKS + 1;
+
+/**
+ * Every packet carries every frame the peer might still need, not just what is new.
  *
  * Lockstep cannot proceed past a tick whose input it does not have, so a dropped
  * packet is not a hiccup — it is a hard stop until that frame arrives some other
@@ -56,22 +68,38 @@ export const HASH_INTERVAL_TICKS = 30;
  * Repeating the window instead costs bytes rather than latency, and §6.6 already
  * establishes bytes are not the constraint: a retransmit costs a full round trip
  * (120 ms, most of the 200 ms input-delay budget), while the entire window is
- * `INPUT_DELAY_TICKS + 1` frames — 56 bytes, inside the ~100 bytes of SCTP + DTLS
- * + UDP + IP + TURN framing that every packet pays anyway.
+ * `WINDOW_FRAMES` empty frames, 112 bytes, in the same order as the ~100 bytes of
+ * SCTP + DTLS + UDP + IP + TURN framing every packet pays anyway.
  *
- * Sending the *window* rather than a fixed tail of history is deliberate, and the
- * first attempt got it wrong in an instructive way: a fixed 6-frame tail could not
- * hold the 7 frames the opening burst publishes, so tick 0 was evicted before it
- * was ever transmitted and the match deadlocked on its own first tick. Anchoring
- * the window to "what the peer has not simulated yet" makes that unrepresentable —
- * a frame stops being sent when it can no longer be needed, and not before.
+ * The window runs from the oldest tick the peer can still be waiting on,
+ * `now - MAX_PEER_LAG_TICKS`, to our publish horizon, `now + INPUT_DELAY_TICKS`.
+ * The lower end is the part that was wrong once. The first version started the
+ * window at our *own* tick, reasoning that a frame we had already simulated could
+ * not be needed — but what we simulated tick T with was the *peer's* frame T, and
+ * the peer still needs ours. It can be up to `MAX_PEER_LAG_TICKS` behind, so once
+ * every packet carrying our frame T was lost (at `TICKS_PER_PACKET = 2` that is
+ * three or four packets, not the seven the tick count suggests), the peer stalled
+ * on T for good while we ran ahead, evicted T from the window, and then stalled
+ * ourselves — with `flush` resending a window that no longer held the one frame
+ * that mattered. Anchoring the window to what the peer can still need makes that
+ * unrepresentable: a frame stops being sent when it can no longer be needed, and
+ * not before.
  *
- * Each frame therefore gets up to `INPUT_DELAY_TICKS + 1` chances to arrive. At 2%
- * independent loss, missing all seven is about 1 in 10^12. Correlated loss — a
- * burst taking every copy — is not covered, and the answer there is the stall path
- * rather than a guarantee: `step` reports and waits instead of inventing input.
+ * Correlated loss beyond that — every copy of a frame lost while it is in the
+ * window — is answered by the stall path: `step` reports, waits, and keeps
+ * resending the window rather than inventing input.
  */
-export const WINDOW_FRAMES = INPUT_DELAY_TICKS + 1;
+export const WINDOW_FRAMES = MAX_PEER_LAG_TICKS + INPUT_DELAY_TICKS + 1;
+
+/**
+ * While waiting on the peer, resend the window every this many `step` attempts.
+ *
+ * `publish` only sends when the tick counter moves, and during a stall it does
+ * not — exactly when the peer is most likely to be missing one of our frames.
+ * Two attempts rather than one so that a driver calling `step` at frame rate does
+ * not double the packet rate the moment it waits.
+ */
+export const STALL_RESEND_EVERY = 2;
 
 /** The simulation, as lockstep needs to see it. */
 export interface SimAdapter {
@@ -126,6 +154,20 @@ export class Lockstep {
   haltReason: DesyncReport | null = null;
   /** Ticks spent waiting for remote input. The stall metric of §6.1. */
   stalledTicks = 0;
+  /**
+   * Packets that did not decode, or named a tick the peer cannot honestly be at.
+   * Counted and dropped, never applied: a malformed packet must not take the
+   * remaining packets of a batch down with it, nor seed the input map with keys
+   * nothing will ever delete.
+   */
+  rejectedPackets = 0;
+
+  /** The newest tick whose frame has been published. */
+  private sentThrough = -1;
+  /** The oldest tick still in the resend window. */
+  private windowFrom = 0;
+  private sinceSend = 0;
+  private stallsSinceSend = 0;
 
   constructor(options: LockstepOptions) {
     this.opts = options;
@@ -139,16 +181,23 @@ export class Lockstep {
    * simulate it on the same tick. This is the only place the delay is applied, and
    * the reason gesture recognition can stay entirely client-side (§6.2): what
    * crosses the wire is already a decided `(verb, modifier)`.
+   *
+   * And never into a frame that has already been published. The peer keeps the
+   * first copy of a frame it receives (`receive`), so a frame is immutable from
+   * its first `sendWindow` on. The two rules agree except during a stall, when the
+   * tick counter stands still while `sentThrough` has moved on: a command issued
+   * then landed in a frame the peer already held an empty copy of, was applied
+   * here and nowhere else, and the match diverged at the next hash.
    */
   issue(c: Omit<Command, "tick">): void {
-    const tick = this.opts.sim.tickCount() + INPUT_DELAY_TICKS;
+    const tick = Math.max(this.opts.sim.tickCount() + INPUT_DELAY_TICKS, this.sentThrough + 1);
     const at = this.local.get(tick) ?? [];
     at.push({ ...c, tick, player: this.opts.localPlayer });
     this.local.set(tick, at);
   }
 
   /**
-   * Send input for every tick up to the delay horizon.
+   * Publish input for every tick up to the delay horizon.
    *
    * Empty frames included — §6.1 requires it, so that a peer with nothing to say
    * is distinguishable from one that has stopped. This is also what makes the
@@ -163,9 +212,8 @@ export class Lockstep {
       this.sentThrough = t;
       fresh++;
     }
-    // Frames older than our own current tick can no longer be needed by a peer
-    // that is at most `INPUT_DELAY_TICKS` behind, so the window starts here.
-    this.windowFrom = now;
+    // See `WINDOW_FRAMES`: the peer may still be waiting on anything from here.
+    this.windowFrom = Math.max(0, now - MAX_PEER_LAG_TICKS);
     this.sinceSend += fresh;
     if (this.sinceSend >= TICKS_PER_PACKET) {
       this.sinceSend = 0;
@@ -180,26 +228,39 @@ export class Lockstep {
       frames.push({ tick: t, commands: this.local.get(t) ?? [] });
     }
     if (frames.length > 0) this.opts.transport.send(encodeFrames(frames));
+    this.stallsSinceSend = 0;
   }
-
-  private sentThrough = -1;
-  private windowFrom = 0;
-  private sinceSend = 0;
 
   /**
    * Resend the window immediately.
    *
-   * Called when the loop is waiting on the peer: a frame that was dropped will not
-   * be re-offered by `publish` until the tick counter moves, and the tick counter
-   * cannot move until the frame arrives. This is the path that turns a burst loss
-   * into a delay rather than a deadlock.
+   * `step` does this on its own while it waits; a driver may also call it when
+   * it learns something the loop cannot see, such as a transport reconnecting.
    */
   flush(): void {
     this.sendWindow();
   }
 
   private receive(packet: Uint8Array): void {
-    for (const f of decodeFrames(packet)) {
+    let frames: Frame[];
+    try {
+      frames = decodeFrames(packet);
+    } catch {
+      this.rejectedPackets++;
+      return;
+    }
+    const now = this.opts.sim.tickCount();
+    // The peer can be at most `MAX_PEER_LAG_TICKS` ahead of us and publishes
+    // `INPUT_DELAY_TICKS` past that; anything further is not an honest frame.
+    const horizon = now + MAX_PEER_LAG_TICKS + INPUT_DELAY_TICKS;
+    for (const f of frames) {
+      if (f.tick > horizon) {
+        this.rejectedPackets++;
+        continue;
+      }
+      // Already simulated: a repeat from a peer that is behind us. Nothing to
+      // keep, and re-inserting it would leave an entry nobody ever deletes.
+      if (f.tick < now) continue;
       // A hash claim rides on the frame's flags in a later revision; for now the
       // peer sends hashes as ordinary frames on a reserved verb-free tick channel,
       // so `receiveHash` is called explicitly by the driver. Keeping the two paths
@@ -248,6 +309,11 @@ export class Lockstep {
     const remoteInput = this.remote.get(next);
     if (remoteInput === undefined) {
       this.stalledTicks++;
+      // Standing still, `publish` has nothing fresh and sends nothing. Resend on
+      // a cadence instead of waiting for a tick that cannot come until the peer
+      // has what it is missing — which may well be one of our frames.
+      this.stallsSinceSend++;
+      if (this.stallsSinceSend >= STALL_RESEND_EVERY) this.sendWindow();
       this.opts.onStall?.(next);
       return false;
     }
@@ -264,8 +330,11 @@ export class Lockstep {
     };
     for (const c of frame.commands) this.opts.sim.pushCommand(c);
     this.inputLog.push(frame);
-    this.local.delete(next);
     this.remote.delete(next);
+    // Our own frame stays for as long as it is inside the resend window: the peer
+    // may still be waiting on it (see `WINDOW_FRAMES`). One tick leaves the window
+    // per tick simulated, so one delete keeps up.
+    this.local.delete(next - MAX_PEER_LAG_TICKS);
 
     this.opts.sim.tick();
 
