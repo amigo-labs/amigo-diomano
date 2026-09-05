@@ -16,10 +16,13 @@ The four smoothing steps, in order:
 
 1. **Dual grid** — a vertex is the mean of the four cells around it, putting
    vertices at cell corners and halving terracing immediately.
-2. **Material-weighted Laplacian**, two passes: rock 0.15, soil 0.40, sand 0.60,
-   ash 0.55, and then the same weights at half strength. Rock stays crisp and
-   cliff-like; sand reads as dunes. The material map thereby drives silhouette,
-   not just colour.
+2. **Material-weighted Laplacian**, three passes at falling strength (256, 176
+   and 112 over 256), with per-material weights of rock 0.36, sand 0.70, soil
+   0.59, ash 0.66 and swamp 0.63 (`SMOOTH_WEIGHT` in `mesh.rs`, over 256).
+   Rock stays crisp and cliff-like; sand reads as dunes. The material map
+   thereby drives silhouette, not just colour. §7.1's `[START]` values (rock
+   0.15, soil 0.40, sand 0.60, ash 0.55, one pass) are what these were measured
+   up from — see below.
 3. **Chunk skirts** — an outer ring pushed slightly inward.
 4. **Seam vertices come from ghost-border data**, so face boundaries are
    continuous with no special case.
@@ -272,13 +275,14 @@ the rule and makes close sculpting useless; widening the FOV enough to see the
 limb from 1.35 R takes about 96°, which is a fisheye.
 
 So the camera tilts. It looks at the planet's centre when pulled back and swings
-toward the horizon as it comes in — `MAX_TILT = 0.42` rad at the close end,
+toward the horizon as it comes in — `MAX_TILT = 0.5585` rad (32°) at the close end,
 scaled by `t²` so the far half of the range stays a clean overhead orbit. The FOV
 widens from 45° to 56° over the same range, because 45° is narrower than the
 planet's own angular radius down there and no amount of tilt fits both the ground
-below and the limb above into a frame that narrow. At 1.35 R with 56° and 24° of
-tilt the limb sits 4° inside the top edge and the sub-camera point 4° above the
+below and the limb above into a frame that narrow. At 1.35 R with 56° and 32° of
+tilt the limb stays inside the top edge and the sub-camera point above the
 bottom one: curvature on screen at every distance, close distance preserved.
+(`atmosphere.ts` derives its grazing-angle constant from the same 32°.)
 
 Two further consequences of tilting:
 

@@ -98,6 +98,7 @@ pub extern "C" fn dio_init(seed: u32, terrain: u32, ai_enabled: u32) {
     cfg.ai_enabled = u8::from(ai_enabled != 0);
     world().init(&cfg);
     commands().clear();
+    *HASH_CACHE.get() = (u32::MAX, 0);
     let m = mesh_buf();
     m.build_tables();
     m.rebuild_all(world());
@@ -434,16 +435,33 @@ pub extern "C" fn dio_score(player: u32, wave: u32) -> u32 {
     u32::from(w.score[p][i])
 }
 
+/// The last full hash and the tick it was taken at.
+///
+/// `state_hash` walks every live cell, walker and settlement. The two halves
+/// below are always read as a pair, so without this each read cost two full
+/// walks; the world can only change between reads by ticking, which moves
+/// `tick`, or by `dio_init`/`dio_replay`, which clear the cache explicitly.
+static HASH_CACHE: Global<(u32, u64)> = Global::new((u32::MAX, 0));
+
+fn current_hash() -> u64 {
+    let w: &World = world();
+    let cache = HASH_CACHE.get();
+    if cache.0 != w.tick {
+        *cache = (w.tick, w.state_hash());
+    }
+    cache.1
+}
+
 /// State hash, split because the ABI is 32-bit and JavaScript numbers cannot
 /// carry 64 bits of integer exactly.
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_state_hash_lo() -> u32 {
-    world().state_hash() as u32
+    current_hash() as u32
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_state_hash_hi() -> u32 {
-    (world().state_hash() >> 32) as u32
+    (current_hash() >> 32) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +519,7 @@ pub extern "C" fn dio_replay(len: u32) -> u32 {
     };
     let w = world();
     w.init(&header.cfg);
+    *HASH_CACHE.get() = (u32::MAX, 0);
 
     let hashes = HASHES.get();
     let mut out = 0usize;
@@ -588,6 +607,18 @@ mod tests {
             w.tick(&[]);
         }
         assert_eq!(via_shell, w.state_hash(), "the shell is not a pass-through");
+        // The hash cache must follow the tick, and must not survive a re-init
+        // back to a tick it has already seen.
+        dio_tick();
+        w.tick(&[]);
+        let after = (u64::from(dio_state_hash_hi()) << 32) | u64::from(dio_state_hash_lo());
+        assert_ne!(after, via_shell, "the hash cache did not notice a tick");
+        assert_eq!(after, w.state_hash());
+        dio_init(1234, 1, 0);
+        let fresh = (u64::from(dio_state_hash_hi()) << 32) | u64::from(dio_state_hash_lo());
+        let mut w0 = World::boxed();
+        w0.init(&cfg);
+        assert_eq!(fresh, w0.state_hash(), "the hash cache survived dio_init");
 
         // --- queued commands apply once -------------------------------------
         dio_init(9, 1, 0);

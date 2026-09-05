@@ -20,8 +20,9 @@ diomano-sim = { path = "crates/diomano-sim", default-features = false }
 [profile.dev]
 overflow-checks = true
 
-# The simulation is the only thing that needs to be fast in dev builds, and the
-# acceptance command `cargo run -p diomano-cli -- perf` uses the dev profile.
+# The simulation is the only thing that needs to be fast in dev builds: the
+# test suite replays tens of thousands of ticks, and it should not take a
+# `--release` build to do so. (The `perf` recipe itself runs `--release`.)
 [profile.dev.package.diomano-sim]
 opt-level = 3
 
@@ -32,5 +33,7 @@ codegen-units = 1
 overflow-checks = true
 strip = true
 
-# `cargo test --release` must still work, so panic=abort is applied only to the
-# wasm cdylib via its own RUSTFLAGS in the justfile, never workspace-wide.
+# `cargo test --release` must still work, so panic=abort is not set here. It
+# applies to the wasm32 target only, through `.cargo/config.toml`, which every
+# `cargo build --target wasm32-unknown-unknown` picks up — the `wasm` recipe and
+# `scripts/cloudflare-build.sh` alike, so the two cannot drift apart.

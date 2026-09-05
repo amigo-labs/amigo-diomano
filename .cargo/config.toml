@@ -1,0 +1,12 @@
+# `panic = "abort"` for the WebAssembly module only.
+#
+# The workspace profiles cannot say this — `cargo test --release` needs
+# unwinding — and `RUSTFLAGS` in the `wasm` recipe would have to be repeated in
+# `scripts/cloudflare-build.sh`, where forgetting it would ship a different
+# binary from the one CI verified. A target-scoped setting is picked up by every
+# `cargo build --target wasm32-unknown-unknown`, wherever it runs.
+#
+# The shell's `#[panic_handler]` traps either way (`crates/diomano-wasm`); this
+# only keeps the unwinding machinery the target cannot use out of the binary.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "panic=abort"]

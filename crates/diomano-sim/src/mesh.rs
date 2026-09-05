@@ -19,9 +19,9 @@
 //!
 //! 1. **Dual grid** — a vertex is the mean of the four cells around it, so
 //!    vertices sit at cell corners and terracing halves immediately.
-//! 2. **Material-weighted Laplacian**, one pass — rock stays crisp and
-//!    cliff-like, sand reads as dunes. The material map drives silhouette, not
-//!    just colour.
+//! 2. **Material-weighted Laplacian**, three passes at falling strength
+//!    ([`SMOOTH_PASSES`]) — rock stays crisp and cliff-like, sand reads as
+//!    dunes. The material map drives silhouette, not just colour.
 //! 3. **Chunk skirts** — an extra ring of vertices, intended to be dropped
 //!    radially inward to hide the hairline between chunks re-meshed at different
 //!    times. The drop is now zero: see [`SKIRT_DROP`] for why no depth both works

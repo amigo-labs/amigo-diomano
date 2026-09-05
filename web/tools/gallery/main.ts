@@ -63,7 +63,11 @@ async function build(): Promise<void> {
     place(props.magnet, 0xd6ffd0);
     const file = tier >= 2 ? "/models/villager.glb" : "/models/villager-low.glb";
     const response = await fetch(file);
-    if (response.ok) place(readGlb(await response.arrayBuffer()), 0xffd9a8, 1.4);
+    // A 404 here is the one failure that used to pass: an empty last cell,
+    // `data-ready` set, `shoot.mjs` exits 0. The header says the models are
+    // required; make it so.
+    if (!response.ok) throw new Error(`${file}: ${response.status} ${response.statusText}`);
+    place(readGlb(await response.arrayBuffer()), 0xffd9a8, 1.4);
     row += 1;
   }
   const width = COLUMNS * 1.6;
