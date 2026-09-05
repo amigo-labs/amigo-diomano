@@ -171,7 +171,12 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   const onPointerUp = (ev: PointerEvent): void => {
     if (ev.button === 0 || ev.type === "pointercancel") sculpting = false;
     if (ev.button !== 0 || ev.type === "pointercancel") panning = false;
-    if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
+    // Keep the capture while any button is still down: letting go of the left
+    // button mid-orbit used to release it, and the rest of the right-drag was
+    // lost the moment the pointer left the canvas.
+    if (ev.buttons === 0 && canvas.hasPointerCapture(ev.pointerId)) {
+      canvas.releasePointerCapture(ev.pointerId);
+    }
   };
 
   const onWheel = (ev: WheelEvent): void => {

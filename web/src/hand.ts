@@ -361,6 +361,11 @@ export function createHand(
   });
 
   const endDrag = (ev: PointerEvent): void => {
+    // Only the left button ends a left drag. A mouse shares one pointer across
+    // its buttons, so a right click mid-sculpt used to arrive here, end the drag
+    // under a still-held button and — within the click window — place a magnet
+    // nobody asked for.
+    if (ev.type === "pointerup" && ev.button !== 0) return;
     if (!dragging) return;
     dragging = false;
     // A click — a press that never strayed and released promptly — places the
@@ -386,6 +391,9 @@ export function createHand(
   // Switching what the hand carries. Mixing is impossible (§4.2), and the sim
   // refuses the switch while the hand is full — nothing here needs to know that.
   addEventListener("keydown", (ev) => {
+    // Bare digits only: Ctrl/Cmd+1 is the browser switching tabs, not the god
+    // reaching for earth.
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const material = ev.key === "1" ? 0 : ev.key === "2" ? 1 : ev.key === "3" ? 2 : -1;
     if (material < 0) return;
     sim.push(player, VERB.SET_HAND, 0, material, 0, 0);

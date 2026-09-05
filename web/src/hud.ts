@@ -316,6 +316,13 @@ export function createHud(sim: Sim, player: number): Hud {
       shownShare = -1;
       lastPhase = -1;
       armedAt = 0;
+      // The tick is about to go back to zero. A sample stamp from the old match
+      // would keep `tick - lastTerritoryTick` negative — and the bar showing the
+      // previous match's territory — until the new match outlasted the old.
+      lastTerritoryTick = -TERRITORY_EVERY;
+      territoryShare = 0.5;
+      bannerUntil = 0;
+      bannerEl.classList.remove("shown");
     },
   };
 }

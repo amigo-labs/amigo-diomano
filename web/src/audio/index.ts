@@ -55,9 +55,11 @@ export interface Audio {
   sculpt(material: number, handMaterial: number): void;
   /** Match-end sting. */
   sting(kind: "win" | "loss" | "draw"): void;
+  /** Forget the match's tick-stamped state, for a restart. */
+  reset(): void;
   /** Master volume, 0..1. Unaffected by mute — this is the remembered level. */
   volume(): number;
-  /** Set master volume, 0..1. Persisted, and unmutes if it is raised above zero. */
+  /** Set master volume, 0..1. Persisted, and unmutes if it is *raised*. */
   setVolume(v: number): void;
   /** Flip mute. Returns the new state. Persisted. */
   toggleMute(): boolean;
@@ -113,7 +115,7 @@ export function createAudio(localPlayer = 0): Audio {
 
     sync(sim, camera, dtMs): void {
       if (!synth || !ambience || !events) return;
-      synth.view(camera, sim.cells);
+      synth.view(camera, sim.N);
       const tick = sim.e.dio_tick_count();
       ambience.sync(sim, camera, tick, dtMs);
       if (tick !== lastEventTick) {
@@ -296,10 +298,12 @@ export function createAudio(localPlayer = 0): Audio {
     volume: () => volume,
 
     setVolume(v: number): void {
+      const previous = volume;
       volume = Math.min(Math.max(v, 0), 1);
       // Raising the slider is an unambiguous "I want to hear this", so it lifts
       // mute rather than leaving the player dragging a control that does nothing.
-      if (volume > 0) isMuted = false;
+      // Lowering it is not: `M` then `-` used to come back on at the new level.
+      if (volume > previous) isMuted = false;
       remember(KEY.volume, String(volume));
       remember(KEY.muted, isMuted ? "1" : "0");
       applyGain();
@@ -313,6 +317,11 @@ export function createAudio(localPlayer = 0): Audio {
     },
 
     muted: () => isMuted,
+
+    reset(): void {
+      events?.reset();
+      lastEventTick = -1;
+    },
 
     sting(kind): void {
       const s = ensure();

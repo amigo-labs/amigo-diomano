@@ -202,6 +202,14 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
     pendingCasts.length = 0;
     handledOutcome = 0;
+    // Everything that stamps state with the tick has to forget the old match,
+    // or it waits for the new one to catch up with the old one's clock.
+    vegetation.reset();
+    audio.reset();
+    if (introTimer !== null) {
+      clearTimeout(introTimer);
+      introTimer = null;
+    }
     // `dio_init` re-meshes, but its dirty flags are cleared inside the next
     // `meshUpdate` before `sync` reads them and the content hashes then
     // match — without a full re-upload the screen keeps the dead world.
@@ -250,12 +258,37 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   let menuWasOpen = false;
   /** The tick the mesh was last brought up to date for — see `render`. */
   let lastMeshedTick = -1;
+  /** The opening tour's pan home, so a restart inside it can cancel it. */
+  let introTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * A trap inside the simulation is a determinism invariant that broke (the wasm
+   * shell aborts on panic). Left alone, the loop would re-enter the same trap on
+   * every frame; stop, and say so where `main.ts` puts its epitaph.
+   */
+  const halt = (err: unknown): void => {
+    loop.stop();
+    matchStarted = false;
+    hud.setVisible(false);
+    console.error("diomano: the simulation trapped", err);
+    const fallback = document.querySelector<HTMLElement>("#fallback");
+    if (fallback) {
+      fallback.style.display = "grid";
+      fallback.textContent = `diomano ist stehen geblieben.\n\n${
+        err instanceof Error ? err.message : String(err)
+      }`;
+    }
+  };
 
   const loop = createLoop({
     update() {
       if (!matchStarted) return;
       hand.beforeTick();
-      sim.tick();
+      try {
+        sim.tick();
+      } catch (err) {
+        halt(err);
+      }
     },
     render(alpha, dtMs) {
       // The camera goes first. Everything below reads its matrix — the shared
@@ -377,7 +410,10 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       const homeDir = dirOf(LOCAL_PLAYER);
       if (enemyDir && homeDir) {
         camera.aimAt(enemyDir, true);
-        setTimeout(() => camera.intro(homeDir, 4500), 2000);
+        introTimer = setTimeout(() => {
+          introTimer = null;
+          camera.intro(homeDir, 4500);
+        }, 2000);
       }
     },
   };
