@@ -187,7 +187,12 @@ const FRAGMENT_SHADER = /* glsl */ `
       vec2 uv = vec2(vWorld.x + vWorld.z, vWorld.y - vWorld.z);
       float a = noise(uv * 9.0 + vec2(uTime * 0.10, uTime * 0.06));
       float b = noise(uv * 42.0 - vec2(uTime * 0.18, uTime * 0.23));
-      vec3 tangent = normalize(cross(up, vec3(0.0, 1.0, 0.0) + 0.001));
+      // Reference axis per branch, as the terrain shader does: up parallel to
+      // the reference makes the cross product zero and normalize() undefined,
+      // and nudging the reference by 0.001 only moved that singularity off the
+      // pole rather than removing it.
+      vec3 axis = abs(up.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+      vec3 tangent = normalize(cross(up, axis));
       vec3 bitangent = cross(up, tangent);
       n = normalize(n + (tangent * (a - 0.5) * 0.22 + bitangent * (b - 0.5) * 0.12));
     }

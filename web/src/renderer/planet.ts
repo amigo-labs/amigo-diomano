@@ -803,9 +803,9 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
 /**
  * The whole planet's index buffer: every chunk's shared topology, rebased.
  *
- * `Uint32Array` because 96 chunks x 361 vertices overflows 16 bits, and the
- * cost of that is 750 KB uploaded exactly once against 95 draw calls saved
- * every frame.
+ * `Uint32Array` although 96 chunks x 361 vertices is 34,656 and would still fit
+ * 16 bits: a larger `CHUNK` would not, and the cost of the wider type is 750 KB
+ * uploaded exactly once against 95 draw calls saved every frame.
  */
 function buildPlanetIndices(sim: Sim): Uint32Array {
   const out = new Uint32Array(sim.chunks * sim.indicesPerChunk);
