@@ -95,7 +95,13 @@ fn main() -> ExitCode {
         eprint!("{USAGE}");
         return ExitCode::FAILURE;
     };
-    let opts = Opts::parse(&args[1..]);
+    let opts = match Opts::parse(&args[1..]) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     let result = match cmd {
         "version" => {
@@ -153,7 +159,7 @@ struct Opts {
 }
 
 impl Opts {
-    fn parse(args: &[String]) -> Self {
+    fn parse(args: &[String]) -> Result<Self, String> {
         let mut o = Self {
             positional: Vec::new(),
             seed: 0x5EED,
@@ -176,36 +182,46 @@ impl Opts {
         let mut i = 0;
         while i < args.len() {
             let a = args[i].as_str();
-            let mut value = || {
+            // Every option that takes an operand fails without one. `--ticks` at
+            // the end of the line used to read as zero ticks, and `record` then
+            // wrote an empty fixture that `replay --verify` was happy with.
+            let mut value = || -> Result<String, String> {
                 i += 1;
-                args.get(i).cloned().unwrap_or_default()
+                args.get(i).cloned().ok_or_else(|| format!("`{a}` needs a value\n\n{USAGE}"))
             };
             match a {
-                "--seed" => o.seed = parse_u32(&value()),
-                "--ticks" => o.ticks = parse_u32(&value()),
-                "--every" => o.every = parse_u32(&value()).max(1),
-                "--out" => o.out = PathBuf::from(value()),
-                "--hashes" => o.hashes_out = PathBuf::from(value()),
+                "--seed" => o.seed = parse_u32(a, &value()?)?,
+                "--ticks" => o.ticks = parse_u32(a, &value()?)?,
+                "--every" => o.every = parse_u32(a, &value()?)?.max(1),
+                "--out" => o.out = PathBuf::from(value()?),
+                "--hashes" => o.hashes_out = PathBuf::from(value()?),
                 "--terrain" => {
-                    o.terrain = match value().as_str() {
+                    let name = value()?;
+                    o.terrain = match name.as_str() {
+                        "archipelago" => TERRAIN_ARCHIPELAGO,
                         "pangaea" => TERRAIN_PANGAEA,
                         "volcano" => TERRAIN_VOLCANO,
-                        _ => TERRAIN_ARCHIPELAGO,
+                        _ => return Err(format!("unknown terrain `{name}`\n\n{USAGE}")),
                     };
                 }
                 "--verify" => o.verify = true,
-                "--dir" => o.dir = PathBuf::from(value()),
-                "--matches" => o.matches = parse_u32(&value()).max(1),
-                "--powers" => o.powers = parse_u32(&value()),
+                "--dir" => o.dir = PathBuf::from(value()?),
+                "--matches" => o.matches = parse_u32(a, &value()?)?.max(1),
+                "--powers" => o.powers = parse_u32(a, &value()?)?,
                 "--free-powers" => o.free_powers = true,
                 "--ai" => o.ai = true,
                 "--no-cataclysm" => o.cataclysm = false,
                 "--check-only" => o.check_only = true,
+                // An unknown option is a typo, not a file name: `--tick 600` used
+                // to become a positional argument and run with the defaults.
+                other if other.starts_with("--") => {
+                    return Err(format!("unknown option `{other}`\n\n{USAGE}"));
+                }
                 other => o.positional.push(other.to_string()),
             }
             i += 1;
         }
-        o
+        Ok(o)
     }
 
     fn config(&self) -> MapConfig {
@@ -228,23 +244,35 @@ fn shipped_powers_mask() -> u32 {
     mask
 }
 
-fn parse_u32(s: &str) -> u32 {
+/// Decimal or `0x`-prefixed hex. Anything else is an error, not zero: `--seed
+/// 5EED` (no prefix) used to run seed 0 without a word.
+fn parse_u32(flag: &str, s: &str) -> Result<u32, String> {
     let s = s.trim();
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).unwrap_or(0)
+    let parsed = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16)
     } else {
-        s.parse().unwrap_or(0)
-    }
+        s.parse()
+    };
+    parsed.map_err(|e| format!("`{flag}` wants an integer, got `{s}`: {e}"))
 }
 
 // ---------------------------------------------------------------------------
 // hash
 // ---------------------------------------------------------------------------
 
-/// Tick a world from a seed and print a hash per tick.
+/// Tick a world from a seed and print a hash every `--every` ticks.
 ///
-/// The correctness instrument for everything else: two runs, `diff`, done.
+/// The correctness instrument for everything else: two runs, `diff`, done. The
+/// printed value is `last_hash`, the hash `World::tick` takes every 30 ticks with
+/// the counter still at `tick` — the same value `replay` prints and the fixtures
+/// store, so those outputs diff line for line against this one. Hashing here
+/// after `tick()` returned would hash a counter of `tick + 1` and agree with
+/// nothing, and at a cadence that is not a multiple of 30 `last_hash` would be
+/// stale, so that cadence is refused.
 fn cmd_hash(o: &Opts) -> Result<(), String> {
+    if !o.every.is_multiple_of(30) {
+        return Err(format!("--every must be a multiple of 30, the hash cadence; got {}", o.every));
+    }
     let mut w = World::boxed();
     w.init(&o.config());
     println!("# diomano hash seed={:#x} n={N} terrain={} ticks={}", o.seed, o.terrain, o.ticks);
@@ -253,7 +281,7 @@ fn cmd_hash(o: &Opts) -> Result<(), String> {
         demo_script(tick, o.seed, o.cataclysm, true, &mut buf);
         w.tick(buf.as_slice());
         if tick % o.every == 0 {
-            println!("{tick} {:#018x}", w.state_hash());
+            println!("{tick} {:#018x}", w.last_hash);
         }
     }
     Ok(())
@@ -282,8 +310,13 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
     w.init(&o.config());
     let mut mesh = Mesh::boxed();
     mesh.rebuild_all(&w);
+    // A second world driven through `World::tick` with the same input, compared
+    // against the hand-sequenced one at the end: the sequence below is a copy of
+    // the tick, and this is what keeps the copy honest.
+    let mut reference = World::boxed();
+    reference.init(&o.config());
 
-    const PASSES: usize = 12;
+    const PASSES: usize = 13;
     const NAMES: [&str; PASSES] = [
         "1  ghost border copy",
         "2  command application",
@@ -294,6 +327,7 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
         "6  granular movement",
         "7  vegetation growth",
         "8  walker movement",
+        "8a pickups",
         "9  combat resolution",
         "10 settlements",
         "11 flow field + influence",
@@ -307,6 +341,7 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
     // Warm up, so the first tick's page faults are not charged to pass 1.
     for _ in 0..30 {
         w.tick(&[]);
+        reference.tick(&[]);
     }
 
     let smooth_runs_before = mesh.smooth_runs;
@@ -339,15 +374,17 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
         lap(7, &mut t, &mut total);
         walkers::movement(&mut w);
         lap(8, &mut t, &mut total);
-        combat::resolve(&mut w);
+        powers::pickups_step(&mut w);
         lap(9, &mut t, &mut total);
-        settlements::update(&mut w);
+        combat::resolve(&mut w);
         lap(10, &mut t, &mut total);
+        settlements::update(&mut w);
+        lap(11, &mut t, &mut total);
         if w.tick.is_multiple_of(15) {
             flowfield::rebuild(&mut w);
             flowfield::project(&mut w);
         }
-        lap(11, &mut t, &mut total);
+        lap(12, &mut t, &mut total);
         w.accrue_mana();
         extra_mana += t.elapsed().as_nanos();
         t = Instant::now();
@@ -364,6 +401,21 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
         extra_mesh += t.elapsed().as_nanos();
     }
     let wall = wall.elapsed();
+
+    // Same input through the real tick. A different state means the pass
+    // sequence above has drifted from `World::tick` and the timings measure a
+    // different simulation.
+    for tick in 0..ticks {
+        let mut buf = CommandBuf::new();
+        demo_script(tick, o.seed, o.cataclysm, true, &mut buf);
+        reference.tick(buf.as_slice());
+    }
+    if w.state_hash() != reference.state_hash() {
+        return Err(
+            "the perf harness's pass sequence no longer matches World::tick (state hashes differ)"
+                .to_string(),
+        );
+    }
 
     let f = f64::from(ticks);
     let ms = |ns: u128| ns as f64 / 1e6 / f;
@@ -443,6 +495,11 @@ fn cmd_replay(o: &Opts) -> Result<(), String> {
         .map_err(|e| format!("cannot read {}: {e}", expected_path.display()))?;
     let expected = parse_hashes(&expected_src)?;
 
+    // Two empty lists compare equal, and a log that declares zero ticks produces
+    // exactly that — `record --ticks` with the operand missing used to write one.
+    if hashes.is_empty() {
+        return Err(format!("{path} declares no ticks, so the replay produced nothing to verify"));
+    }
     if expected.len() != hashes.len() {
         return Err(format!(
             "replay produced {} hashes, {} has {}",
@@ -1418,11 +1475,25 @@ mod tests {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect();
-        let o = Opts::parse(&args);
+        let o = Opts::parse(&args).expect("a well-formed command line");
         assert_eq!(o.seed, 0xBEEF);
         assert_eq!(o.ticks, 12);
         assert_eq!(o.terrain, TERRAIN_VOLCANO);
         assert!(o.verify);
         assert_eq!(o.positional, std::vec!["file.log".to_string()]);
+    }
+
+    #[test]
+    fn opts_refuse_what_they_cannot_honour() {
+        let parse =
+            |line: &[&str]| Opts::parse(&line.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
+        assert!(parse(&["--ticks"]).is_err(), "a missing operand read as zero ticks");
+        assert!(parse(&["--seed", "5EED"]).is_err(), "unprefixed hex read as seed 0");
+        assert!(
+            parse(&["--terrain", "moon"]).is_err(),
+            "an unknown terrain fell back to archipelago"
+        );
+        assert!(parse(&["--tick", "12"]).is_err(), "a misspelt option became a file name");
+        assert!(parse(&["fixtures/session.log"]).is_ok(), "a plain file name is positional");
     }
 }
