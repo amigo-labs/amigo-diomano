@@ -109,10 +109,14 @@ claims would silently switch off desync detection exactly under load — which i
 where a desync is most likely.
 
 `just verify-lockstep` runs two wasm instances through the layer at the Phase 7
-DoD's conditions (120 ms RTT, 2% loss, 30 ms jitter) and checks three things:
-1,200 ticks without divergence; identical hashes across two different link
-schedules, so arrival order provably cannot reach the simulation; and that an
-injected divergence **is caught** — a detector never seen to fire is a comment.
+DoD's conditions (120 ms RTT, 2% loss, 30 ms jitter) and checks five things:
+the TypeScript codec produces the bytes `Command::encode` pins; 1,200 ticks
+without divergence; identical hashes across two different link schedules, so
+arrival order provably cannot reach the simulation; an injected divergence
+**is caught** — a detector never seen to fire is a comment; and the three
+directed failures random loss almost never produces on purpose: every copy of
+one frame lost, a command issued mid-stall, and a window resent right after a
+tick, which must still carry every command its frames were published with.
 
 ### The §6.3 acceptance criterion
 
@@ -262,14 +266,17 @@ Durable Objects on the Workers Free plan use the **SQLite storage backend only**
 The TURN free tier is **shared between TURN and SFU**, not two independent
 allowances.
 
-**Per-match traffic.** 8 bytes of payload inside a ~100 byte packet after
-SCTP + DTLS + UDP + IP + TURN framing. At 30 Hz that is 3 KB/s per direction,
-~6 KB/s per match, ~5.4 MB for 15 minutes — roughly 185,000 matches/month
-against the TURN allowance. TURN is not a constraint.
+**Per-match traffic.** Roughly 100 bytes of SCTP + DTLS + UDP + IP + TURN
+framing per packet, plus the payload: with the whole resend window aboard that
+is 14 frame headers (112 bytes) and the commands of those ticks, so a packet is
+about 220 bytes. At 15 packets/s per direction (two ticks per packet) that is
+~3.3 KB/s per direction, ~6.6 KB/s per match, ~6 MB for 15 minutes — roughly
+170,000 matches/month against the TURN allowance. TURN is not a constraint.
 
-Note the efficiency though: 8% payload. Overhead dominates completely.
-`[START]` **batch 2 ticks per packet** — halves traffic for 66 ms of added
-delay, comfortably inside the 200 ms input-delay budget.
+The framing is the cost whatever the payload — §6.6 was written when a packet
+carried one 8-byte frame, 8% payload — which is why `[START]` **batches 2 ticks
+per packet**: it halves the packet count for 66 ms of added delay, comfortably
+inside the 200 ms input-delay budget.
 
 **The binding constraint is Durable Object duration.** 13,000 GB-s/day at 128 MB
 is ~28 DO-hours/day. A Lobby DO held open for a whole 15-minute match consumes

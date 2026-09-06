@@ -36,9 +36,12 @@ export const INPUT_DELAY_TICKS = 6;
 /**
  * Ticks per packet. `[START]`, §6.6.
  *
- * 8 bytes of payload travel inside roughly 100 bytes of SCTP + DTLS + UDP + IP +
- * TURN framing, so payload is about 8% of the packet. Batching two ticks halves
- * the packet count for 66 ms of added delay, comfortably inside the 200 ms budget.
+ * A packet pays roughly 100 bytes of SCTP + DTLS + UDP + IP + TURN framing
+ * whatever it carries — §6.6 was written when it carried one 8-byte frame, i.e.
+ * 8% payload; with the whole `WINDOW_FRAMES` window aboard it is ~112 bytes of
+ * headers plus commands, about half and half. Either way the framing is the
+ * cost, so batching two ticks per packet halves it for 66 ms of added delay,
+ * comfortably inside the 200 ms budget.
  */
 export const TICKS_PER_PACKET = 2;
 
@@ -155,7 +158,8 @@ export class Lockstep {
   /** Ticks spent waiting for remote input. The stall metric of §6.1. */
   stalledTicks = 0;
   /**
-   * Packets that did not decode, or named a tick the peer cannot honestly be at.
+   * Packets that did not decode, or carried a frame for a tick the peer cannot
+   * honestly be at. One count per packet, however many of its frames were bad.
    * Counted and dropped, never applied: a malformed packet must not take the
    * remaining packets of a batch down with it, nor seed the input map with keys
    * nothing will ever delete.
@@ -164,8 +168,6 @@ export class Lockstep {
 
   /** The newest tick whose frame has been published. */
   private sentThrough = -1;
-  /** The oldest tick still in the resend window. */
-  private windowFrom = 0;
   private sinceSend = 0;
   private stallsSinceSend = 0;
 
@@ -212,8 +214,6 @@ export class Lockstep {
       this.sentThrough = t;
       fresh++;
     }
-    // See `WINDOW_FRAMES`: the peer may still be waiting on anything from here.
-    this.windowFrom = Math.max(0, now - MAX_PEER_LAG_TICKS);
     this.sinceSend += fresh;
     if (this.sinceSend >= TICKS_PER_PACKET) {
       this.sinceSend = 0;
@@ -221,10 +221,23 @@ export class Lockstep {
     }
   }
 
-  /** Send every frame the peer might still need: `[windowFrom, sentThrough]`. */
+  /** The oldest tick the peer may still be waiting on — see `WINDOW_FRAMES`. */
+  private windowFrom(): number {
+    return Math.max(0, this.opts.sim.tickCount() - MAX_PEER_LAG_TICKS);
+  }
+
+  /**
+   * Send every frame the peer might still need: `[windowFrom, sentThrough]`.
+   *
+   * The lower bound is computed here, from the tick as it is *now*, rather than
+   * remembered from `publish`: `step` deletes the local frame that falls out of
+   * the window after each tick, and a remembered bound from before that tick
+   * still reached one frame further back — so a `flush` between the two sent an
+   * empty frame for a tick that had carried a command.
+   */
   private sendWindow(): void {
     const frames: Frame[] = [];
-    for (let t = this.windowFrom; t <= this.sentThrough; t++) {
+    for (let t = this.windowFrom(); t <= this.sentThrough; t++) {
       frames.push({ tick: t, commands: this.local.get(t) ?? [] });
     }
     if (frames.length > 0) this.opts.transport.send(encodeFrames(frames));
@@ -253,27 +266,32 @@ export class Lockstep {
     // The peer can be at most `MAX_PEER_LAG_TICKS` ahead of us and publishes
     // `INPUT_DELAY_TICKS` past that; anything further is not an honest frame.
     const horizon = now + MAX_PEER_LAG_TICKS + INPUT_DELAY_TICKS;
+    let rejected = false;
     for (const f of frames) {
       if (f.tick > horizon) {
-        this.rejectedPackets++;
+        rejected = true;
         continue;
       }
       // Already simulated: a repeat from a peer that is behind us. Nothing to
       // keep, and re-inserting it would leave an entry nobody ever deletes.
+      // (Hashes do not travel on frames — `receiveHash` is its own path, so a
+      // hash for a tick we have passed is never lost to this skip.)
       if (f.tick < now) continue;
-      // A hash claim rides on the frame's flags in a later revision; for now the
-      // peer sends hashes as ordinary frames on a reserved verb-free tick channel,
-      // so `receiveHash` is called explicitly by the driver. Keeping the two paths
-      // separate means a malformed hash cannot corrupt the input stream.
+      // The first copy of a frame wins. Frames are immutable once published
+      // (`issue`), so a later copy can only ever be identical.
       if (!this.remote.has(f.tick)) this.remote.set(f.tick, f.commands);
     }
+    if (rejected) this.rejectedPackets++;
   }
 
   /** Report the peer's hash for a tick. */
   receiveHash(tick: number, hash: bigint): void {
+    // Once halted nothing is compared again, and a claim kept for a tick that
+    // will never be reached is a leak.
+    if (this.halted) return;
     const own = this.ownHashes.get(tick);
     if (own === undefined) {
-      this.hashClaims.push({ tick, hash });
+      if (!this.hashClaims.some((c) => c.tick === tick)) this.hashClaims.push({ tick, hash });
       return;
     }
     this.compare(tick, own, hash);
@@ -332,8 +350,9 @@ export class Lockstep {
     this.inputLog.push(frame);
     this.remote.delete(next);
     // Our own frame stays for as long as it is inside the resend window: the peer
-    // may still be waiting on it (see `WINDOW_FRAMES`). One tick leaves the window
-    // per tick simulated, so one delete keeps up.
+    // may still be waiting on it (see `WINDOW_FRAMES`). After this tick the
+    // window starts at `next + 1 - MAX_PEER_LAG_TICKS`, so the frame one below
+    // it is the one that has just left; one delete per tick keeps up.
     this.local.delete(next - MAX_PEER_LAG_TICKS);
 
     this.opts.sim.tick();

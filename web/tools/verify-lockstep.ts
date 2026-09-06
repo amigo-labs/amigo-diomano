@@ -27,9 +27,10 @@
  * 3. the same match over a different link schedule produces the same hashes, so
  *    arrival order provably never reaches the simulation;
  * 4. an injected divergence is caught — a detector never seen to fire is a comment;
- * 5. two failure modes that random loss almost never produces on purpose: every
+ * 5. three failure modes that random loss almost never produces on purpose: every
  *    copy of one frame lost (the deadlock the resend window exists to prevent),
- *    and a command issued during a stall (the frame-mutation desync).
+ *    a command issued during a stall (the frame-mutation desync), and a window
+ *    resent right after a tick (the frame-emptying resend).
  *
  * # What this does not prove
  *
@@ -445,6 +446,61 @@ async function aCommandIssuedDuringAStallReachesBothPeers(): Promise<void> {
   );
 }
 
+/**
+ * A resent window carries what was published. Before the window's lower bound
+ * was computed at send time, `step` deleted the frame that had just left the
+ * window while `publish` still remembered the bound from before the tick — so a
+ * `flush` between the two sent an *empty* frame for a tick that had carried a
+ * command. The receiver's "already simulated" guard hid it: two independent
+ * rules were holding one invariant.
+ */
+async function aResentWindowCarriesWhatWasPublished(): Promise<void> {
+  const p = await pair();
+  // Tap everything A sends and remember the fullest copy of every frame.
+  const published = new Map<number, number>();
+  p.link.dropFromA = (packet) => {
+    for (const f of decodeFrames(packet)) {
+      published.set(f.tick, Math.max(published.get(f.tick) ?? 0, f.commands.length));
+    }
+    return false;
+  };
+  // One command from A on every tick, so every frame in this stretch is
+  // non-empty and an empty frame in a later window is one that lost its
+  // contents.
+  for (let i = 0; i < 60; i++) {
+    p.a.issue({ verb: 0, face: 4, x: 32, y: 32, modifier: 0, player: 0 });
+    p.a.step();
+    p.b.step();
+    p.link.pump();
+  }
+  // Right after a step is the moment the deletion in `step` and a stale lower
+  // bound used to disagree.
+  const captured: ReturnType<typeof decodeFrames>[] = [];
+  p.link.dropFromA = (packet) => {
+    captured.push(decodeFrames(packet));
+    return true;
+  };
+  p.a.flush();
+  const flushed = captured[0];
+  if (!flushed) fail("flush sent nothing");
+  let checked = 0;
+  for (const f of flushed) {
+    const was = published.get(f.tick);
+    if (was === undefined) continue;
+    if (f.commands.length < was) {
+      fail(
+        `flush resent frame ${f.tick} with ${f.commands.length} commands; ` +
+          `it was published with ${was}`,
+      );
+    }
+    checked++;
+  }
+  if (checked === 0) fail("the flushed window overlapped nothing published before it");
+  console.log(
+    `                 a resent window carried every command it was published with (${checked} frames)`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 
 theCodecMatchesTheRustLayout();
@@ -506,3 +562,4 @@ console.log(`                 injected divergence caught at tick ${corrupted.des
 
 await aFrameLostInEveryCopyIsStillDelivered();
 await aCommandIssuedDuringAStallReachesBothPeers();
+await aResentWindowCarriesWhatWasPublished();
