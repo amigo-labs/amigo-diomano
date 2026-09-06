@@ -680,7 +680,7 @@ fn raise_seabed(w: &mut World, face: usize, x: i32, y: i32, h: i16) {
 /// Two properties hold by construction, for any seed. Passability: the spine
 /// cell (`k = 0`) is at lateral distance `|m| <= 1` from the crest, so it is
 /// carved to at least `base - 1 >= CAUSEWAY_CREST_MIN - 1 > FLOOD_CAP`, and
-/// the spine is 4-connected — `spawns_are_connected_at_tick_zero` stays a
+/// the spine is 4-connected — `the_land_bridge_connects_the_spawns` stays a
 /// consequence, not a hope. No build site: lateral heights fall off strictly
 /// unimodally from the crest (`base, base-1, base-2`), so no three
 /// equal-height cells ever sit in a row across the band, and no 3x3

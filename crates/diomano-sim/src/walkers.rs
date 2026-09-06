@@ -69,7 +69,16 @@ pub fn spawn(
     Some(slot as u16)
 }
 
-/// Remove a walker and give its home settlement its population slot back.
+/// Remove a walker and give every population slot it held back.
+///
+/// Its own slot goes to its home. The slots it carries from walkers it absorbed
+/// (`pop_carried`) came from settlements the model no longer knows — a merged
+/// walker is one unit — so each goes to the owner's living settlement with the
+/// most population out, ties to the lowest slot. Deterministic, no new state, and
+/// no settlement stays starved: crediting all of them to `home` used to leave
+/// the settlements the absorbed walkers came from at their cap for good, with
+/// `spawn_population` skipping them until the match ended. A 20,000-tick match
+/// finished with fifteen settlements fielding two walkers per player.
 pub fn remove(w: &mut World, id: usize) {
     if !w.walkers[id].alive() {
         return;
@@ -80,18 +89,20 @@ pub fn remove(w: &mut World, id: usize) {
     if wk.home != NO_SETTLEMENT {
         let home = wk.home as usize;
         if home < w.settlements.len() && w.settlements[home].alive() {
-            // Itself, plus everyone it had absorbed. A merged walker holds several
-            // settlement slots charged; killing it has to release all of them or a
-            // long match strangles its own settlements into never spawning again.
-            //
-            // Carried population is credited to *this* walker's home, which may
-            // not be where every absorbed walker came from. That is a deliberate
-            // simplification: the alternative is a per-walker list of origins, and
-            // a merged walker is one unit — asking which of its people came from
-            // where is a question the model does not have.
-            let released = wk.pop_carried.saturating_add(1);
-            w.settlements[home].pop = w.settlements[home].pop.saturating_sub(released);
+            w.settlements[home].pop = w.settlements[home].pop.saturating_sub(1);
         }
+    }
+    for _ in 0..wk.pop_carried {
+        let fullest = (0..w.settlements.len())
+            .filter(|&s| {
+                let st = &w.settlements[s];
+                st.alive() && st.owner as usize == owner && st.pop > 0
+            })
+            .max_by_key(|&s| (w.settlements[s].pop, core::cmp::Reverse(s)));
+        let Some(slot) = fullest else {
+            break; // nobody has anyone out: the slot was already lost with its settlement
+        };
+        w.settlements[slot].pop -= 1;
     }
     // Only the magnet's *current* leader drops it. The flag alone is not enough:
     // it is a cache of `magnet.leader`, and a walker whose magnet was re-placed
@@ -171,7 +182,17 @@ fn step_walker(w: &mut World, id: usize) {
 }
 
 /// First walker to reach the magnet becomes leader (§5.1).
+///
+/// Never a champion. `make_champion` moves the magnet onto the champion and
+/// drops the leader on purpose — "the player has no leader until a walker
+/// touches the magnet again" — and a champion standing on that cell would
+/// otherwise claim it back on the next pass, arriving at LEADER | CHAMPION:
+/// tripled strength plus the holy fire's invincibility, with nobody else able
+/// to claim the magnet while it lives.
 fn claim_magnet(w: &mut World, id: usize, owner: usize, face: usize, x: i32, y: i32) {
+    if w.walkers[id].flags & WALKER_CHAMPION != 0 {
+        return;
+    }
     let m = w.magnet[owner];
     if m.active == 0 || m.leader != u16::MAX {
         return;
@@ -431,6 +452,37 @@ mod tests {
         w.walkers[id].flags |= WALKER_LEADER; // stale: the magnet does not know it
         remove(&mut w, id);
         assert_eq!((w.magnet[0].face, w.magnet[0].x, w.magnet[0].y), (2, 10, 10));
+    }
+
+    #[test]
+    fn a_dead_walker_returns_carried_people_to_the_settlement_with_most_out() {
+        let mut w = open_world();
+        for s in &mut w.settlements {
+            s.pop = 0;
+        }
+        // Home has this one walker charged; a second settlement has two out,
+        // absorbed into this walker long ago.
+        let town = |x: u8, pop: u8| crate::world::Settlement {
+            progress: 100,
+            face: 4,
+            x,
+            y: 20,
+            size: 3,
+            tier: 1,
+            owner: 0,
+            pop,
+            flags: crate::world::SETTLE_ALIVE,
+        };
+        w.settlements[0] = town(20, 1);
+        w.settlements[1] = town(40, 2);
+        let id = spawn(&mut w, 0, 4, 30, 30, 2, 0).unwrap() as usize;
+        w.walkers[id].pop_carried = 2;
+        remove(&mut w, id);
+        assert_eq!(w.settlements[0].pop, 0, "the walker's own slot did not go home");
+        assert_eq!(
+            w.settlements[1].pop, 0,
+            "the carried slots did not go back to the settlement that fielded them"
+        );
     }
 
     #[test]

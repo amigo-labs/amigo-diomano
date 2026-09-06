@@ -664,7 +664,6 @@ pub struct AiState {
     /// Completed passes through the current script.
     pub repeat: u16,
     pub timer: u32,
-    pub cursor: u32,
     pub anchor_face: u8,
     pub anchor_x: u8,
     pub anchor_y: u8,
@@ -830,7 +829,6 @@ impl World {
                 script_pc: 0,
                 repeat: 0,
                 timer: 0,
-                cursor: 0,
                 anchor_face: 0,
                 anchor_x: 0,
                 anchor_y: 0,
@@ -1330,7 +1328,6 @@ impl World {
         h.write_u16(self.ai.script_pc);
         h.write_u16(self.ai.repeat);
         h.write_u32(self.ai.timer);
-        h.write_u32(self.ai.cursor);
         h.write_u8(self.ai.anchor_face);
         h.write_u8(self.ai.anchor_x);
         h.write_u8(self.ai.anchor_y);
@@ -1462,16 +1459,18 @@ impl World {
             // Q16.16 accumulator: fractional mana per tick is the norm, and
             // truncating it every tick would make small holdings pay nothing.
             //
-            // `cells * mult / MANA_DIVISOR` mana units per tick, in Q16.16, is
-            // `cells * mult * 65536 / 256`. Written as the multiplication it
-            // reduces to rather than as `(cells * mult) << 16` — the shift is
-            // the one arithmetic operator `overflow-checks` does not guard the
-            // value of, and past `cells * mult >= 32768` (one citadel's reach on
-            // a continent) it silently discarded the high bits and turned the
-            // income of the player with the *most* land negative.
-            // `acc * mult` itself fits (24,576 cells x 1,808 at most); the last
-            // factor is where a full planet under one god would leave `i32`.
-            let per_tick = (acc[p] * mult[p]).saturating_mul(65_536 / MANA_DIVISOR);
+            // `mult` is the §4.6 tier multiplier in sixteenths (16 is x1), so
+            // the income is `cells * (mult / 16) / MANA_DIVISOR` units per tick;
+            // in Q16.16 that is `cells * mult * 65536 / (16 * 256)`, i.e.
+            // `cells * mult * 16`. Written as that multiplication rather than as
+            // `(cells * mult) << 16` followed by the division: the shift is the
+            // one arithmetic operator `overflow-checks` does not guard the value
+            // of, and past `cells * mult >= 32768` (one citadel's reach on a
+            // continent) it silently discarded the high bits and turned the
+            // income of the player with the *most* land negative. `acc * mult`
+            // itself fits (24,576 cells x 1,808 at most), and so does the
+            // product with 16; `saturating_mul` is the belt.
+            let per_tick = (acc[p] * mult[p]).saturating_mul(65_536 / (MANA_DIVISOR * 16));
             self.mana[p] = self.mana[p].saturating_add(per_tick);
             self.mana[p] = self.mana[p].min(9_999 << 16);
         }
@@ -2004,12 +2003,47 @@ mod tests {
             s.owner = 0;
             s.tier = 4;
         }
-        // Far past the old limit (24,576 x 1,808 against 32,768), and past `i32`
-        // in Q16.16: the income must saturate at the cap, never wrap.
+        // Far past the old limit (24,576 x 1,808 against 32,768): the income
+        // must be positive and land on the cap, never wrap.
         w.mana = [0; PLAYERS];
         w.accrue_mana();
-        assert_eq!(w.mana_units(0), 9_999, "a planet-sized income did not saturate at the cap");
+        assert_eq!(w.mana_units(0), 9_999, "a planet-sized income did not reach the cap");
         assert_eq!(w.mana_units(1), 0);
+
+        // The formula itself, at a small holding where every term is legible:
+        // 256 cells x 16/16 = 1 unit per tick, i.e. the §4.6 `cells * tier /
+        // MANA_DIVISOR` with `MANA_DIVISOR = 256` and no settlement bonus.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    w.influence[idx(face, x, y)] = 0;
+                }
+            }
+        }
+        for s in &mut w.settlements {
+            *s = Settlement::default();
+        }
+        let mut held = 0usize;
+        'fill: for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    if w.habitable(c) {
+                        w.influence[c] = 50;
+                        held += 1;
+                        if held == 256 {
+                            break 'fill;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(held, 256);
+        w.mana = [0; PLAYERS];
+        w.accrue_mana();
+        assert_eq!(w.mana[0], 1 << 16, "256 held cells with no settlement is one unit per tick");
 
         // And a modest, realistic holding just past the old threshold: 2,000
         // cells with one citadel is `acc * mult = 46,000`.
@@ -2051,17 +2085,18 @@ mod tests {
         let before = w.mana[0];
         w.accrue_mana();
         assert!(w.mana[0] > before, "holding {held} cells with a citadel lost mana");
+        // `mult = 16 + 7` for one citadel; `* 16` is the Q16.16 form of `/ 4096`.
         assert_eq!(
             w.mana[0] - before,
-            (held as i32) * 23 * 256,
-            "income is not cells * mult / 256"
+            (held as i32) * 23 * 16,
+            "income is not cells * (mult / 16) / MANA_DIVISOR"
         );
     }
 
     /// The wire bytes, pinned to literals.
     ///
     /// `web/src/netcode/frame.ts` implements the same layout in TypeScript and
-    /// pins the same five vectors (`the_codec_matches_the_rust_layout` in
+    /// pins the same five vectors (`theCodecMatchesTheRustLayout` in
     /// `web/tools/verify-lockstep.ts`). Two encoders for one wire format is a
     /// desync waiting to happen; two tests against one set of bytes is what
     /// keeps them from drifting apart. Change these bytes on both sides or not
@@ -2141,6 +2176,8 @@ mod tests {
         // Scribble on a ghost slot. It is a derived cache; the hash must ignore
         // it, or an innocuous copy-order difference would read as a desync.
         w.height[idx_i(0, -1, 5)] = 12_345;
+        // `dry_ticks` is hashed over live cells only, the same way.
+        w.dry_ticks[idx_i(0, -1, 5)] = 777;
         assert_eq!(w.state_hash(), base);
     }
 
