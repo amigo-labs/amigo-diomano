@@ -52,8 +52,13 @@ export const POWER = {
   ARMAGEDDON: 7,
 } as const;
 
-/** §5.3's modifiers, read live so releasing shift mid-drag takes effect. */
-export function readModifier(ev: PointerEvent | MouseEvent): number {
+/**
+ * §5.3's modifiers, read live so releasing shift mid-drag takes effect.
+ *
+ * Keyboard events carry the same three flags as pointer events, so the hand and
+ * the radial menu can refresh on a bare Shift press with the mouse at rest.
+ */
+export function readModifier(ev: PointerEvent | MouseEvent | KeyboardEvent): number {
   return (
     (ev.shiftKey ? MOD.THROWN : 0) |
     (ev.altKey ? MOD.INCREASED : 0) |

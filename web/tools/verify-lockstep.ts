@@ -19,6 +19,19 @@
  * `determinism::interleaved_worlds_do_not_contaminate_each_other` already pins the
  * same property on the native side.
  *
+ * Five checks, in order:
+ *
+ * 1. the command codec produces the bytes `Command::encode` produces, on the same
+ *    five vectors the Rust test pins;
+ * 2. a 1,200-tick match over the DoD link completes without divergence;
+ * 3. the same match over a different link schedule produces the same hashes, so
+ *    arrival order provably never reaches the simulation;
+ * 4. an injected divergence is caught — a detector never seen to fire is a comment;
+ * 5. three failure modes that random loss almost never produces on purpose: every
+ *    copy of one frame lost (the deadlock the resend window exists to prevent),
+ *    a command issued during a stall (the frame-mutation desync), and a window
+ *    resent right after a tick (the frame-emptying resend).
+ *
  * # What this does not prove
  *
  * WebRTC, ICE, TURN relaying, DataChannel backpressure, signalling, Durable
@@ -30,9 +43,14 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { Command } from "../src/netcode/frame";
-import { HASH_INTERVAL_TICKS, Lockstep, type SimAdapter } from "../src/netcode/lockstep";
-import { Link } from "../src/netcode/loopback";
+import { type Command, decodeCommand, decodeFrames, encodeCommand } from "../src/netcode/frame";
+import {
+  HASH_INTERVAL_TICKS,
+  INPUT_DELAY_TICKS,
+  Lockstep,
+  type SimAdapter,
+} from "../src/netcode/lockstep";
+import { Link, type Transport } from "../src/netcode/loopback";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const WASM_PATH = join(WEB_ROOT, "public/diomano.wasm");
@@ -56,6 +74,7 @@ interface WasmExports {
   ): void;
   dio_tick(): void;
   dio_tick_count(): number;
+  dio_hand_amount(player: number): number;
   dio_state_hash_lo(): number;
   dio_state_hash_hi(): number;
 }
@@ -63,6 +82,11 @@ interface WasmExports {
 function fail(message: string): never {
   console.error(`verify-lockstep: ${message}`);
   process.exit(1);
+}
+
+/** A `SimAdapter` that also exposes the raw exports, for assertions. */
+interface TestSim extends SimAdapter {
+  handAmount(player: number): number;
 }
 
 /**
@@ -79,7 +103,7 @@ function fail(message: string): never {
  * verb certain to do something: digging needs no mana and no hand, and
  * `seed_starting_positions` guarantees face 4 cell (32, 32) is land.
  */
-async function spawnSim(seed: number, corruptAt: number | null = null): Promise<SimAdapter> {
+async function spawnSim(seed: number, corruptAt: number | null = null): Promise<TestSim> {
   const bytes = readFileSync(WASM_PATH);
   const { instance } = await WebAssembly.instantiate(bytes, {});
   const e = instance.exports as unknown as WasmExports;
@@ -102,6 +126,9 @@ async function spawnSim(seed: number, corruptAt: number | null = null): Promise<
       // signature — the same reason `dio_state_hash_lo`/`_hi` exist at all.
       return (BigInt(e.dio_state_hash_hi() >>> 0) << 32n) | BigInt(e.dio_state_hash_lo() >>> 0);
     },
+    handAmount(player: number) {
+      return e.dio_hand_amount(player);
+    },
   };
 }
 
@@ -121,11 +148,67 @@ function scriptFor(player: number, tick: number): Omit<Command, "tick" | "player
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// 1. The codec, against the bytes the Rust side pins
+// ---------------------------------------------------------------------------
+
+/**
+ * The same five vectors as `command_wire_bytes_are_pinned_for_the_typescript_codec`
+ * in `crates/diomano-sim/src/world.rs`. Both tests assert against these literal
+ * bytes, so the two encoders can only drift together, never apart.
+ */
+const PINNED: [Command, number[]][] = [
+  [{ tick: 0, player: 0, verb: 0, face: 0, x: 0, y: 0, modifier: 0 }, [0, 0, 0, 0, 0, 0, 0, 0]],
+  [
+    { tick: 1, player: 1, verb: 2, face: 4, x: 32, y: 32, modifier: 0 },
+    [0x12, 0x01, 0x10, 0x20, 0x02, 0x00, 0x00, 0x00],
+  ],
+  [
+    { tick: 123_456, player: 1, verb: 10, face: 5, x: 63, y: 63, modifier: 7 },
+    [0x5a, 0x8f, 0x1f, 0x3f, 0x80, 0xc4, 0x03, 0x00],
+  ],
+  [
+    { tick: 0x7fffffff, player: 3, verb: 15, face: 7, x: 511, y: 511, modifier: 63 },
+    [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+  ],
+  [
+    { tick: 2, player: 0, verb: 3, face: 2, x: 5, y: 300, modifier: 1 },
+    [0x83, 0x82, 0x02, 0x2c, 0x05, 0x00, 0x00, 0x00],
+  ],
+];
+
+function theCodecMatchesTheRustLayout(): void {
+  for (const [command, bytes] of PINNED) {
+    const buf = new ArrayBuffer(8);
+    const view = new DataView(buf);
+    encodeCommand(command, view, 0);
+    const got = [...new Uint8Array(buf)];
+    if (got.some((b, i) => b !== bytes[i])) {
+      fail(
+        `encodeCommand(${JSON.stringify(command)}) = [${got.join(", ")}], ` +
+          `Rust pins [${bytes.join(", ")}] — the two codecs have drifted apart`,
+      );
+    }
+    const back = decodeCommand(view, 0);
+    for (const key of Object.keys(command) as (keyof Command)[]) {
+      if (back[key] !== command[key]) {
+        fail(`decodeCommand did not invert encodeCommand on ${key} for ${JSON.stringify(command)}`);
+      }
+    }
+  }
+  console.log(`verify-lockstep: codec matches the Rust layout on ${PINNED.length} pinned vectors`);
+}
+
+// ---------------------------------------------------------------------------
+// 2–4. A lossy, latent match
+// ---------------------------------------------------------------------------
+
 interface RunResult {
   hashes: Map<number, bigint>;
   desyncTick: number | null;
   stalled: number;
   dropped: number;
+  /** The tick both peers reached — the lower of the two. */
   ticks: number;
 }
 
@@ -148,16 +231,26 @@ async function runMatch(linkSeed: number, corruptAtTick: number | null): Promise
   const b = new Lockstep({ transport: link.b, sim: simB, localPlayer: 1, onDesync });
 
   const hashes = new Map<number, bigint>();
+  // Issue each tick's scripted command once per tick, not once per loop
+  // iteration: during a stall the tick does not move and a driver that re-read the
+  // script would issue the same command again. A real driver issues on input
+  // events and has the same property for free.
+  const issuedThrough = [-1, -1];
   let guard = 0;
 
-  while (simA.tickCount() < TICKS && guard < TICKS * 200) {
+  // Both peers must finish, not only A: B may legitimately trail by up to
+  // `MAX_PEER_LAG_TICKS`, and a check on A alone would call that a stall.
+  while ((simA.tickCount() < TICKS || simB.tickCount() < TICKS) && guard < TICKS * 200) {
     guard++;
 
     for (const [peer, sim, player] of [
       [a, simA, 0],
       [b, simB, 1],
     ] as const) {
-      const cmd = scriptFor(player, sim.tickCount());
+      const t = sim.tickCount();
+      if (t === issuedThrough[player]) continue;
+      issuedThrough[player] = t;
+      const cmd = scriptFor(player, t);
       if (cmd !== null) peer.issue({ ...cmd, player });
     }
 
@@ -204,6 +297,213 @@ async function runMatch(linkSeed: number, corruptAtTick: number | null): Promise
 }
 
 // ---------------------------------------------------------------------------
+// 5. Directed failures
+// ---------------------------------------------------------------------------
+
+/**
+ * A link with explicit control: packets are held until `pump`, and either
+ * direction can be filtered. Random loss finds the two cases below about once per
+ * ten thousand matches; a test has to make them happen on purpose.
+ */
+class ManualLink {
+  readonly a: Transport;
+  readonly b: Transport;
+  private toA: Uint8Array[] = [];
+  private toB: Uint8Array[] = [];
+  private handlerA: ((p: Uint8Array) => void) | null = null;
+  private handlerB: ((p: Uint8Array) => void) | null = null;
+  /** While set, packets towards that peer queue up instead of arriving. */
+  holdToA = false;
+  /** Return `true` to drop a packet A sends. */
+  dropFromA: (packet: Uint8Array) => boolean = () => false;
+
+  constructor() {
+    this.a = {
+      send: (p) => {
+        if (!this.dropFromA(p)) this.toB.push(p);
+      },
+      onReceive: (h) => {
+        this.handlerA = h;
+      },
+    };
+    this.b = {
+      send: (p) => this.toA.push(p),
+      onReceive: (h) => {
+        this.handlerB = h;
+      },
+    };
+  }
+
+  /** Deliver everything queued, in order, unless held. */
+  pump(): void {
+    for (const p of this.toB.splice(0)) this.handlerB?.(p);
+    if (!this.holdToA) for (const p of this.toA.splice(0)) this.handlerA?.(p);
+  }
+}
+
+interface Pair {
+  simA: TestSim;
+  simB: TestSim;
+  a: Lockstep;
+  b: Lockstep;
+  link: ManualLink;
+  /** Step both peers and pump the link until both have reached `until`. */
+  runTo(until: number, what: string): void;
+}
+
+async function pair(): Promise<Pair> {
+  const simA = await spawnSim(0x5eed);
+  const simB = await spawnSim(0x5eed);
+  const link = new ManualLink();
+  const a = new Lockstep({ transport: link.a, sim: simA, localPlayer: 0 });
+  const b = new Lockstep({ transport: link.b, sim: simB, localPlayer: 1 });
+  return {
+    simA,
+    simB,
+    a,
+    b,
+    link,
+    runTo(until, what) {
+      let guard = 0;
+      const stuck = (): never =>
+        fail(`${what}: deadlocked at ticks ${simA.tickCount()} / ${simB.tickCount()} of ${until}`);
+      while (simA.tickCount() < until || simB.tickCount() < until) {
+        a.step();
+        b.step();
+        link.pump();
+        if (guard++ > until * 50) stuck();
+      }
+      // Level the two off — one may be a few ticks ahead — so that the hashes the
+      // callers compare are for the same tick. The tick count is hashed.
+      while (simA.tickCount() < simB.tickCount()) {
+        a.step();
+        link.pump();
+        if (guard++ > until * 50) stuck();
+      }
+      while (simB.tickCount() < simA.tickCount()) {
+        b.step();
+        link.pump();
+        if (guard++ > until * 50) stuck();
+      }
+    },
+  };
+}
+
+/**
+ * Every copy of one frame lost. Before the window was anchored to the peer's
+ * needs this was a guaranteed deadlock: A ran on past the lost tick, dropped it
+ * from its window, and B waited for it forever.
+ */
+async function aFrameLostInEveryCopyIsStillDelivered(): Promise<void> {
+  const p = await pair();
+  const LOST = 20;
+  // Lose A's frame 20 in every packet A sends while A itself has not passed
+  // tick 20 — the burst that takes out the original transmissions. Once A moves
+  // on, the window must still be carrying the frame.
+  p.link.dropFromA = (packet) =>
+    p.simA.tickCount() <= LOST && decodeFrames(packet).some((f) => f.tick === LOST);
+  // Far enough that A has run its full lead over B, stalled, and been rescued.
+  p.runTo(LOST + 2 * INPUT_DELAY_TICKS + 20, "burst loss of one frame");
+  if (p.simA.stateHash() !== p.simB.stateHash()) fail("burst loss produced a divergence");
+  console.log("                 a frame lost in every copy was resent and the match went on");
+}
+
+/**
+ * A command issued while stalled. Before `issue` respected `sentThrough`, the
+ * command landed in a frame the peer already held an empty copy of: applied on
+ * one side, ignored on the other.
+ */
+async function aCommandIssuedDuringAStallReachesBothPeers(): Promise<void> {
+  const p = await pair();
+  p.runTo(20, "warm-up");
+
+  // Silence B towards A until A runs out of remote input and stalls.
+  p.link.holdToA = true;
+  let guard = 0;
+  while (p.a.step()) {
+    p.link.pump();
+    if (guard++ > 100) fail("A never stalled with the peer silenced");
+  }
+  // Make sure A's whole window, including the frame the stall points at, has
+  // already reached B before the command exists.
+  p.a.flush();
+  p.link.pump();
+  const stalledAt = p.simA.tickCount();
+  const before = p.simA.handAmount(0);
+  p.a.issue({ verb: 2, face: 4, x: 32, y: 32, modifier: 0, player: 0 });
+  p.link.holdToA = false;
+  p.link.pump();
+
+  p.runTo(stalledAt + 40, "after a stall");
+  if (p.simA.stateHash() !== p.simB.stateHash()) {
+    fail("a command issued during a stall was applied on one peer only");
+  }
+  if (p.simA.handAmount(0) <= before || p.simB.handAmount(0) !== p.simA.handAmount(0)) {
+    fail("the command issued during the stall was not applied on both peers");
+  }
+  console.log(
+    `                 a command issued during a stall (tick ${stalledAt}) reached both peers`,
+  );
+}
+
+/**
+ * A resent window carries what was published. Before the window's lower bound
+ * was computed at send time, `step` deleted the frame that had just left the
+ * window while `publish` still remembered the bound from before the tick — so a
+ * `flush` between the two sent an *empty* frame for a tick that had carried a
+ * command. The receiver's "already simulated" guard hid it: two independent
+ * rules were holding one invariant.
+ */
+async function aResentWindowCarriesWhatWasPublished(): Promise<void> {
+  const p = await pair();
+  // Tap everything A sends and remember the fullest copy of every frame.
+  const published = new Map<number, number>();
+  p.link.dropFromA = (packet) => {
+    for (const f of decodeFrames(packet)) {
+      published.set(f.tick, Math.max(published.get(f.tick) ?? 0, f.commands.length));
+    }
+    return false;
+  };
+  // One command from A on every tick, so every frame in this stretch is
+  // non-empty and an empty frame in a later window is one that lost its
+  // contents.
+  for (let i = 0; i < 60; i++) {
+    p.a.issue({ verb: 0, face: 4, x: 32, y: 32, modifier: 0, player: 0 });
+    p.a.step();
+    p.b.step();
+    p.link.pump();
+  }
+  // Right after a step is the moment the deletion in `step` and a stale lower
+  // bound used to disagree.
+  const captured: ReturnType<typeof decodeFrames>[] = [];
+  p.link.dropFromA = (packet) => {
+    captured.push(decodeFrames(packet));
+    return true;
+  };
+  p.a.flush();
+  const flushed = captured[0];
+  if (!flushed) fail("flush sent nothing");
+  let checked = 0;
+  for (const f of flushed) {
+    const was = published.get(f.tick);
+    if (was === undefined) continue;
+    if (f.commands.length < was) {
+      fail(
+        `flush resent frame ${f.tick} with ${f.commands.length} commands; ` +
+          `it was published with ${was}`,
+      );
+    }
+    checked++;
+  }
+  if (checked === 0) fail("the flushed window overlapped nothing published before it");
+  console.log(
+    `                 a resent window carried every command it was published with (${checked} frames)`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+theCodecMatchesTheRustLayout();
 
 const clean = await runMatch(0xa11ce, null);
 
@@ -229,11 +529,18 @@ console.log(
 // This is the property that makes lockstep worth having: the network decides
 // *when* a frame arrives and never *what* the result is.
 const reordered = await runMatch(0xb0b, null);
-if (reordered.desyncTick !== null)
+if (reordered.ticks < TICKS) {
+  fail(`match over the second link stalled out at tick ${reordered.ticks} of ${TICKS}`);
+}
+if (reordered.desyncTick !== null) {
   fail(`desync at tick ${reordered.desyncTick} on the second link`);
+}
+if (reordered.hashes.size !== clean.hashes.size) {
+  fail(`the two runs compared ${clean.hashes.size} and ${reordered.hashes.size} hashes`);
+}
 for (const [tick, hash] of clean.hashes) {
   const other = reordered.hashes.get(tick);
-  if (other === undefined) continue;
+  if (other === undefined) fail(`the second run recorded no hash for tick ${tick}`);
   if (other !== hash) {
     fail(
       `tick ${tick} differs between two link schedules: ` +
@@ -252,3 +559,7 @@ if (corrupted.desyncTick === null) {
   fail("injected a divergence and the desync detector stayed silent");
 }
 console.log(`                 injected divergence caught at tick ${corrupted.desyncTick}`);
+
+await aFrameLostInEveryCopyIsStillDelivered();
+await aCommandIssuedDuringAStallReachesBothPeers();
+await aResentWindowCarriesWhatWasPublished();

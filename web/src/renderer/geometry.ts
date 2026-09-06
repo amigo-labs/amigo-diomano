@@ -140,6 +140,16 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
     }
     const bufferView = json.bufferViews?.[accessor.bufferView ?? -1];
     if (!bufferView) throw new Error(`GLB ${name} has no buffer view`);
+    // A tightly packed float VEC3 is 12 bytes per element, which is what the
+    // slice below assumes. An interleaved export — positions and normals
+    // sharing one buffer view at a 24-byte stride — would read every other
+    // normal as a position with no error: the same silent scrambling the index
+    // branch below exists to prevent.
+    if (bufferView.byteStride !== undefined && bufferView.byteStride !== 12) {
+      throw new Error(
+        `GLB ${name} is interleaved (byteStride ${bufferView.byteStride}); only tightly packed attributes are read`,
+      );
+    }
     const start = bin.byteOffset + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
     // Copied rather than viewed: the accessor's start need not be four-byte
     // aligned within the file, and `Float32Array` over a misaligned offset
@@ -158,11 +168,39 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
   if (normalAccessor === undefined) geometry.computeVertexNormals();
   else
     geometry.setAttribute("normal", new THREE.BufferAttribute(read(normalAccessor, "NORMAL"), 3));
+
+  // An indexed primitive — what most exporters write, and what `docs/ASSETS.md`
+  // names as the shape of a replacement model. Ignoring the index and drawing
+  // the positions in buffer order would produce scrambled geometry with no
+  // error, which is how a "file copy, not a code change" swap would have failed.
+  if (primitive.indices !== undefined) {
+    const accessor = json.accessors?.[primitive.indices];
+    if (!accessor) throw new Error(`GLB accessor ${primitive.indices} (indices) is missing`);
+    if (accessor.type !== "SCALAR") throw new Error("GLB indices are not SCALAR");
+    const bufferView = json.bufferViews?.[accessor.bufferView ?? -1];
+    if (!bufferView) throw new Error("GLB indices have no buffer view");
+    const start = bin.byteOffset + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+    // 5121 UNSIGNED_BYTE, 5123 UNSIGNED_SHORT, 5125 UNSIGNED_INT. Bytes are
+    // widened: three indexes with 16 or 32 bits.
+    let index: Uint16Array | Uint32Array;
+    if (accessor.componentType === 5125) {
+      index = new Uint32Array(buffer.slice(start, start + accessor.count * 4));
+    } else if (accessor.componentType === 5123) {
+      index = new Uint16Array(buffer.slice(start, start + accessor.count * 2));
+    } else if (accessor.componentType === 5121) {
+      index = Uint16Array.from(new Uint8Array(buffer, start, accessor.count));
+    } else {
+      throw new Error(`GLB indices have component type ${accessor.componentType}`);
+    }
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
+  }
   return geometry;
 }
 
 interface GlbJson {
-  meshes?: { primitives?: { attributes: Record<string, number>; mode?: number }[] }[];
+  meshes?: {
+    primitives?: { attributes: Record<string, number>; indices?: number; mode?: number }[];
+  }[];
   accessors?: {
     bufferView?: number;
     byteOffset?: number;
@@ -170,5 +208,5 @@ interface GlbJson {
     count: number;
     type: string;
   }[];
-  bufferViews?: { byteOffset?: number; byteLength: number }[];
+  bufferViews?: { byteOffset?: number; byteLength: number; byteStride?: number }[];
 }

@@ -44,8 +44,8 @@ export interface LinkOptions {
  * anything the simulation observes. A PRNG on the transport side cannot affect
  * determinism, because the transport only decides *when* a frame arrives, and
  * lockstep applies frames by tick number rather than by arrival order. That
- * property is what `lockstep.test.ts` checks by running the same match over two
- * different link seeds and demanding the same hashes.
+ * property is what `web/tools/verify-lockstep.ts` checks by running the same
+ * match over two different link seeds and demanding the same hashes.
  */
 function mix32(state: { s: number }): number {
   state.s = (state.s + 0x9e3779b9) >>> 0;

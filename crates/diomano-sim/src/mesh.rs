@@ -19,9 +19,9 @@
 //!
 //! 1. **Dual grid** — a vertex is the mean of the four cells around it, so
 //!    vertices sit at cell corners and terracing halves immediately.
-//! 2. **Material-weighted Laplacian**, one pass — rock stays crisp and
-//!    cliff-like, sand reads as dunes. The material map drives silhouette, not
-//!    just colour.
+//! 2. **Material-weighted Laplacian**, three passes at falling strength
+//!    ([`SMOOTH_PASSES`]) — rock stays crisp and cliff-like, sand reads as
+//!    dunes. The material map drives silhouette, not just colour.
 //! 3. **Chunk skirts** — an extra ring of vertices, intended to be dropped
 //!    radially inward to hide the hairline between chunks re-meshed at different
 //!    times. The drop is now zero: see [`SKIRT_DROP`] for why no depth both works
@@ -766,16 +766,18 @@ impl Mesh {
 
     /// The dual grid sampled bilinearly at a continuous corner coordinate.
     ///
-    /// Clamped to the corners the one-deep ghost ring can support — `0 ..= N`,
-    /// the same bound `build_chunk` states — so a warp near a face edge can
-    /// never reach past the ghosts. In practice `warp_fade` has already brought
-    /// the offset to zero by then; the clamp is the belt.
+    /// Clamped to the corners `1 ..= N - 1`, whose four cells are all live. The
+    /// corners on the face edge (`0` and `N`) average a ghost cell, and at a
+    /// cube corner that is the diagonal ghost, which the ghost copy never writes
+    /// — reading it put a dent of height zero into the vertices nearest the
+    /// corner. `warp_fade` has brought the offset to zero well before the edge;
+    /// the clamp is the belt.
     fn dual_height_at(&self, face: usize, fx: f32, fy: f32) -> f32 {
-        let last = N as i32;
-        let cx = fx.clamp(0.0, last as f32);
-        let cy = fy.clamp(0.0, last as f32);
-        let x0 = (cx as i32).clamp(0, last - 1);
-        let y0 = (cy as i32).clamp(0, last - 1);
+        let last = N as i32 - 1;
+        let cx = fx.clamp(1.0, last as f32);
+        let cy = fy.clamp(1.0, last as f32);
+        let x0 = (cx as i32).clamp(1, last - 1);
+        let y0 = (cy as i32).clamp(1, last - 1);
         let tx = cx - x0 as f32;
         let ty = cy - y0 as f32;
         let h00 = self.dual_height(face, x0, y0);
@@ -1222,16 +1224,22 @@ pub const fn chunk_origin(chunk: usize) -> (usize, usize, usize) {
 
 /// Hash of everything a chunk's geometry depends on.
 ///
-/// Includes a one-cell apron, because a chunk's border vertices average cells
-/// belonging to its neighbour — without the apron a change just outside a chunk
-/// would leave a visible step at its edge.
+/// Includes a two-cell apron, clamped to the ghost ring, because a chunk's
+/// border vertices read cells belonging to its neighbour: the height and water
+/// taps average the four cells around a corner (one cell out), and the material
+/// and fertility taps widen to the 4 x 4 block around it (two cells out). With a
+/// one-cell apron a material change two cells outside a chunk re-meshed only the
+/// neighbour, and this chunk's edge kept its old splat weights until something
+/// else dirtied it — a colour seam along the chunk border.
 fn chunk_content_hash(w: &World, chunk: usize) -> u64 {
     let (face, gx, gy) = chunk_origin(chunk);
+    let (gx, gy, n) = (gx as i32, gy as i32, N as i32);
+    let x0 = (gx - 2).max(-1);
+    let x1 = (gx + CHUNK as i32 + 1).min(n);
     let mut h = MIX_SEED;
-    for j in -1..=(CHUNK as i32) {
+    for y in (gy - 2).max(-1)..=(gy + CHUNK as i32 + 1).min(n) {
         // A row of the chunk plus its apron is contiguous in storage.
-        let c0 = idx_i(face, gx as i32 - 1, gy as i32 + j);
-        for c in c0..c0 + CHUNK + 2 {
+        for c in idx_i(face, x0, y)..=idx_i(face, x1, y) {
             // Everything the vertex buffers carry has to be in here, or the chunk
             // is not re-meshed when it changes and the attribute silently goes
             // stale. Lava is the one that matters: it is a fluid that moves every
@@ -1275,7 +1283,8 @@ fn smooth_input_hash(w: &World) -> u64 {
         }
         h = mix(h, word);
     }
-    h
+    // Never let a zero fingerprint mean "unchanged" against the never-run value.
+    h | 1
 }
 const _: () = assert!(CELLS.is_multiple_of(8), "smooth_input_hash packs cells eight at a time");
 
@@ -1589,6 +1598,22 @@ mod tests {
             m.update(&w)
         };
         assert!((1..=2).contains(&n), "a border cell dirtied {n} chunks");
+    }
+
+    #[test]
+    fn a_material_change_two_cells_outside_a_chunk_dirties_it() {
+        let (mut w, mut m) = meshed();
+        assert_eq!(m.update(&w), 0, "a still world re-meshed something");
+        // Chunk 41 has chunk 40 to its west on the same face; the corner vertex
+        // on their shared border reads materials from `gx - 2 ..= gx + 1`.
+        let (face, gx, gy) = chunk_origin(41);
+        assert!(gx >= 2, "chunk 41 sits on a face edge; pick another");
+        w.material[idx(face, gx - 2, gy + 8)] ^= 1;
+        m.update(&w);
+        assert_eq!(
+            m.dirty[41], 1,
+            "a material change two cells outside chunk 41 left its border splat weights stale"
+        );
     }
 
     #[test]
@@ -1989,7 +2014,7 @@ mod tests {
         // After all of that, the skipped and unskipped worlds agree bit for bit:
         // the smoothed field everywhere, and the vertices of every chunk the last
         // update rebuilt. (Chunks it did not rebuild may lag by the sub-unit
-        // tail of the three-pass Laplacian beyond the one-cell apron, which is
+        // tail of the three-pass Laplacian beyond the two-cell apron, which is
         // as true before this change as after it.)
         let mut fresh = Mesh::boxed();
         fresh.rebuild_all(&w);

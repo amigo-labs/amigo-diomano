@@ -142,6 +142,14 @@ export interface Vegetation {
    * written and only the hand ever used it.
    */
   sync(tick: number, alpha: number): void;
+  /**
+   * Forget the match. `restart` re-initialises the world in place and the tick
+   * counter goes back to zero; every "rebuild when the tick has moved N past the
+   * last one" gate in here would otherwise wait for the *new* match to outlast
+   * the old one — measured as the dead world's forest standing over the new
+   * ocean for as long as the previous match had run.
+   */
+  reset(): void;
 }
 
 /**
@@ -182,18 +190,20 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     return mesh;
   };
 
-  // The geometry lives in `models.ts`, by tier: the primitives the game
-  // shipped with at tier 1, trees with trunks and tiers and fronds at tier 2.
-  // Each species has one or two variants, one instanced mesh each, and the
-  // cap is shared between them so a fully grown planet costs the same number
-  // of instances at either tier.
-  const models = floraModels(tier);
+  // Vegetation is a tier-2 feature (§7.3): tier 1 draws no flora, so it builds
+  // none — four instanced meshes with their matrix and colour buffers used to
+  // be allocated and never added to the scene. The geometry lives in
+  // `models.ts`; each species has two variants, one instanced mesh each, and
+  // the cap is shared between them.
+  const models = tier >= 2 ? floraModels(tier) : null;
   const caps = [MAX_CONIFERS, MAX_BROADLEAVES, MAX_PALMS, MAX_SCRUB];
-  const floraCaps: number[][] = models.geometries.map((variants, kind) =>
+  const floraCaps: number[][] = (models?.geometries ?? []).map((variants, kind) =>
     variants.map(() => Math.ceil((caps[kind] ?? 0) / variants.length)),
   );
-  const flora: THREE.InstancedMesh[][] = models.geometries.map((variants, kind) =>
-    variants.map((g, v) => species(g, models.colours[kind] ?? 0xffffff, floraCaps[kind]?.[v] ?? 0)),
+  const flora: THREE.InstancedMesh[][] = (models?.geometries ?? []).map((variants, kind) =>
+    variants.map((g, v) =>
+      species(g, models?.colours[kind] ?? 0xffffff, floraCaps[kind]?.[v] ?? 0),
+    ),
   );
 
   /** Species indices into `flora`, so the rules below read as what they mean. */
@@ -338,7 +348,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   magnets.count = 0;
 
   // Lighting lives in `atmosphere.ts`, with the sun it represents.
-  if (tier >= 2) group.add(...flora.flat());
+  if (models) group.add(...flora.flat());
   group.add(...buildings, walkers, pickupMesh, magnets);
 
   const dummy = new THREE.Object3D();
@@ -688,6 +698,17 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 
   return {
     group,
+    reset(): void {
+      floraBuiltAt = -FLORA_REBUILD_TICKS;
+      builtAt = -1;
+      rebuiltAt = -1;
+      // Walker ids restart from zero with the world; a figure kept from the old
+      // match would interpolate from where its namesake used to stand. The
+      // instance count goes with them, or the old figures stay on screen until
+      // the first `sync` of the new match rebuilds the list.
+      figures.clear();
+      walkers.count = 0;
+    },
     sync(tick: number, alpha: number): void {
       // The figures move between ticks; nothing else does.
       if (tick !== builtAt) {
@@ -837,7 +858,7 @@ function hazedLambert(
   colour: number,
   geometry?: THREE.BufferGeometry,
   extra = "",
-  walk?: { vertex: string; main: string },
+  walk?: { vertex: string; normal: string; position: string },
 ): THREE.MeshLambertMaterial {
   // `vertexColors` only when the geometry actually carries a `color`
   // attribute. It defines `USE_COLOR`, and `color_vertex.glsl` then runs
@@ -866,11 +887,23 @@ function hazedLambert(
        ${walk?.vertex ?? ""}`,
     );
     if (walk) {
-      // After `begin_vertex`, which is where `transformed` is defined —
-      // `beginnormal_vertex` runs before it, so `objectNormal` is already in
-      // scope and both can be swung by the same rotation. Injecting before
-      // either would compile against a variable that does not exist yet.
-      vertex = inject(vertex, "#include <begin_vertex>", `#include <begin_vertex>\n${walk.main}`);
+      // Two injections, because three's vertex shader consumes the normal before
+      // it defines the position: `beginnormal_vertex` declares `objectNormal`,
+      // `normal_vertex` writes `vNormal` from it, and only *then* does
+      // `begin_vertex` declare `transformed`. A single patch after `begin_vertex`
+      // once rotated both — and the normal half was dead code, so swinging limbs
+      // kept the shading of the rest pose. `inject` checks that each marker
+      // exists, not that it is the right one; this comment is that check.
+      vertex = inject(
+        vertex,
+        "#include <beginnormal_vertex>",
+        `#include <beginnormal_vertex>\n${walk.normal}`,
+      );
+      vertex = inject(
+        vertex,
+        "#include <begin_vertex>",
+        `#include <begin_vertex>\n${walk.position}`,
+      );
     }
     vertex = inject(
       vertex,
@@ -1001,9 +1034,10 @@ const WALK_GLSL = {
   vertex: /* glsl */ `
     attribute float limb;
     attribute float walk;
-  `,
-  main: /* glsl */ `
-    {
+    // The swing for this vertex's limb: x is the angle about the limb's pivot,
+    // y the pivot height, z the body bob. One function, called from both the
+    // normal and the position patch, so the two can never disagree.
+    vec3 dioWalk() {
       float phase = fract(abs(walk));
       // A standing figure holds still: the sign of walk carries "moving".
       float stride = walk < 0.0 ? 0.0 : 1.0;
@@ -1018,23 +1052,39 @@ const WALK_GLSL = {
       } else if (limb > 0.5) {
         // Arms, from the shoulder, opposite the diagonal leg.
         pivotY = ${(0.7).toFixed(3)};
-        angle = limb > 1.5 ? swingA : swingB;
-        angle *= 0.7;
+        angle = (limb > 1.5 ? swingA : swingB) * 0.7;
       }
-      if (angle != 0.0) {
-        float c = cos(angle);
-        float sn = sin(angle);
-        float y = transformed.y - pivotY;
-        float z = transformed.z;
-        transformed.y = pivotY + y * c - z * sn;
-        transformed.z = y * sn + z * c;
+      // A little bob, so the body rises on each step rather than gliding.
+      return vec3(angle, pivotY, abs(sin(phase * 6.2831853)) * 0.035 * stride);
+    }
+  `,
+  /** After `beginnormal_vertex`: the normal turns with its limb. */
+  normal: /* glsl */ `
+    {
+      vec3 swing = dioWalk();
+      if (swing.x != 0.0) {
+        float c = cos(swing.x);
+        float sn = sin(swing.x);
         float ny = objectNormal.y;
         float nz = objectNormal.z;
         objectNormal.y = ny * c - nz * sn;
         objectNormal.z = ny * sn + nz * c;
       }
-      // A little bob, so the body rises on each step rather than gliding.
-      transformed.y += abs(sin(phase * 6.2831853)) * 0.035 * stride;
+    }
+  `,
+  /** After `begin_vertex`: the position swings about the pivot, then bobs. */
+  position: /* glsl */ `
+    {
+      vec3 swing = dioWalk();
+      if (swing.x != 0.0) {
+        float c = cos(swing.x);
+        float sn = sin(swing.x);
+        float y = transformed.y - swing.y;
+        float z = transformed.z;
+        transformed.y = swing.y + y * c - z * sn;
+        transformed.z = y * sn + z * c;
+      }
+      transformed.y += swing.z;
     }
   `,
 };

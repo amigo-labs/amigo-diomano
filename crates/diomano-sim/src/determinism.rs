@@ -208,9 +208,10 @@ fn replay_is_reproducible() {
         .and_then(std::path::Path::parent)
         .expect("workspace root")
         .to_path_buf();
-    let Ok(log) = std::fs::read_to_string(root.join("fixtures/session.log")) else {
-        return;
-    };
+    // Missing is a failure, not a pass: a checkout without the fixture must not
+    // report a green determinism suite.
+    let log = std::fs::read_to_string(root.join("fixtures/session.log"))
+        .expect("fixtures/session.log is missing; `just record` writes it");
     let (a, ah) = crate::powers::replay(&log).expect("parse");
     let (b, bh) = crate::powers::replay(&log).expect("parse");
     assert_eq!(ah, bh);
@@ -248,6 +249,33 @@ fn extreme_values_do_not_overflow_any_pass() {
     }
     w.sea_base = i16::MAX / 2;
     w.mana = [i32::MAX, i32::MAX];
+    // The entities too: settlements at the far end of their progress with a full
+    // byte of population out, walkers at every cap carrying a full byte more,
+    // and a score with nowhere left to go.
+    let mut stressed = 0;
+    for s in &mut w.settlements {
+        if s.alive() {
+            s.progress = i32::MAX;
+            s.pop = u8::MAX;
+            stressed += 1;
+        }
+    }
+    assert!(stressed > 0, "the seeded world has no settlement to stress");
+    for i in 0..8usize {
+        let id = crate::walkers::spawn(
+            &mut w,
+            i % 2,
+            4,
+            10 + i,
+            10,
+            crate::world::MERGE_MAX_STRENGTH,
+            crate::world::NO_SETTLEMENT,
+        )
+        .expect("room for a walker");
+        w.walkers[id as usize].hp = crate::world::MERGE_MAX_HP;
+        w.walkers[id as usize].pop_carried = u8::MAX;
+    }
+    w.score = [[u16::MAX; crate::world::MAX_WAVES]; crate::world::PLAYERS];
     for tick in 0..200u32 {
         let mut buf = CommandBuf::new();
         script(tick, &mut buf);

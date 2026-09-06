@@ -24,9 +24,17 @@ const MIME = {
   ".wasm": "application/wasm",
 };
 
+/**
+ * Thrown rather than `process.exit`. Most `fail` calls sit inside `main`'s
+ * `try`, whose `finally` closes the browser and the server, and `process.exit`
+ * would skip that `finally`; the two before it (no build, no wasm) have nothing
+ * to clean up yet. Either way the `.catch` at the bottom is where the exit
+ * happens.
+ */
+class Failure extends Error {}
+
 function fail(message) {
-  console.error(`screenshot: ${message}`);
-  process.exit(1);
+  throw new Failure(message);
 }
 
 function chromiumLaunchOptions() {
@@ -101,8 +109,15 @@ async function main() {
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
-    page.on("pageerror", (err) => fail(`page error: ${err.message}`));
+    // Recorded, not thrown: an exception inside an event listener never reaches
+    // this `try`. Checked before every screenshot and once at the end.
+    const pageErrors = [];
+    page.on("pageerror", (err) => pageErrors.push(err.message));
+    const checkPage = () => {
+      if (pageErrors.length > 0) fail(`page error: ${pageErrors.join("; ")}`);
+    };
     const shoot = async (name) => {
+      checkPage();
       await page.screenshot({ path: join(OUT_DIR, `${name}.png`) });
       console.log(`  ${name}.png`);
     };
@@ -254,6 +269,7 @@ async function main() {
     }
     await failPage.close();
     console.log("  failed boot: epitaph shown, no unhandled rejection");
+    checkPage();
   } finally {
     await browser.close();
     server.close();
@@ -261,4 +277,9 @@ async function main() {
   console.log(`screenshot: OK — PNGs in ${OUT_DIR}`);
 }
 
-main().catch((err) => fail(err instanceof Error ? (err.stack ?? err.message) : String(err)));
+main().catch((err) => {
+  const text =
+    err instanceof Failure ? err.message : err instanceof Error ? (err.stack ?? err.message) : err;
+  console.error(`screenshot: ${text}`);
+  process.exit(1);
+});

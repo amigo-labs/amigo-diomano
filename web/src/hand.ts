@@ -65,6 +65,12 @@ export interface Hand {
    * to say until the menu closes.
    */
   setSuppressed(on: boolean): void;
+  /**
+   * Forget the match in progress: queued sculpt steps, the cell they were
+   * draining onto and the refusal flash. A restart re-initialises the world in
+   * place, and steps banked against the old world would land on the new one.
+   */
+  reset(): void;
 }
 
 export function createHand(
@@ -74,6 +80,12 @@ export function createHand(
   player: number,
   /** Called for casts that cost mana (the magnet), so the feedback tracker sees them. */
   onCast?: (verb: number) => void,
+  /**
+   * Whether the match is running. The material keys are inert until it is:
+   * `1`/`2`/`3` pressed on the title card would otherwise queue a hand switch
+   * that fires at the match's first tick.
+   */
+  active: () => boolean = () => true,
 ): Hand {
   const group = new THREE.Group();
 
@@ -257,8 +269,22 @@ export function createHand(
   let current: Target | null = null;
 
   // Mana at which the palm starts its "the big one is affordable" pulse: the
-  // armageddon price from the live manifest, not a mirrored 2500.
-  const pulseThreshold = Math.max(sim.e.dio_power_cost(POWER.ARMAGEDDON), 1);
+  // armageddon price from the live manifest, not a mirrored 2500. A manifest
+  // that makes armageddon free (the corpus's `free_powers`) would keep the
+  // glow saturated for the whole match, so the threshold then falls back to the
+  // dearest power that is enabled and still costs something, and to 500 if none
+  // does.
+  const pulseThreshold = ((): number => {
+    const armageddon = sim.e.dio_power_cost(POWER.ARMAGEDDON);
+    if (armageddon > 0) return armageddon;
+    let dearest = 0;
+    for (const power of Object.values(POWER)) {
+      if (sim.e.dio_power_enabled(power) !== 0) {
+        dearest = Math.max(dearest, sim.e.dio_power_cost(power));
+      }
+    }
+    return dearest > 0 ? dearest : 500;
+  })();
 
   let dragging = false;
   let dragOriginY = 0;
@@ -272,7 +298,10 @@ export function createHand(
   let movedSq = 0;
   /** Where queued steps keep landing after the button is released. */
   let drainTarget: Target | null = null;
-  /** Modifier for the post-release drain (live `modifier` resets on release). */
+  /**
+   * Modifier frozen at release for the post-release drain, so a key let go
+   * afterwards does not change what the flick meant.
+   */
   let drainModifier = 0;
   /** `performance.now()` until which the palm shows the refusal flash. */
   let flashUntil = 0;
@@ -322,11 +351,21 @@ export function createHand(
   canvas.addEventListener("pointermove", (ev) => {
     pointer.x = (ev.clientX / innerWidth) * 2 - 1;
     pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
+    // Read on every move, not only mid-drag: the footprint ring previews the
+    // modifiers while the hand merely hovers.
+    modifier = readModifier(ev);
+    updateTarget();
     if (dragging) {
       const dx = ev.clientX - downX;
       const dyTotal = ev.clientY - downY;
       movedSq = Math.max(movedSq, dx * dx + dyTotal * dyTotal);
-      modifier = readModifier(ev);
+      if (!current) {
+        // Off the planet nothing is sculpted, and nothing is banked either: a
+        // drag that swung past the horizon used to pile up steps that then all
+        // landed on whichever cell the pointer came back over.
+        dragOriginY = ev.clientY;
+        return;
+      }
       // Vertical drag distance decides how much and which way. Upward raises,
       // which is the only mapping anybody guesses correctly.
       const dy = dragOriginY - ev.clientY;
@@ -339,8 +378,16 @@ export function createHand(
         dragOriginY -= steps * DRAG_PIXELS_PER_STEP;
       }
     }
-    updateTarget();
   });
+
+  // Modifier keys pressed or released with the mouse at rest: neither the ring
+  // nor a drag in progress should have to wait for the next `pointermove` to
+  // notice. Every keyboard event carries the current flags, so any key will do.
+  const onModifierKey = (ev: KeyboardEvent): void => {
+    modifier = readModifier(ev);
+  };
+  addEventListener("keydown", onModifierKey);
+  addEventListener("keyup", onModifierKey);
 
   canvas.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
@@ -361,6 +408,11 @@ export function createHand(
   });
 
   const endDrag = (ev: PointerEvent): void => {
+    // Only the left button ends a left drag. A mouse shares one pointer across
+    // its buttons, so a right click mid-sculpt used to arrive here, end the drag
+    // under a still-held button and — within the click window — place a magnet
+    // nobody asked for.
+    if (ev.type === "pointerup" && ev.button !== 0) return;
     if (!dragging) return;
     dragging = false;
     // A click — a press that never strayed and released promptly — places the
@@ -377,8 +429,13 @@ export function createHand(
       drainTarget = current;
       drainModifier = modifier;
     }
-    modifier = 0;
-    if (canvas.hasPointerCapture(ev.pointerId)) canvas.releasePointerCapture(ev.pointerId);
+    // Keep the capture while any other button is still down, exactly as
+    // `camera.ts` does: releasing it here on a left-button-up mid-right-orbit
+    // undid that guard from the other side, and the rest of the orbit was lost
+    // the moment the pointer left the canvas.
+    if (ev.buttons === 0 && canvas.hasPointerCapture(ev.pointerId)) {
+      canvas.releasePointerCapture(ev.pointerId);
+    }
   };
   canvas.addEventListener("pointerup", endDrag);
   canvas.addEventListener("pointercancel", endDrag);
@@ -386,6 +443,10 @@ export function createHand(
   // Switching what the hand carries. Mixing is impossible (§4.2), and the sim
   // refuses the switch while the hand is full — nothing here needs to know that.
   addEventListener("keydown", (ev) => {
+    if (!active()) return;
+    // Bare digits only: Ctrl/Cmd+1 is the browser switching tabs, not the god
+    // reaching for earth.
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const material = ev.key === "1" ? 0 : ev.key === "2" ? 1 : ev.key === "3" ? 2 : -1;
     if (material < 0) return;
     sim.push(player, VERB.SET_HAND, 0, material, 0, 0);
@@ -565,7 +626,12 @@ export function createHand(
       const radius =
         (modifier & MOD.THROWN ? 2 : 1) +
         (modifier & MOD.EXTREME ? 3 : modifier & MOD.INCREASED ? 1 : 0);
-      ring.scale.setScalar(cellScale * (radius + 0.5) * 2);
+      // The ring geometry has unit outer radius, so its scale *is* the
+      // footprint's radius in world units: `radius` whole cells past the centre
+      // cell plus half of that cell — the disc `effects.ts` scatters its
+      // particles over. A stray factor of two used to draw it twice as wide as
+      // the ground the brush actually touched.
+      ring.scale.setScalar(cellScale * (radius + 0.5));
     },
 
     flash(): void {
@@ -575,6 +641,13 @@ export function createHand(
     setSuppressed(on: boolean): void {
       suppressed = on;
       if (on) group.visible = false;
+    },
+
+    reset(): void {
+      dragging = false;
+      pendingSteps = 0;
+      drainTarget = null;
+      flashUntil = 0;
     },
   };
 }

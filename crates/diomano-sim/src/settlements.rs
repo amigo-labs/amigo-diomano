@@ -680,7 +680,7 @@ fn raise_seabed(w: &mut World, face: usize, x: i32, y: i32, h: i16) {
 /// Two properties hold by construction, for any seed. Passability: the spine
 /// cell (`k = 0`) is at lateral distance `|m| <= 1` from the crest, so it is
 /// carved to at least `base - 1 >= CAUSEWAY_CREST_MIN - 1 > FLOOD_CAP`, and
-/// the spine is 4-connected — `spawns_are_connected_at_tick_zero` stays a
+/// the spine is 4-connected — `the_land_bridge_connects_the_spawns` stays a
 /// consequence, not a hope. No build site: lateral heights fall off strictly
 /// unimodally from the crest (`base, base-1, base-2`), so no three
 /// equal-height cells ever sit in a row across the band, and no 3x3
@@ -1214,12 +1214,19 @@ mod tests {
     /// Cells each player influences right now — the quantity sudden death
     /// watches (tide.rs::check_sudden_death).
     fn influence_held(w: &World) -> [u32; PLAYERS] {
+        // Live cells only: the ghost ring mirrors the border rows, and counting
+        // it double-counted 1,536 cells in every threshold below.
         let mut held = [0u32; PLAYERS];
-        for &i in &w.influence {
-            if i32::from(i) > 0 {
-                held[0] += 1;
-            } else if i32::from(i) < 0 {
-                held[1] += 1;
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let i = i32::from(w.influence[idx(face, x, y)]);
+                    if i > 0 {
+                        held[0] += 1;
+                    } else if i < 0 {
+                        held[1] += 1;
+                    }
+                }
             }
         }
         held

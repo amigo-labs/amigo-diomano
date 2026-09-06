@@ -82,8 +82,8 @@ const BANNER_MS = 2400;
 /** Ticks between territory samples. Influence moves over seconds, not frames. */
 const TERRITORY_EVERY = 10;
 
-/** Every Nth cell is sampled for the territory bar. */
-const TERRITORY_STRIDE = 11;
+/** Every Nth column of every Nth row of each face is sampled for the territory bar. */
+const TERRITORY_STRIDE = 3;
 
 /** Delay before the first coaching hint, and between hints, in ms. */
 const HINT_DELAY_MS = 6000;
@@ -193,27 +193,31 @@ export function createHud(sim: Sim, player: number): Hud {
   });
 
   /**
-   * Share of claimed ground that is ours, 0..1.
-   *
-   * `influence` is `infl_acc[0] - infl_acc[1]` (flowfield.rs), so positive is
-   * player 0 whichever god the local player is. Sampled with a stride rather
+   * Share of contested ground under the local player's influence, sampled rather
    * than summed, exactly as `audio.ts` samples erosion: 24,576 live cells is too
    * many to walk every frame, and the number this feeds is a bar 90 pixels wide.
-   * The stride crosses the ghost ring, double-counting a few border cells — well
-   * under one pixel at this resolution, and skipping them would mean mirroring
-   * `world.rs`'s index arithmetic here for no visible gain.
+   *
+   * The walk goes face by face through `sim.idx`, striding both axes, so it is a
+   * lattice of live cells and never touches the ghost ring. A single stride over
+   * the flat index used to divide the 66-cell row pitch and therefore visited the
+   * same five columns of every row — one of them a ghost column — and none of
+   * the other fifty-nine.
    */
   const sampleTerritory = (): number => {
     let mine = 0;
     let theirs = 0;
-    for (let c = 0; c < sim.cells; c += TERRITORY_STRIDE) {
-      const v = sim.influence[c] ?? 0;
-      if (v > 0) {
-        if (player === 0) mine += 1;
-        else theirs += 1;
-      } else if (v < 0) {
-        if (player === 0) theirs += 1;
-        else mine += 1;
+    for (let face = 0; face < 6; face++) {
+      for (let y = 0; y < sim.N; y += TERRITORY_STRIDE) {
+        for (let x = 0; x < sim.N; x += TERRITORY_STRIDE) {
+          const v = sim.influence[sim.idx(face, x, y)] ?? 0;
+          if (v > 0) {
+            if (player === 0) mine += 1;
+            else theirs += 1;
+          } else if (v < 0) {
+            if (player === 0) theirs += 1;
+            else mine += 1;
+          }
+        }
       }
     }
     const total = mine + theirs;
@@ -316,6 +320,13 @@ export function createHud(sim: Sim, player: number): Hud {
       shownShare = -1;
       lastPhase = -1;
       armedAt = 0;
+      // The tick is about to go back to zero. A sample stamp from the old match
+      // would keep `tick - lastTerritoryTick` negative — and the bar showing the
+      // previous match's territory — until the new match outlasted the old.
+      lastTerritoryTick = -TERRITORY_EVERY;
+      territoryShare = 0.5;
+      bannerUntil = 0;
+      bannerEl.classList.remove("shown");
     },
   };
 }

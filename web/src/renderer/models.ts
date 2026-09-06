@@ -7,7 +7,9 @@
  * - **Tier 1** is the set of primitives the game shipped with — a cone is a
  *   conifer, a box is a house — because the reference floor of §7.6 is an
  *   office machine with integrated graphics and a forest is up to 8,700
- *   instances. They are moved here verbatim so tier 1 looks exactly as before.
+ *   instances. They are kept here verbatim: the buildings and props still draw
+ *   them, and the tier-1 flora is shown by the model gallery, though the game
+ *   itself builds no flora at tier 1 (vegetation is a tier-2 feature, §7.3).
  * - **Tier 2** is the same silhouettes with the detail that makes them read as
  *   the thing rather than as the primitive: a trunk under the crown, tiers on
  *   the conifer, a roof on the house, a chin on the villager. Every model here

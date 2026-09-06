@@ -15,7 +15,7 @@ use crate::world::{
     MAT_SWAMP, MAX_PICKUPS, MapConfig, N, PICKUP_ALIVE, PLAYERS, POWER_COUNT, Pickup, TERRACE,
     TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, TERRAIN_VOLCANO, VERB_ARMAGEDDON, VERB_CHAMPION,
     VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_RAISE, VERB_SET_HAND, VERB_SWAMP,
-    VERB_VOLCANO, World, idx, verb_power, walk,
+    VERB_VOLCANO, WALKER_LEADER, World, idx, verb_power, walk,
 };
 
 /// Highest `sea_base` the flood verb can reach: two terraces above the
@@ -38,6 +38,10 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
     let cx = i32::from(cmd.x).clamp(0, N as i32 - 1);
     let cy = i32::from(cmd.y).clamp(0, N as i32 - 1);
 
+    // What the gate charged, so a verb that turns out to do nothing can hand it
+    // back: the power whose pickup charge was spent, or the mana units.
+    let mut spent_charge: Option<usize> = None;
+    let mut spent_mana = 0i32;
     if let Some(power) = verb_power(cmd.verb) {
         if w.cfg.power_enabled[power] == 0 {
             return;
@@ -49,75 +53,119 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         // would take that decision away.
         if w.free_uses[player][power] > 0 {
             w.free_uses[player][power] -= 1;
+            spent_charge = Some(power);
         } else {
             let cost = i32::from(w.cfg.power_cost[power]);
             if cost > 0 && !w.spend_mana(player, cost) {
                 return;
             }
+            spent_mana = cost;
         }
-    }
-
-    // Counted here, past the gating, so the census reports what a log *did* and
-    // not what it asked for. A verb rejected on cost or availability every single
-    // time exercises nothing, and §6.3's coverage criterion would be satisfied by
-    // a corpus that never ran the code (diagnostic only; see `world::Census`).
-    if (cmd.verb as usize) < w.census.verb_applied.len() {
-        let n = &mut w.census.verb_applied[cmd.verb as usize];
-        *n = n.saturating_add(1);
     }
 
     let radius = World::brush_radius(cmd.modifier);
 
-    // And *where*, for the renderer. Same place and same gating as the count
-    // above, for the same reason: an effect that fires for a refused power tells
-    // the player they cast something they did not. Instrumentation, excluded from
-    // the state hash — `the_census_is_not_hashed` covers this too.
-    {
-        let slot = (w.census.verb_events_written as usize) % crate::world::VERB_EVENTS;
-        w.census.verb_events[slot] = crate::world::VerbEvent {
-            face: face as u8,
-            x: cx as u8,
-            y: cy as u8,
-            verb: cmd.verb,
-            player: player as u8,
-            modifier: cmd.modifier,
-            radius: radius.clamp(0, 255) as u8,
-            _pad: 0,
-        };
-        w.census.verb_events_written = w.census.verb_events_written.wrapping_add(1);
-    }
-    match cmd.verb {
-        VERB_RAISE => sculpt(w, player, face, cx, cy, radius, true),
-        VERB_LOWER => sculpt(w, player, face, cx, cy, radius, false),
+    // Each arm says whether it changed anything. The census and the verb event
+    // below are written only then, so they report what a log *did* and not what
+    // it asked for: a verb refused on cost or availability, a hand switch with a
+    // full hand or a champion with nobody to promote exercises nothing, and
+    // §6.3's coverage criterion must not be satisfiable by a corpus of no-ops.
+    let applied = match cmd.verb {
+        VERB_RAISE => {
+            sculpt(w, player, face, cx, cy, radius, true);
+            true
+        }
+        VERB_LOWER => {
+            sculpt(w, player, face, cx, cy, radius, false);
+            true
+        }
         VERB_MAGNET => {
+            // The old leader stops leading. The flag has to come off the walker
+            // as well as the magnet: `walkers::remove` drops the magnet wherever
+            // a flagged walker dies, so a stale flag let a long-dead placement
+            // override the player's current one — the one command in the game,
+            // undone by a walker the player had stopped following minutes ago.
+            let old = w.magnet[player].leader;
+            if old != u16::MAX && (old as usize) < w.walkers.len() {
+                w.walkers[old as usize].flags &= !WALKER_LEADER;
+            }
             w.magnet[player].face = face as u8;
             w.magnet[player].x = cx as u8;
             w.magnet[player].y = cy as u8;
             w.magnet[player].active = 1;
             w.magnet[player].leader = u16::MAX;
+            true
         }
-        VERB_EARTHQUAKE => earthquake(w, face, cx, cy, radius),
-        VERB_SWAMP => swamp(w, face, cx, cy, radius),
-        VERB_VOLCANO => volcano(w, face, cx, cy, radius),
+        VERB_EARTHQUAKE => {
+            earthquake(w, face, cx, cy, radius);
+            true
+        }
+        VERB_SWAMP => {
+            swamp(w, face, cx, cy, radius);
+            true
+        }
+        VERB_VOLCANO => {
+            volcano(w, face, cx, cy, radius);
+            true
+        }
         VERB_FLOOD => {
             // Raises global sea level one step. Damages both players (§5.2).
             // Capped: the rise is monotonic (there is deliberately no ebb
             // verb), and uncapped it drowns the whole planet in ~20 casts —
             // the corpus proved that empirically. A cast at the cap still
-            // spends its mana; the gate above has already charged.
+            // spends its mana and counts as applied: the sea *is* at the level
+            // the player asked for.
             w.sea_base = w.sea_base.saturating_add(TERRACE).min(FLOOD_CAP);
+            true
         }
-        VERB_CHAMPION => {
-            crate::walkers::make_champion(w, player);
+        // With nobody to promote there is no champion, and the refund below
+        // undoes the gate: the mana or the pickup charge comes back.
+        VERB_CHAMPION => crate::walkers::make_champion(w, player),
+        VERB_ARMAGEDDON => {
+            crate::tide::trigger_armageddon(w);
+            true
         }
-        VERB_ARMAGEDDON => crate::tide::trigger_armageddon(w),
         // Mixing is impossible: picking up a second material requires depositing
         // the first (§4.2). A full hand ignores the verb rather than swapping.
         VERB_SET_HAND if w.hand[player].amount == 0 => {
             w.hand[player].material = (cmd.x as u8).min(HAND_LAVA);
+            true
         }
-        _ => {}
+        _ => false,
+    };
+
+    if !applied {
+        // Nothing happened, so nothing is owed. Mana goes back in the Q16.16
+        // units `spend_mana` took it in.
+        if let Some(power) = spent_charge {
+            w.free_uses[player][power] = w.free_uses[player][power].saturating_add(1);
+        }
+        w.mana[player] = w.mana[player].saturating_add(spent_mana.saturating_mul(1 << 16));
+        return;
     }
+
+    // Diagnostic only; see `world::Census`.
+    if (cmd.verb as usize) < w.census.verb_applied.len() {
+        let n = &mut w.census.verb_applied[cmd.verb as usize];
+        *n = n.saturating_add(1);
+    }
+
+    // And *where*, for the renderer. Same gating as the count above, for the
+    // same reason: an effect that fires for a refused or inert power tells the
+    // player they cast something they did not. Instrumentation, excluded from
+    // the state hash — `the_census_is_not_hashed` covers this too.
+    let slot = (w.census.verb_events_written as usize) % crate::world::VERB_EVENTS;
+    w.census.verb_events[slot] = crate::world::VerbEvent {
+        face: face as u8,
+        x: cx as u8,
+        y: cy as u8,
+        verb: cmd.verb,
+        player: player as u8,
+        modifier: cmd.modifier,
+        radius: radius.clamp(0, 255) as u8,
+        _pad: 0,
+    };
+    w.census.verb_events_written = w.census.verb_events_written.wrapping_add(1);
 }
 
 /// Raise or lower whatever the hand is currently carrying.
@@ -167,7 +215,15 @@ fn fluid(
                     w.lava[c] += take as u8;
                     w.hand[player].amount -= take as u16;
                 } else {
-                    w.water[c] = w.water[c].saturating_add(take as i16);
+                    // Charge the hand only for what the cell can hold, as the
+                    // lava branch does: saturating the depth while debiting the
+                    // full amount would destroy matter (pillar 4).
+                    let room = i32::from(i16::MAX) - i32::from(w.water[c]);
+                    let take = take.min(room);
+                    if take <= 0 {
+                        continue;
+                    }
+                    w.water[c] += take as i16;
                     w.hand[player].amount -= take as u16;
                 }
             } else {
@@ -730,11 +786,24 @@ pub fn replay(
     // Commands are grouped by target tick. The log is written in tick order, so
     // one cursor over the lines is enough — no sorting, and therefore no sort
     // without a tiebreaker (§10).
+    //
+    // Checked while they are collected: a command whose tick runs backwards, or
+    // lies past the log's tick count, would otherwise sit at the cursor forever
+    // and silently hold back every command behind it — the replay would finish,
+    // report hashes, and have applied a fraction of the log.
     let mut pending: alloc::vec::Vec<Command> = alloc::vec::Vec::new();
-    for line in src.lines() {
-        if let Some(c) = parse_log_command(line) {
-            pending.push(c);
+    for (i, line) in src.lines().enumerate() {
+        let Some(c) = parse_log_command(line) else {
+            continue;
+        };
+        let line_no = i as u32 + 1;
+        if pending.last().is_some_and(|prev| c.tick < prev.tick) {
+            return Err(err(line_no, "command is out of tick order"));
         }
+        if c.tick >= header.ticks {
+            return Err(err(line_no, "command lies past the log's tick count"));
+        }
+        pending.push(c);
     }
     let mut cursor = 0usize;
     let mut hashes = alloc::vec::Vec::new();
@@ -756,7 +825,10 @@ pub fn replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{MAT_SOIL, MapConfig, POWER_SWAMP, TERRAIN_PANGAEA, VERB_NOP};
+    use crate::world::{
+        MAT_SOIL, MapConfig, POWER_CHAMPION, POWER_SWAMP, TERRAIN_PANGAEA, VERB_CHAMPION, VERB_NOP,
+        VERB_SET_HAND,
+    };
 
     const MANIFEST: &str = r#"
 [world]
@@ -959,6 +1031,64 @@ enabled = true
         assert!(parse_log_command("c 1 2").is_none());
         assert!(parse_log_command("c 1 2 3 4 5 6 7 8").is_none());
         assert_eq!(parse_log_command("c 0 0 0 0 0 0 0").unwrap().verb, VERB_NOP);
+    }
+
+    #[test]
+    fn a_log_with_commands_out_of_tick_order_is_rejected_by_line() {
+        let log = "seed 1\nn 64\nterrain 0\nticks 100\nc 40 0 1 4 30 30 0\nc 10 0 1 4 32 32 0\n";
+        let e = replay(log).err().expect("an out-of-order log replayed as if it were fine");
+        assert_eq!(e.line, 6);
+        let late = "seed 1\nn 64\nterrain 0\nticks 100\nc 100 0 1 4 30 30 0\n";
+        assert_eq!(
+            replay(late).err().map(|e| e.line),
+            Some(5),
+            "a command past `ticks` was accepted"
+        );
+    }
+
+    #[test]
+    fn a_verb_that_did_nothing_is_neither_counted_nor_announced() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let switch = Command { verb: VERB_SET_HAND, x: 1, ..Command::default() };
+        // A full hand refuses the switch (§4.2): no count, no event.
+        w.hand[0].amount = 50;
+        let count = w.census.verb_applied[VERB_SET_HAND as usize];
+        let events = w.census.verb_events_written;
+        apply(&mut w, 0, &switch);
+        assert_eq!(
+            w.census.verb_applied[VERB_SET_HAND as usize], count,
+            "a refused switch was counted"
+        );
+        assert_eq!(w.census.verb_events_written, events, "a refused switch fired a verb event");
+        // An empty one takes it, and both move.
+        w.hand[0].amount = 0;
+        apply(&mut w, 0, &switch);
+        assert_eq!(w.census.verb_applied[VERB_SET_HAND as usize], count + 1);
+        assert_eq!(w.census.verb_events_written, events + 1);
+        assert_eq!(w.hand[0].material, 1);
+    }
+
+    #[test]
+    fn a_champion_with_nobody_to_promote_costs_nothing() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        assert!(w.walkers.iter().all(|k| !k.alive()), "a fresh world already has walkers");
+        let champion = Command { verb: VERB_CHAMPION, ..Command::default() };
+        let cost = i32::from(w.cfg.power_cost[POWER_CHAMPION]);
+        assert!(cost > 0, "the shipped manifest prices the champion");
+        w.mana[0] = 5_000 << 16;
+        apply(&mut w, 0, &champion);
+        assert_eq!(w.mana[0], 5_000 << 16, "mana was spent on a champion that never existed");
+        assert_eq!(
+            w.census.verb_applied[VERB_CHAMPION as usize], 0,
+            "a no-op champion was counted"
+        );
+        // A pickup charge is handed back the same way.
+        w.free_uses[0][POWER_CHAMPION] = 1;
+        apply(&mut w, 0, &champion);
+        assert_eq!(w.free_uses[0][POWER_CHAMPION], 1, "the charge was burnt on nothing");
+        assert_eq!(w.mana[0], 5_000 << 16);
     }
 
     #[test]

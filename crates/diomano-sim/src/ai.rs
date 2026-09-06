@@ -26,7 +26,7 @@
 //! and marching, which is the only war this game has.
 
 use crate::world::{
-    Command, CommandBuf, MOD_THROWN, N, PLAYERS, TIDE_TELEGRAPH, VERB_EARTHQUAKE, VERB_LOWER,
+    Command, CommandBuf, MOD_THROWN, PLAYERS, TIDE_TELEGRAPH, VERB_EARTHQUAKE, VERB_LOWER,
     VERB_MAGNET, VERB_RAISE, VERB_VOLCANO, World, idx, verb_power,
 };
 
@@ -214,7 +214,11 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
         }
     }
 
-    let (face, x, y) = target(w, player, l);
+    // `target` has nothing only for an anchor that is itself off its face, which
+    // `reanchor` never produces; skipping the beat is the honest fallback.
+    let Some((face, x, y)) = target(w, player, l) else {
+        return;
+    };
     out.push(Command {
         tick: w.tick,
         x,
@@ -224,18 +228,13 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
         face,
         modifier: l.modifier,
     });
-
-    // The hand has to be emptied before it can be filled again, exactly as the
-    // player's does. Digging with a full hand does nothing, so drop the surplus
-    // into the pit it just dug rather than pretending capacity is infinite.
-    w.ai.cursor = w.ai.cursor.wrapping_add(1);
 }
 
 fn current_script(w: &World) -> &'static [Lesson] {
     if w.ai.phase == PHASE_WAR { WAR_SCRIPT } else { SCRIPT }
 }
 
-fn target(w: &World, player: usize, l: Lesson) -> (u8, u16, u16) {
+fn target(w: &World, player: usize, l: Lesson) -> Option<(u8, u16, u16)> {
     let (face, ax, ay) = match l.aim {
         Aim::Home => (w.ai.anchor_face, w.ai.anchor_x, w.ai.anchor_y),
         Aim::EnemyBase => {
@@ -246,9 +245,18 @@ fn target(w: &World, player: usize, l: Lesson) -> (u8, u16, u16) {
             })
         }
     };
-    let x = (i32::from(ax) + i32::from(l.dx)).clamp(0, N as i32 - 1);
-    let y = (i32::from(ay) + i32::from(l.dy)).clamp(0, N as i32 - 1);
-    (face, x as u16, y as u16)
+    // The offset walks across seams like everything else on the cube does. It
+    // used to clamp to the face instead, so a lesson aimed six cells west of a
+    // settlement four cells from the edge landed inside that settlement's own
+    // footprint — and the opponent spent the whole hold digging up its own town.
+    let (f, x, y) = crate::world::walk(
+        face as usize,
+        i32::from(ax),
+        i32::from(ay),
+        i32::from(l.dx),
+        i32::from(l.dy),
+    )?;
+    Some((f as u8, x as u16, y as u16))
 }
 
 /// A player's strongest settlement: tier descending, slot ascending — the
@@ -329,10 +337,16 @@ mod tests {
         let mut w = ai_world();
         let mut buf = CommandBuf::new();
         let before = w.state_hash();
+        let ai_before = w.ai;
         for _ in 0..500 {
             buf.clear();
             step(&mut w, &mut buf);
         }
+        // Its bookkeeping *is* hashed — it decides the commands it emits, and it
+        // runs on both peers — so put that back before comparing: what must be
+        // untouched is everything else.
+        assert_ne!(w.ai, ai_before, "500 steps did not advance the opponent's own state");
+        w.ai = ai_before;
         assert_eq!(
             w.state_hash(),
             before,
@@ -454,6 +468,22 @@ mod tests {
             }
         }
         assert!(marched, "the war phase never sent the army at the enemy");
+    }
+
+    #[test]
+    fn a_lesson_aimed_past_the_face_edge_crosses_the_seam_instead_of_clamping() {
+        let mut w = ai_world();
+        w.ai.anchor_face = 4;
+        w.ai.anchor_x = 2;
+        w.ai.anchor_y = 30;
+        let l = lesson(VERB_RAISE, 1, 0, -6, 2, 0);
+        let (face, x, y) = target(&w, 1, l).expect("an anchor on its face always has a target");
+        let walked = crate::world::walk(4, 2, 30, -6, 2).expect("the anchor is on the face");
+        assert_eq!((face as usize, x as usize, y as usize), walked);
+        assert_ne!(
+            face, 4,
+            "six cells west of x = 2 is on the neighbouring face, not clamped to x = 0"
+        );
     }
 
     #[test]

@@ -15,6 +15,13 @@ const OUT = resolve(process.argv[2] ?? join(WEB_ROOT, "tools/gallery/gallery.png
 const TIER = process.argv[3] ? `?tier=${process.argv[3]}` : "";
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8" };
 
+if (!existsSync(join(WEB_ROOT, "tools/gallery/dist/index.html"))) {
+  console.error(
+    "gallery: no build; run `bunx vite build --config tools/gallery/vite.config.ts` first",
+  );
+  process.exit(1);
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
   // Malformed percent-encoding throws; a bad request must not take the server
@@ -51,15 +58,27 @@ const browser = await chromium.launch({
   args: ["--enable-unsafe-swiftshader"],
   ...(executablePath ? { executablePath } : {}),
 });
-const page = await browser.newPage({ viewport: { width: 1920, height: 600 } });
-page.on("pageerror", (err) => {
-  console.error(`page error: ${err.message}`);
+// Everything from here on runs inside try/finally: a timeout or a page error
+// used to leave the server and the browser for process exit to reap, and
+// `process.exit` from inside an event handler skips cleanup entirely.
+let failure = null;
+try {
+  const page = await browser.newPage({ viewport: { width: 1920, height: 600 } });
+  const pageErrors = [];
+  page.on("pageerror", (err) => pageErrors.push(err.message));
+  await page.goto(`http://127.0.0.1:${port}/${TIER}`, { waitUntil: "load" });
+  await page.waitForSelector("body[data-ready]", { timeout: 20000 });
+  await page.waitForTimeout(300);
+  if (pageErrors.length > 0) throw new Error(`page error: ${pageErrors.join("; ")}`);
+  await page.screenshot({ path: OUT, fullPage: true });
+  console.log(OUT);
+} catch (err) {
+  failure = err;
+} finally {
+  await browser.close();
+  server.close();
+}
+if (failure !== null) {
+  console.error(`gallery: ${failure instanceof Error ? failure.message : String(failure)}`);
   process.exit(1);
-});
-await page.goto(`http://127.0.0.1:${port}/${TIER}`, { waitUntil: "load" });
-await page.waitForSelector("body[data-ready]", { timeout: 20000 });
-await page.waitForTimeout(300);
-await page.screenshot({ path: OUT, fullPage: true });
-console.log(OUT);
-await browser.close();
-server.close();
+}

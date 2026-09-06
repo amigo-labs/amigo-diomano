@@ -74,8 +74,8 @@ export interface Synth {
   voice(v: Voice): void;
   /** Pan and attenuation for a cell in the current view. */
   spatialise(at: At): { pan: number; gain: number };
-  /** Tell the synth where the camera is. Once per frame. */
-  view(camera: THREE.PerspectiveCamera, cells: number): void;
+  /** Once per frame: where the camera is, and the face edge `N` for placing cells. */
+  view(camera: THREE.PerspectiveCamera, n: number): void;
 }
 
 /** The whole planet fits in the view at 4.2 radii; nothing is nearer than 1.35. */
@@ -199,8 +199,12 @@ export function createSynth(ctx: AudioContext, destination: AudioNode): Synth {
     noise,
     voice,
     spatialise,
-    view(camera, cells): void {
-      N = Math.round(Math.sqrt(cells / 6));
+    view(camera, n): void {
+      // The face edge, taken as given. It was once reconstructed from the cell
+      // count as `sqrt(cells / 6)` — but the count includes the ghost ring, so
+      // that came out as `N + 2` and every placed sound sat about two degrees
+      // too close to its face's centre.
+      N = n;
       const e = camera.matrixWorldInverse.elements;
       for (let i = 0; i < 16; i++) viewInverse[i] = e[i] ?? 0;
       const p = camera.position;

@@ -86,7 +86,10 @@ fn leader_on_own_magnet(w: &World, wk: &Walker) -> bool {
         return false;
     }
     let m = w.magnet[(wk.owner as usize) % PLAYERS];
-    if m.active == 0 {
+    // The magnet's own idea of who leads, not only the walker's flag: the
+    // holy fire belongs to the leader of *this* magnet, and a flag is a
+    // cache of that fact rather than the fact itself.
+    if m.active == 0 || m.leader != wk.id {
         return false;
     }
     crate::walkers::cell_of(wk) == idx(m.face as usize, m.x as usize, m.y as usize)
@@ -176,17 +179,20 @@ fn absorb(w: &mut World, keep: usize, gone: usize) {
     w.walkers[keep].pop_carried = carried;
     w.census.merges = w.census.merges.saturating_add(1);
 
-    // A merge concentrates population; it does not spend it. So the absorbed
-    // walker's settlement slot must *not* be released here — `keep` is now
-    // carrying it, and will release it when it dies.
+    // A merge concentrates population; it does not spend it. So none of the
+    // absorbed walker's slots may be released here — `keep` now carries them
+    // all, and releases them when it dies.
     //
-    // Detaching `home` before `remove` is what suppresses the credit. Getting
-    // this wrong is not subtle in effect but is invisible in a short fixture:
-    // `spawn_population` refills any settlement below its tier's population every
-    // tick, so a freed slot is refilled next tick, the fresh walker lands on the
-    // same cell and merges again. A 20,000-tick match showed 16,928 merges
-    // against two surviving walkers before this was fixed.
+    // Detaching `home` and zeroing `pop_carried` before `remove` is what
+    // suppresses the release, because `remove` gives one slot back to `home`
+    // and every carried one to the owner's settlements. Getting this wrong is
+    // not subtle in effect but is invisible in a short fixture: `spawn_population`
+    // refills any settlement below its tier's population every tick, so a freed
+    // slot is refilled next tick, the fresh walker lands on the same cell and
+    // merges again. A 20,000-tick match showed 16,928 merges against two
+    // surviving walkers before this was fixed.
     w.walkers[gone].home = NO_SETTLEMENT;
+    w.walkers[gone].pop_carried = 0;
     crate::walkers::remove(w, gone);
 }
 
@@ -287,13 +293,14 @@ pub fn ticks_to_raze(tier: u8, attackers_strength: i32) -> i32 {
         return i32::MAX;
     }
     let progress = crate::world::TIER_THRESHOLD[tier as usize];
-    let floor = crate::world::TIER_THRESHOLD[1];
     // The settlement also rebuilds while under attack.
     let net = attackers_strength - crate::settlements::BUILD_RATE;
     if net <= 0 {
         return i32::MAX;
     }
-    (progress - floor) / net + 1
+    // Razed when `progress` drops below zero (`settlements::update`), not when it
+    // falls under the first tier's threshold: the whole build has to be undone.
+    progress / net + 1
 }
 
 #[cfg(test)]
@@ -524,6 +531,21 @@ mod tests {
         resolve(&mut w);
 
         assert_eq!(w.walkers[0].hp, 48 - 5, "an inactive magnet still protected its leader");
+    }
+
+    #[test]
+    fn a_stale_leader_flag_grants_no_invincibility() {
+        // The flag is a cache of `magnet.leader`. A walker that still carries it
+        // after the magnet was re-placed (or was given it by anything but
+        // `claim_magnet`) is not the leader and burns like anyone else.
+        let mut w = arena(29);
+        place(&mut w, 0, 0, 2, 30, 30, 3, 48);
+        place(&mut w, 1, 1, 2, 30, 30, 5, 80);
+        w.magnet[0] = Magnet { face: 2, x: 30, y: 30, active: 1, leader: u16::MAX, _pad: 0 };
+        w.walkers[0].flags |= WALKER_LEADER;
+        resolve(&mut w);
+
+        assert_eq!(w.walkers[0].hp, 48 - 5, "a stale leader flag protected a walker");
     }
 
     #[test]
@@ -829,6 +851,44 @@ mod tests {
             ticks / 30
         );
         assert!(ticks <= 3000, "a fortress took {ticks} ticks to fall; sieges never end");
+    }
+
+    #[test]
+    fn a_merge_moves_population_onto_the_survivor_without_releasing_any() {
+        let mut w = arena(7);
+        for s in &mut w.settlements {
+            s.pop = 0;
+        }
+        let town = |x: u8, pop: u8| Settlement {
+            progress: 100,
+            face: 4,
+            x,
+            y: 20,
+            size: 3,
+            tier: 1,
+            owner: 0,
+            pop,
+            flags: SETTLE_ALIVE,
+        };
+        // One slot out of the first settlement, three out of the second (two of
+        // them already inside `gone` from earlier merges).
+        w.settlements[0] = town(20, 1);
+        w.settlements[1] = town(40, 3);
+        let keep = crate::walkers::spawn(&mut w, 0, 4, 30, 30, 4, 0).unwrap() as usize;
+        let gone = crate::walkers::spawn(&mut w, 0, 4, 30, 30, 4, 1).unwrap() as usize;
+        w.walkers[gone].pop_carried = 2;
+        absorb(&mut w, keep, gone);
+        assert_eq!(w.walkers[keep].pop_carried, 3);
+        assert!(!w.walkers[gone].alive());
+        assert_eq!(
+            (w.settlements[0].pop, w.settlements[1].pop),
+            (1, 3),
+            "a merge released population it was supposed to keep in the field"
+        );
+        // When the survivor falls, every slot comes back: its own to its home,
+        // the carried ones to the settlement with the most people out.
+        crate::walkers::remove(&mut w, keep);
+        assert_eq!((w.settlements[0].pop, w.settlements[1].pop), (0, 0));
     }
 
     #[test]

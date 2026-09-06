@@ -98,6 +98,7 @@ pub extern "C" fn dio_init(seed: u32, terrain: u32, ai_enabled: u32) {
     cfg.ai_enabled = u8::from(ai_enabled != 0);
     world().init(&cfg);
     commands().clear();
+    *HASH_CACHE.get() = (u32::MAX, 0);
     let m = mesh_buf();
     m.build_tables();
     m.rebuild_all(world());
@@ -434,16 +435,33 @@ pub extern "C" fn dio_score(player: u32, wave: u32) -> u32 {
     u32::from(w.score[p][i])
 }
 
+/// The last full hash and the tick it was taken at.
+///
+/// `state_hash` walks every live cell, walker and settlement. The two halves
+/// below are always read as a pair, so without this each read cost two full
+/// walks; the world can only change between reads by ticking, which moves
+/// `tick`, or by `dio_init`/`dio_replay`, which clear the cache explicitly.
+static HASH_CACHE: Global<(u32, u64)> = Global::new((u32::MAX, 0));
+
+fn current_hash() -> u64 {
+    let w: &World = world();
+    let cache = HASH_CACHE.get();
+    if cache.0 != w.tick {
+        *cache = (w.tick, w.state_hash());
+    }
+    cache.1
+}
+
 /// State hash, split because the ABI is 32-bit and JavaScript numbers cannot
 /// carry 64 bits of integer exactly.
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_state_hash_lo() -> u32 {
-    world().state_hash() as u32
+    current_hash() as u32
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_state_hash_hi() -> u32 {
-    (world().state_hash() >> 32) as u32
+    (current_hash() >> 32) as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +504,11 @@ pub extern "C" fn dio_replay_hash_count() -> u32 {
 /// divergence and not a difference in harness — which is the entire reason the
 /// simulation is a separate crate.
 ///
-/// Returns 0 on success, or the 1-based line number of a parse error.
+/// Returns 0 on success, or the 1-based number of the offending line: a header
+/// or command that does not parse, a command out of tick order, or a command
+/// past the log's tick count — the same lines the native `powers::replay`
+/// rejects. `u32::MAX` if the buffer is not UTF-8. On an error no hashes are
+/// reported.
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_replay(len: u32) -> u32 {
     let n = (len as usize).min(LOG_CAPACITY);
@@ -501,35 +523,31 @@ pub extern "C" fn dio_replay(len: u32) -> u32 {
     };
     let w = world();
     w.init(&header.cfg);
+    *HASH_CACHE.get() = (u32::MAX, 0);
+    *HASH_LEN.get() = 0;
 
     let hashes = HASHES.get();
     let mut out = 0usize;
 
     // No allocator, so commands are not collected up front: the log is scanned
     // once per tick from a moving cursor. The log is written in tick order, so
-    // this is a single forward pass overall.
-    let mut lines = src.lines().peekable();
-    let mut pending: Option<Command> = None;
+    // this is a single forward pass overall — and a command that breaks that
+    // order is reported by its line rather than left at the cursor, where it
+    // would silently hold back every command behind it.
+    let mut lines = src.lines().enumerate();
+    let mut pending: Option<(u32, Command)> = None;
 
     for tick in 0..header.ticks {
         let mut buf = CommandBuf::new();
         loop {
             if pending.is_none() {
-                pending = loop {
-                    match lines.peek() {
-                        None => break None,
-                        Some(line) => {
-                            let parsed = powers::parse_log_command(line);
-                            lines.next();
-                            if let Some(c) = parsed {
-                                break Some(c);
-                            }
-                        }
-                    }
-                };
+                pending = lines.find_map(|(i, line)| {
+                    powers::parse_log_command(line).map(|c| (i as u32 + 1, c))
+                });
             }
             match pending {
-                Some(c) if c.tick == tick => {
+                Some((line, c)) if c.tick < tick => return line,
+                Some((_, c)) if c.tick == tick => {
                     buf.push(c);
                     pending = None;
                 }
@@ -544,6 +562,13 @@ pub extern "C" fn dio_replay(len: u32) -> u32 {
             hashes[out + 2] = (h >> 32) as u32;
             out += 3;
         }
+    }
+    // Anything still unapplied was aimed past the log's tick count.
+    if let Some((line, _)) = pending {
+        return line;
+    }
+    if let Some((i, _)) = lines.find(|(_, line)| powers::parse_log_command(line).is_some()) {
+        return i as u32 + 1;
     }
     *HASH_LEN.get() = (out / 3) as u32;
     0
@@ -588,6 +613,27 @@ mod tests {
             w.tick(&[]);
         }
         assert_eq!(via_shell, w.state_hash(), "the shell is not a pass-through");
+        // The hash cache must follow the tick, and must not survive a re-init
+        // back to a tick it has already seen.
+        dio_tick();
+        w.tick(&[]);
+        let after = (u64::from(dio_state_hash_hi()) << 32) | u64::from(dio_state_hash_lo());
+        assert_ne!(after, via_shell, "the hash cache did not notice a tick");
+        assert_eq!(after, w.state_hash());
+        // Two different worlds, both read at tick 0: the second read must not be
+        // served from the first world's cache entry. (Reading after a re-init at
+        // a *different* tick would pass with or without the cache being cleared,
+        // which is what the first version of this check did.)
+        dio_init(1234, 1, 0);
+        let world_a = (u64::from(dio_state_hash_hi()) << 32) | u64::from(dio_state_hash_lo());
+        dio_init(4321, 1, 0);
+        let world_b = (u64::from(dio_state_hash_hi()) << 32) | u64::from(dio_state_hash_lo());
+        assert_ne!(world_a, world_b, "the hash cache survived dio_init");
+        let mut w0 = World::boxed();
+        let mut cfg_b = cfg;
+        cfg_b.seed = 4321;
+        w0.init(&cfg_b);
+        assert_eq!(world_b, w0.state_hash());
 
         // --- queued commands apply once -------------------------------------
         dio_init(9, 1, 0);
@@ -621,5 +667,18 @@ mod tests {
             let got = (u64::from(hashes[i * 3 + 2]) << 32) | u64::from(hashes[i * 3 + 1]);
             assert_eq!(got, *h, "hash {i} differs at tick {tick}");
         }
+
+        // --- and both replays refuse the same broken log at the same line -----
+        //
+        // A command whose tick runs backwards used to sit at the shell's cursor
+        // for the rest of the replay, holding back every command behind it,
+        // while the shell reported success and a full set of hashes.
+        let bad = "seed 4242\nn 64\nterrain 1\nticks 300\n\
+                   c 40 0 1 4 30 30 0\nc 10 0 2 4 32 32 0\n";
+        let bytes = bad.as_bytes();
+        LOG.get()[..bytes.len()].copy_from_slice(bytes);
+        assert_eq!(dio_replay(bytes.len() as u32), 6, "the out-of-order command was not reported");
+        assert_eq!(dio_replay_hash_count(), 0, "a failed replay left hashes behind");
+        assert_eq!(powers::replay(bad).err().map(|e| e.line), Some(6));
     }
 }

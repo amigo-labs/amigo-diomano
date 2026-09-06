@@ -39,6 +39,10 @@
         display: block;
         width: 100%;
         height: 100%;
+        /* Touch and pen drive the same pointer events as the mouse. Without
+           this the browser claims a drag for scrolling or pinch-zoom and sends
+           the game a pointercancel in the middle of a sculpt or an orbit. */
+        touch-action: none;
       }
       /*
         Shell UI (HANDOFF §9.4): the title card and the end card. They sit
@@ -417,6 +421,9 @@
         text-align: center;
         padding: 2rem;
         cursor: auto;
+        /* Above the HUD (4), the radial menu (5) and the shell cards (10): a
+           simulation that trapped mid-match has to be legible over all of them. */
+        z-index: 20;
       }
     </style>
   </head>

@@ -522,6 +522,17 @@ function assertLayout(
       `Settlement stride is ${e.dio_settlement_stride()}, but main.ts reads 12-byte records`,
     );
   }
+  // `PICKUP` and `VERB_EVENT` are hardcoded above just as `WALKER` and
+  // `SETTLEMENT` are; a field added to either struct moves offsets the reads
+  // below would not notice.
+  if (e.dio_pickup_stride() !== 8) {
+    problems.push(`Pickup stride is ${e.dio_pickup_stride()}, but main.ts reads 8-byte records`);
+  }
+  if (e.dio_verb_event_stride() !== 8) {
+    problems.push(
+      `VerbEvent stride is ${e.dio_verb_event_stride()}, but main.ts reads 8-byte records`,
+    );
+  }
   if (problems.length > 0) {
     throw new Error(`wasm/TS layout mismatch:\n  ${problems.join("\n  ")}`);
   }
@@ -549,8 +560,12 @@ function boot(): void {
   if (!canvas || !fallback) throw new Error("page is missing its canvas");
 
   const params = new URLSearchParams(location.search);
+  // `Number.isNaN`, not `||`: a seed of zero is a seed, and `restart` writes
+  // whatever it drew into the URL — a link that silently plays a different seed
+  // is not shareable.
+  const seedParam = Number.parseInt(params.get("seed") ?? "0x5EED", 16);
   const options: GameOptions = {
-    seed: Number.parseInt(params.get("seed") ?? "0x5EED", 16) || 0x5eed,
+    seed: Number.isNaN(seedParam) ? 0x5eed : seedParam >>> 0,
     terrain: Number.parseInt(params.get("terrain") ?? "0", 10) || 0,
     tier: params.get("tier") === "1" ? 1 : 2,
     ai: params.get("ai") !== "0",
@@ -569,7 +584,12 @@ function boot(): void {
         game.audio.setVolume(v);
         return;
       }
-      pendingVolume = Math.min(Math.max(v, 0), 1);
+      const next = Math.min(Math.max(v, 0), 1);
+      // Raising the level un-mutes, as `audio.setVolume` does once the graph
+      // exists: a slider dragged up on the title card means "I want sound", and
+      // a mute remembered from an earlier visit used to win over it.
+      if (next > pendingVolume) remember(KEY.muted, "0");
+      pendingVolume = next;
       remember(KEY.volume, String(pendingVolume));
     },
   };

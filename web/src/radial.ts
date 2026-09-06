@@ -100,6 +100,11 @@ export interface Radial {
   sync(): void;
   /** True while the menu is on screen (the camera does not care, but tests might). */
   readonly open: boolean;
+  /**
+   * Dismiss the menu if it is open. A restart calls this: the backdrop, the
+   * snapshotted target and the hand's suppression must not outlive the match.
+   */
+  close(): void;
 }
 
 export interface RadialActions {
@@ -178,6 +183,9 @@ export function createRadial(
     sim.e.dio_power_cost(entry.power) <= sim.e.dio_mana(player) ||
     sim.e.dio_free_uses(player, entry.power) > 0;
 
+  /** What each slice last rendered, so `sync` rewrites only what moved. */
+  const rendered = new WeakMap<HTMLDivElement, string>();
+
   const renderSlice = (el: HTMLDivElement, entry: Entry): void => {
     const cost = sim.e.dio_power_cost(entry.power);
     const charges = sim.e.dio_free_uses(player, entry.power);
@@ -187,7 +195,13 @@ export function createRadial(
     const label = confirming ? "Bestätigen?" : entry.name;
     const chargeMark =
       charges > 0 ? ` <span class="charge">●${charges > 1 ? charges : ""}</span>` : "";
-    el.innerHTML = `${label}<span class="cost">${cost} Mana${chargeMark}</span>`;
+    const html = `${label}<span class="cost">${cost} Mana${chargeMark}</span>`;
+    // The same discipline the hub keeps: `innerHTML` at frame rate tears down
+    // and re-parses the children sixty times a second for text that changes
+    // once in a while.
+    if (rendered.get(el) === html) return;
+    rendered.set(el, html);
+    el.innerHTML = html;
   };
 
   const openAt = (x: number, y: number, ev: MouseEvent): void => {
@@ -272,13 +286,13 @@ export function createRadial(
       return;
     }
     if (backdrop) {
-      mods = modsFromKeys(ev);
+      mods = readModifier(ev);
       renderHub();
     }
   };
   const onKeyUp = (ev: KeyboardEvent): void => {
     if (backdrop) {
-      mods = modsFromKeys(ev);
+      mods = readModifier(ev);
       renderHub();
     }
   };
@@ -318,14 +332,7 @@ export function createRadial(
     get open(): boolean {
       return backdrop !== null;
     },
-  };
-}
 
-/** Modifier bits from a keyboard event's own modifier keys. */
-function modsFromKeys(ev: KeyboardEvent): number {
-  return (
-    (ev.shiftKey ? MOD.THROWN : 0) |
-    (ev.altKey ? MOD.INCREASED : 0) |
-    (ev.ctrlKey ? MOD.EXTREME : 0)
-  );
+    close,
+  };
 }

@@ -57,7 +57,7 @@ is the half of §6.2 that this run did implement.
 TypeScript. Two encoders for one format is a desync waiting to happen, which is
 why the roundtrip is asserted rather than assumed.
 
-### Every packet carries the whole unsimulated window
+### Every packet carries every frame the peer might still need
 
 Not in §6 and it has to be, because lockstep and packet loss interact badly:
 the loop cannot pass a tick whose input it lacks, so **one dropped frame is a
@@ -67,18 +67,34 @@ tick 20 with nothing to retransmit it.
 The conventional answer is a reliable ordered DataChannel and letting SCTP
 retransmit. This repeats the window in the packet instead, trading bytes for
 latency — a retransmit costs a whole round trip, 120 ms of the 200 ms input-delay
-budget, whereas the entire window is `INPUT_DELAY_TICKS + 1` frames, 56 bytes,
-inside the ~100 bytes of framing every packet already pays for. The budget maths
-below is what makes that trade obviously right.
+budget, whereas the entire window is `WINDOW_FRAMES` (14) empty frames, 112
+bytes, of the same order as the ~100 bytes of framing every packet already pays
+for. The budget maths below is what makes that trade obviously right.
 
-The window is anchored to "what the peer cannot have simulated yet" rather than
-being a fixed tail of history. The first attempt used a fixed tail, and it was too
-short to hold the opening burst — tick 0 was evicted before it was ever sent, and
-the match deadlocked on its own first tick. Anchoring makes that unrepresentable.
+The window runs from `now - MAX_PEER_LAG_TICKS` to `now + INPUT_DELAY_TICKS`.
+The lower bound is the part that has been wrong twice. A fixed tail of history
+was too short for the opening burst — tick 0 was evicted before it was ever sent
+and the match deadlocked on its own first tick. Anchoring the window at the
+sender's *own* tick then looked right and was not: we simulate tick T with the
+*peer's* frame T, and the peer still needs ours. It can be up to
+`INPUT_DELAY_TICKS + 1` ticks behind (it must have published through `now - 1`
+for us to be at `now`), so once every packet carrying our frame T was lost — at
+`TICKS_PER_PACKET = 2` that is three or four packets, not seven — the peer stalled
+on T for good while we ran ahead, evicted T, and then stalled ourselves with a
+window that no longer held the one frame that mattered. `verify-lockstep` now
+loses every copy of one frame on purpose and demands that the match goes on.
 
-Correlated loss, a burst taking all seven copies, is **not** covered. The answer
-there is the stall path: `Lockstep.step` reports and waits, and never invents
-input.
+Two further rules fall out of the same analysis. A frame is immutable from its
+first transmission, because the receiver keeps the first copy it sees, so
+`Lockstep.issue` never schedules into a frame already published — during a stall
+the tick counter stands still while the publish horizon has moved on, and a
+command issued then used to be applied on one peer only. And `Lockstep.step`
+resends the window while it stalls: `publish` only sends when the tick moves,
+which is exactly when nothing needs sending.
+
+Correlated loss beyond the window — every copy of a frame lost for as long as
+the window carries it — is still not a guarantee. The answer there remains the
+stall path: `Lockstep.step` reports, waits and resends, and never invents input.
 
 ## Desync detection — implemented
 
@@ -93,10 +109,14 @@ claims would silently switch off desync detection exactly under load — which i
 where a desync is most likely.
 
 `just verify-lockstep` runs two wasm instances through the layer at the Phase 7
-DoD's conditions (120 ms RTT, 2% loss, 30 ms jitter) and checks three things:
-1,200 ticks without divergence; identical hashes across two different link
-schedules, so arrival order provably cannot reach the simulation; and that an
-injected divergence **is caught** — a detector never seen to fire is a comment.
+DoD's conditions (120 ms RTT, 2% loss, 30 ms jitter) and checks five things:
+the TypeScript codec produces the bytes `Command::encode` pins; 1,200 ticks
+without divergence; identical hashes across two different link schedules, so
+arrival order provably cannot reach the simulation; an injected divergence
+**is caught** — a detector never seen to fire is a comment; and the three
+directed failures random loss almost never produces on purpose: every copy of
+one frame lost, a command issued mid-stall, and a window resent right after a
+tick, which must still carry every command its frames were published with.
 
 ### The §6.3 acceptance criterion
 
@@ -246,14 +266,17 @@ Durable Objects on the Workers Free plan use the **SQLite storage backend only**
 The TURN free tier is **shared between TURN and SFU**, not two independent
 allowances.
 
-**Per-match traffic.** 8 bytes of payload inside a ~100 byte packet after
-SCTP + DTLS + UDP + IP + TURN framing. At 30 Hz that is 3 KB/s per direction,
-~6 KB/s per match, ~5.4 MB for 15 minutes — roughly 185,000 matches/month
-against the TURN allowance. TURN is not a constraint.
+**Per-match traffic.** Roughly 100 bytes of SCTP + DTLS + UDP + IP + TURN
+framing per packet, plus the payload: with the whole resend window aboard that
+is 14 frame headers (112 bytes) and the commands of those ticks, so a packet is
+about 220 bytes. At 15 packets/s per direction (two ticks per packet) that is
+~3.3 KB/s per direction, ~6.6 KB/s per match, ~6 MB for 15 minutes — roughly
+170,000 matches/month against the TURN allowance. TURN is not a constraint.
 
-Note the efficiency though: 8% payload. Overhead dominates completely.
-`[START]` **batch 2 ticks per packet** — halves traffic for 66 ms of added
-delay, comfortably inside the 200 ms input-delay budget.
+The framing is the cost whatever the payload — §6.6 was written when a packet
+carried one 8-byte frame, 8% payload — which is why `[START]` **batches 2 ticks
+per packet**: it halves the packet count for 66 ms of added delay, comfortably
+inside the 200 ms input-delay budget.
 
 **The binding constraint is Durable Object duration.** 13,000 GB-s/day at 128 MB
 is ~28 DO-hours/day. A Lobby DO held open for a whole 15-minute match consumes

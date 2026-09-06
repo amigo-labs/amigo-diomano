@@ -61,8 +61,11 @@ const TIDE_IMPACT = 2;
  * copy of the manifest value here would be one more number to keep in step with
  * the simulation for no gain. A telegraph shorter than this simply reddens from
  * part-way up, which is the honest reading of "less warning".
+ *
+ * Shared with `audio/ambience.ts`, whose wind rises on the same ramp so picture
+ * and sound agree.
  */
-const WARNING_RAMP_TICKS = 300;
+export const WARNING_RAMP_TICKS = 300;
 
 export interface Atmosphere {
   readonly group: THREE.Group;

@@ -21,7 +21,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WEB_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -67,11 +67,20 @@ function serve() {
       const url = new URL(req.url ?? "/", "http://localhost");
       // `normalize` plus the prefix check keeps a crafted path from escaping the
       // web root. This server is local and short-lived, but a path traversal in
-      // a build tool is still a path traversal.
-      const rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
+      // a build tool is still a path traversal. Malformed percent-encoding
+      // throws, and inside an async handler that is an unhandled rejection
+      // rather than a 400 — the same fix the other two tool servers got.
+      let rel;
+      try {
+        rel = normalize(decodeURIComponent(url.pathname)).replace(/^(\.\.[/\\])+/, "");
+      } catch {
+        res.writeHead(400).end("bad request");
+        return;
+      }
       const candidates = [join(WEB_ROOT, rel), join(WEB_ROOT, "public", rel)];
       for (const path of candidates) {
-        if (!path.startsWith(WEB_ROOT)) continue;
+        // With the separator: a sibling `web-evil` starts with `web` too.
+        if (path !== WEB_ROOT && !path.startsWith(WEB_ROOT + sep)) continue;
         if (!existsSync(path) || path.endsWith("/")) continue;
         const body = await readFile(path);
         res.writeHead(200, {

@@ -69,7 +69,16 @@ pub fn spawn(
     Some(slot as u16)
 }
 
-/// Remove a walker and give its home settlement its population slot back.
+/// Remove a walker and give every population slot it held back.
+///
+/// Its own slot goes to its home. The slots it carries from walkers it absorbed
+/// (`pop_carried`) came from settlements the model no longer knows — a merged
+/// walker is one unit — so each goes to the owner's living settlement with the
+/// most population out, ties to the lowest slot. Deterministic, no new state, and
+/// no settlement stays starved: crediting all of them to `home` used to leave
+/// the settlements the absorbed walkers came from at their cap for good, with
+/// `spawn_population` skipping them until the match ended. A 20,000-tick match
+/// finished with fifteen settlements fielding two walkers per player.
 pub fn remove(w: &mut World, id: usize) {
     if !w.walkers[id].alive() {
         return;
@@ -80,20 +89,25 @@ pub fn remove(w: &mut World, id: usize) {
     if wk.home != NO_SETTLEMENT {
         let home = wk.home as usize;
         if home < w.settlements.len() && w.settlements[home].alive() {
-            // Itself, plus everyone it had absorbed. A merged walker holds several
-            // settlement slots charged; killing it has to release all of them or a
-            // long match strangles its own settlements into never spawning again.
-            //
-            // Carried population is credited to *this* walker's home, which may
-            // not be where every absorbed walker came from. That is a deliberate
-            // simplification: the alternative is a per-walker list of origins, and
-            // a merged walker is one unit — asking which of its people came from
-            // where is a question the model does not have.
-            let released = wk.pop_carried.saturating_add(1);
-            w.settlements[home].pop = w.settlements[home].pop.saturating_sub(released);
+            w.settlements[home].pop = w.settlements[home].pop.saturating_sub(1);
         }
     }
-    if wk.flags & WALKER_LEADER != 0 {
+    for _ in 0..wk.pop_carried {
+        let fullest = (0..w.settlements.len())
+            .filter(|&s| {
+                let st = &w.settlements[s];
+                st.alive() && st.owner as usize == owner && st.pop > 0
+            })
+            .max_by_key(|&s| (w.settlements[s].pop, core::cmp::Reverse(s)));
+        let Some(slot) = fullest else {
+            break; // nobody has anyone out: the slot was already lost with its settlement
+        };
+        w.settlements[slot].pop -= 1;
+    }
+    // Only the magnet's *current* leader drops it. The flag alone is not enough:
+    // it is a cache of `magnet.leader`, and a walker whose magnet was re-placed
+    // must not drag the new placement to wherever it later falls.
+    if wk.flags & WALKER_LEADER != 0 && w.magnet[owner].leader == id as u16 {
         // "If the leader dies the magnet drops there" (§5.1).
         let p = owner;
         w.magnet[p].active = 1;
@@ -129,6 +143,10 @@ fn step_walker(w: &mut World, id: usize) {
     let field = if wk.flags & WALKER_CHAMPION != 0 { 1 - owner } else { owner };
     let dir = w.flow[field][here];
     if dir == NO_FLOW || dir as usize >= 4 {
+        // Standing still — possibly *on* the magnet, whose own cell carries no
+        // flow direction. A walker already there when the magnet lands on it
+        // never moves and, without this, never became its leader.
+        claim_magnet(w, id, owner, face, cx, cy);
         return;
     }
     let dir = dir as usize;
@@ -164,7 +182,17 @@ fn step_walker(w: &mut World, id: usize) {
 }
 
 /// First walker to reach the magnet becomes leader (§5.1).
+///
+/// Never a champion. `make_champion` moves the magnet onto the champion and
+/// drops the leader on purpose — "the player has no leader until a walker
+/// touches the magnet again" — and a champion standing on that cell would
+/// otherwise claim it back on the next pass, arriving at LEADER | CHAMPION:
+/// tripled strength plus the holy fire's invincibility, with nobody else able
+/// to claim the magnet while it lives.
 fn claim_magnet(w: &mut World, id: usize, owner: usize, face: usize, x: i32, y: i32) {
+    if w.walkers[id].flags & WALKER_CHAMPION != 0 {
+        return;
+    }
     let m = w.magnet[owner];
     if m.active == 0 || m.leader != u16::MAX {
         return;
@@ -195,8 +223,13 @@ fn cross_seam(face: usize, nx: Fx, ny: Fx, dir: usize) -> (usize, Fx, Fx) {
 
     // The coordinate running along the edge we left through.
     let t = if dir == DIR_N || dir == DIR_S { nx } else { ny }.clamp(0, EXTENT - 1);
-    // A flip reverses cell `i` to `N - 1 - i`, i.e. continuous `t` to `N - t`.
-    let mapped = if rule.flip { (EXTENT - t).clamp(0, EXTENT - 1) } else { t };
+    // A flip reverses cell `i` to `N - 1 - i`. For a continuous coordinate the
+    // mirror is `EXTENT - 1 - t`, one ulp short of `EXTENT - t`: cell `i` is the
+    // half-open interval `[i, i + 1)`, and `EXTENT - t` maps its *start* to the
+    // start of cell `N - i` — one cell past the seam table's answer. Positions
+    // live on a `SPEED` lattice, so "exactly at the start" is a routine case,
+    // not a rounding curiosity.
+    let mapped = if rule.flip { EXTENT - 1 - t } else { t };
     let entry = if rule.at_max { EXTENT - 1 - overshoot } else { overshoot };
 
     let (x, y) = match rule.axis {
@@ -232,6 +265,11 @@ pub fn make_champion(w: &mut World, player: usize) -> bool {
         };
         id
     };
+    // The magnet transfers to the champion, so whoever led it stops leading —
+    // including a leader that was not promotable and is therefore not `id`.
+    if leader != u16::MAX && (leader as usize) < w.walkers.len() {
+        w.walkers[leader as usize].flags &= !WALKER_LEADER;
+    }
     let wk = w.walkers[id];
     w.walkers[id].flags = (wk.flags | WALKER_CHAMPION) & !WALKER_LEADER;
     w.walkers[id].strength = wk.strength.saturating_mul(3).max(6);
@@ -324,33 +362,127 @@ mod tests {
 
     #[test]
     fn seam_crossing_lands_where_the_seam_table_says_it_should() {
-        for face in 0..6usize {
-            for dir in 0..4usize {
-                for t in [0i32, 7, 31, 63] {
-                    // Position just past the edge in `dir`.
-                    let (px, py) = match dir {
-                        DIR_N => ((t << 16) + ONE / 2, EXTENT + ONE / 4),
-                        DIR_E => (EXTENT + ONE / 4, (t << 16) + ONE / 2),
-                        DIR_S => ((t << 16) + ONE / 2, -(ONE / 4)),
-                        _ => (-(ONE / 4), (t << 16) + ONE / 2),
-                    };
-                    let (nf, nx, ny) = cross_seam(face, px, py, dir);
-                    let (sf, sx, sy, _) = match dir {
-                        DIR_N => step(face, t, N as i32 - 1, dir),
-                        DIR_E => step(face, N as i32 - 1, t, dir),
-                        DIR_S => step(face, t, 0, dir),
-                        _ => step(face, 0, t, dir),
-                    };
-                    assert_eq!(nf, sf, "face mismatch for ({face},{dir},{t})");
-                    assert_eq!(
-                        (crate::fixed::floor_int(nx), crate::fixed::floor_int(ny)),
-                        (sx, sy),
-                        "cell mismatch for ({face},{dir},{t})"
-                    );
-                    assert!((0..EXTENT).contains(&nx) && (0..EXTENT).contains(&ny));
+        // Every sub-cell offset the along-edge coordinate can have, including
+        // exactly the cell's start: the first version of this test probed only
+        // the centre, which is the one offset at which the old `EXTENT - t`
+        // mirror happened to agree with the seam table.
+        for frac in [0, ONE / 16, ONE / 2, ONE - 1] {
+            for face in 0..6usize {
+                for dir in 0..4usize {
+                    for t in [0i32, 7, 31, 63] {
+                        // Position just past the edge in `dir`.
+                        let along = (t << 16) + frac;
+                        let (px, py) = match dir {
+                            DIR_N => (along, EXTENT + ONE / 4),
+                            DIR_E => (EXTENT + ONE / 4, along),
+                            DIR_S => (along, -(ONE / 4)),
+                            _ => (-(ONE / 4), along),
+                        };
+                        let (nf, nx, ny) = cross_seam(face, px, py, dir);
+                        let (sf, sx, sy, _) = match dir {
+                            DIR_N => step(face, t, N as i32 - 1, dir),
+                            DIR_E => step(face, N as i32 - 1, t, dir),
+                            DIR_S => step(face, t, 0, dir),
+                            _ => step(face, 0, t, dir),
+                        };
+                        assert_eq!(nf, sf, "face mismatch for ({face},{dir},{t}+{frac})");
+                        assert_eq!(
+                            (crate::fixed::floor_int(nx), crate::fixed::floor_int(ny)),
+                            (sx, sy),
+                            "cell mismatch for ({face},{dir},{t}+{frac})"
+                        );
+                        assert!((0..EXTENT).contains(&nx) && (0..EXTENT).contains(&ny));
+                    }
                 }
             }
         }
+    }
+
+    /// Re-placing the magnet retires its leader, all the way down to the flag
+    /// on the walker. With only `magnet.leader` reset, the old leader kept its
+    /// flag, and `remove` — "if the leader dies the magnet drops there" — later
+    /// moved the player's *new* magnet to wherever that walker happened to die.
+    #[test]
+    fn a_replaced_magnet_retires_the_old_leader() {
+        let mut w = open_world();
+        w.mana[0] = 1_000 << 16;
+        let id = spawn(&mut w, 0, 2, 20, 20, 2, NO_SETTLEMENT).unwrap() as usize;
+        let place = |w: &mut World, x: u16, y: u16| {
+            let cmd = crate::world::Command {
+                tick: 0,
+                x,
+                y,
+                player: 0,
+                verb: crate::world::VERB_MAGNET,
+                face: 2,
+                modifier: 0,
+            };
+            crate::powers::apply(w, 0, &cmd);
+        };
+
+        // The magnet lands on the walker's own cell; standing there is enough to
+        // claim it (the target cell has no flow direction, so it never moves).
+        place(&mut w, 20, 20);
+        movement(&mut w);
+        assert_eq!(w.magnet[0].leader, id as u16, "a walker on the magnet did not claim it");
+        assert_ne!(w.walkers[id].flags & WALKER_LEADER, 0);
+
+        // The player moves on.
+        place(&mut w, 40, 40);
+        assert_eq!(w.magnet[0].leader, u16::MAX);
+        assert_eq!(w.walkers[id].flags & WALKER_LEADER, 0, "the old leader kept its flag");
+
+        // Its death must leave the new placement alone.
+        remove(&mut w, id);
+        assert_eq!(
+            (w.magnet[0].face, w.magnet[0].x, w.magnet[0].y),
+            (2, 40, 40),
+            "a retired leader dragged the magnet to where it died"
+        );
+        assert_eq!(w.magnet[0].active, 1);
+    }
+
+    /// The belt to that fix's braces: even with a stale flag, `remove` consults
+    /// the magnet's own idea of who leads before moving it.
+    #[test]
+    fn only_the_magnets_current_leader_drops_it_on_death() {
+        let mut w = open_world();
+        w.magnet[0] = Magnet { face: 2, x: 10, y: 10, active: 1, leader: u16::MAX, _pad: 0 };
+        let id = spawn(&mut w, 0, 2, 20, 20, 2, NO_SETTLEMENT).unwrap() as usize;
+        w.walkers[id].flags |= WALKER_LEADER; // stale: the magnet does not know it
+        remove(&mut w, id);
+        assert_eq!((w.magnet[0].face, w.magnet[0].x, w.magnet[0].y), (2, 10, 10));
+    }
+
+    #[test]
+    fn a_dead_walker_returns_carried_people_to_the_settlement_with_most_out() {
+        let mut w = open_world();
+        for s in &mut w.settlements {
+            s.pop = 0;
+        }
+        // Home has this one walker charged; a second settlement has two out,
+        // absorbed into this walker long ago.
+        let town = |x: u8, pop: u8| crate::world::Settlement {
+            progress: 100,
+            face: 4,
+            x,
+            y: 20,
+            size: 3,
+            tier: 1,
+            owner: 0,
+            pop,
+            flags: crate::world::SETTLE_ALIVE,
+        };
+        w.settlements[0] = town(20, 1);
+        w.settlements[1] = town(40, 2);
+        let id = spawn(&mut w, 0, 4, 30, 30, 2, 0).unwrap() as usize;
+        w.walkers[id].pop_carried = 2;
+        remove(&mut w, id);
+        assert_eq!(w.settlements[0].pop, 0, "the walker's own slot did not go home");
+        assert_eq!(
+            w.settlements[1].pop, 0,
+            "the carried slots did not go back to the settlement that fielded them"
+        );
     }
 
     #[test]

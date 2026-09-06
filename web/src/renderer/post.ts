@@ -58,6 +58,12 @@ export function createPost(
   else composer.addPass(new SMAAPass());
 
   const setSize = (width: number, height: number): void => {
+    // The composer copies the renderer's pixel ratio once, in its constructor,
+    // and never re-reads it. `main.ts` re-reads `devicePixelRatio` on every
+    // resize — a window dragged between a 1x and a 2x display — so without this
+    // the passes kept the ratio they were born with while FXAA below used the
+    // new one.
+    composer.setPixelRatio(renderer.getPixelRatio());
     // `EffectComposer.setSize` already multiplies by its pixel ratio for every
     // pass it owns, so calling `bloom.setSize(width, height)` afterwards — which
     // this used to — put bloom back to CSS resolution, i.e. half-res on a 2x

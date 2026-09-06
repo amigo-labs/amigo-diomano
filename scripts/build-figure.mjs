@@ -180,13 +180,19 @@ function build(parts) {
       [cx - tx, cy + hy, cz - tz], [cx + tx, cy + hy, cz - tz],
       [cx + tx, cy + hy, cz + tz], [cx - tx, cy + hy, cz + tz],
     ];
+    // Counter-clockwise seen from *outside* the box, which is what `quad`
+    // needs for both the winding and the normal it derives from it. The first
+    // version listed these clockwise, and both villager models shipped inside
+    // out — every outward triangle back-face culled, the far side lit by
+    // inward normals — the same defect the planet mesh once had. `writeGlb`
+    // now measures the signed volume so it cannot happen quietly again.
     const faces = [
-      [0, 3, 2, 1], // bottom
-      [4, 5, 6, 7], // top
-      [0, 1, 5, 4], // -z
-      [2, 3, 7, 6], // +z
-      [1, 2, 6, 5], // +x
-      [3, 0, 4, 7], // -x
+      [0, 1, 2, 3], // bottom (-y)
+      [4, 7, 6, 5], // top (+y)
+      [0, 4, 5, 1], // -z
+      [2, 6, 7, 3], // +z
+      [1, 5, 6, 2], // +x
+      [3, 7, 4, 0], // -x
     ];
     for (const [a, b, c, d] of faces) quad(v[a], v[b], v[c], v[d]);
   }
@@ -219,11 +225,67 @@ function build(parts) {
     }
   }
 
-  for (const part of parts) {
+  for (const [k, part] of parts.entries()) {
+    const from = positions.length;
     if (Array.isArray(part)) box(part[0], part[1], part[2]);
     else prism(...part.prism);
+    // Every part is a closed solid of its own, so each has to be wound outward
+    // by itself. The whole-figure check in `assertWoundOutward` sums them, and
+    // one inside-out thumb would disappear under the torso's volume.
+    const v = signedVolume(positions, from, positions.length);
+    if (!(v > 0)) {
+      throw new Error(`part ${k}: signed volume ${v.toFixed(4)} — wound inward`);
+    }
   }
   return { positions: new Float32Array(positions), normals: new Float32Array(normals) };
+}
+
+/**
+ * Signed volume of the triangles in `positions[from, to)`: the divergence
+ * theorem, one tetrahedron per triangle against the origin. Positive for a
+ * closed, outward-wound surface.
+ */
+function signedVolume(positions, from, to) {
+  let volume = 0;
+  for (let i = from; i + 9 <= to; i += 9) {
+    const a = [positions[i], positions[i + 1], positions[i + 2]];
+    const b = [positions[i + 3], positions[i + 4], positions[i + 5]];
+    const c = [positions[i + 6], positions[i + 7], positions[i + 8]];
+    const n = cross(sub(b, a), sub(c, a));
+    volume += (a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) / 6;
+  }
+  return volume;
+}
+
+/**
+ * The mesh must be wound outward: positive signed volume overall, and every
+ * stored normal on the same side as the winding it was derived from.
+ *
+ * Inside out, the whole figure is culled by a `FrontSide` material and what
+ * remains is lit by inward normals — and nothing else in the pipeline notices,
+ * which is how both villagers shipped that way once. `build` already checks
+ * each part's volume on its own; this is the whole-file check at the point
+ * where the bytes are written. The stored-normal comparison can only fire for
+ * the prism caps, whose normals are written by hand — `quad` derives its
+ * normal from the very winding it emits.
+ */
+function assertWoundOutward(name, positions, normals) {
+  const volume = signedVolume(positions, 0, positions.length);
+  let disagree = 0;
+  for (let i = 0; i + 9 <= positions.length; i += 9) {
+    const a = [positions[i], positions[i + 1], positions[i + 2]];
+    const b = [positions[i + 3], positions[i + 4], positions[i + 5]];
+    const c = [positions[i + 6], positions[i + 7], positions[i + 8]];
+    const n = cross(sub(b, a), sub(c, a));
+    const stored = [normals[i], normals[i + 1], normals[i + 2]];
+    if (n[0] * stored[0] + n[1] * stored[1] + n[2] * stored[2] < 0) disagree += 1;
+  }
+  if (!(volume > 0)) {
+    throw new Error(`${name}: signed volume ${volume.toFixed(4)} — the figure is inside out`);
+  }
+  if (disagree > 0) {
+    throw new Error(`${name}: ${disagree} triangles store a normal against their winding`);
+  }
 }
 
 // --- GLB assembly ----------------------------------------------------------
@@ -232,6 +294,7 @@ function build(parts) {
 // chunk. A dependency to emit 9 KB would be the larger thing.
 function writeGlb(name, { positions: posArray, normals: nrmArray }) {
   const count = posArray.length / 3;
+  assertWoundOutward(name, posArray, nrmArray);
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < count; i++) {

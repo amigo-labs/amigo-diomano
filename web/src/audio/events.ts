@@ -30,6 +30,8 @@ interface Known {
 export interface Events {
   /** Once per tick, after the simulation advanced. */
   sync(sim: Sim, tick: number, localPlayer: number): void;
+  /** Forget the match, for a restart: the tick counter is about to go back to zero. */
+  reset(): void;
 }
 
 export function createEvents(synth: Synth): Events {
@@ -111,6 +113,18 @@ export function createEvents(synth: Synth): Events {
   };
 
   return {
+    reset(): void {
+      // The cooldowns are tick stamps, and `known` is the old match's census: left
+      // alone across a restart, no clash sounded until the new match's tick passed
+      // the old one's, and the first sync mourned every settlement of the dead
+      // world at once.
+      lastCombat = -1;
+      lastMerges = -1;
+      lastClash = -1_000;
+      lastMerge = -1_000;
+      known.clear();
+    },
+
     sync(sim, tick, localPlayer): void {
       // --- combat --------------------------------------------------------------
       const combat = sim.e.dio_census_combat() >>> 0;
@@ -146,14 +160,25 @@ export function createEvents(synth: Synth): Events {
 
       // --- settlements ---------------------------------------------------------
       seen.clear();
+      // The first sync of a match learns the seeded homes silently. Decided once,
+      // before the loop: evaluated per settlement, the first seeded home filled
+      // `known` and every further one in the same sync announced itself.
+      const learning = known.size === 0 && tick <= 1;
       for (const s of sim.settlements()) {
         seen.add(s.slot);
         const at = { face: s.face, x: s.x, y: s.y };
         const own = s.owner === localPlayer;
         const k = known.get(s.slot);
         if (!k) {
-          // The first sync of a match learns the seeded homes silently.
-          if (known.size > 0 || tick > 1) founded(at, own);
+          if (!learning) founded(at, own);
+          known.set(s.slot, { tier: s.tier, owner: s.owner, face: s.face, x: s.x, y: s.y });
+          continue;
+        }
+        if (k.owner !== s.owner || k.face !== s.face || k.x !== s.x || k.y !== s.y) {
+          // The slot was recycled between two ticks: one settlement fell and
+          // another was founded into its number. Both happened.
+          fell({ face: k.face, x: k.x, y: k.y }, k.owner === localPlayer);
+          founded(at, own);
           known.set(s.slot, { tier: s.tier, owner: s.owner, face: s.face, x: s.x, y: s.y });
           continue;
         }

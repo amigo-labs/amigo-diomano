@@ -34,7 +34,11 @@ export interface LoopHooks {
    * in `[0, 1)`, for interpolating render state.
    */
   render(alpha: number, dtMs: number): void;
-  /** Called once per second with the measured frame and tick rates. */
+  /**
+   * Called once per second with the measured frame and tick rates and the
+   * running count of dropped ticks. `game.ts` publishes them on
+   * `window.diomano.perf`; there is no on-screen readout (§8).
+   */
   stats?(fps: number, tps: number, droppedTicks: number): void;
 }
 
