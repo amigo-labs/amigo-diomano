@@ -157,8 +157,9 @@ kept.
 
 ### Dirty tracking
 
-Each chunk carries a content hash over its cells **plus a one-cell apron**,
-because a chunk's border vertices average cells belonging to its neighbour.
+Each chunk carries a content hash over its cells **plus a two-cell apron**,
+because a chunk's border vertices read cells belonging to its neighbour: heights
+one cell out, the material and fertility splat taps two cells out.
 `Mesh::update` re-meshes only chunks whose hash changed and publishes a per-chunk
 `dirty` byte, which the TypeScript side uses to set `needsUpdate` on exactly
 those attributes. `mesh::only_dirty_chunks_are_remeshed` asserts both the count
@@ -282,7 +283,8 @@ planet's own angular radius down there and no amount of tilt fits both the groun
 below and the limb above into a frame that narrow. At 1.35 R with 56° and 32° of
 tilt the limb stays inside the top edge and the sub-camera point above the
 bottom one: curvature on screen at every distance, close distance preserved.
-(`atmosphere.ts` derives its grazing-angle constant from the same 32°.)
+(`atmosphere.ts`'s `DIO_GRAZE` is a chosen constant, justified against the same
+32°: at 1.35 R the frame-centre ground sits just above the limb gate.)
 
 Two further consequences of tilting:
 
