@@ -63,6 +63,8 @@ export interface Effects {
    * @returns Camera shake amplitude in radii, for the caller to apply.
    */
   sync(sim: Sim, events: readonly VerbEventView[], dtMs: number): number;
+  /** Drop every live particle and the shake. A restart calls this. */
+  reset(): void;
 }
 
 export function createEffects(sim: Sim): Effects {
@@ -139,23 +141,31 @@ export function createEffects(sim: Sim): Effects {
   ): void => {
     tangentFrame(dir);
     for (let i = 0; i < count; i++) {
-      const p: Particle =
-        pool.length < MAX_PARTICLES
-          ? {
-              dir: new THREE.Vector3(),
-              drift: new THREE.Vector3(),
-              rise: 0,
-              radius: 0,
-              life: 0,
-              maxLife: 1,
-              size: 1,
-              colour: new THREE.Color(),
-              fall: 1,
-            }
-          : // Recycle the oldest rather than dropping the new one: a burst the
-            // player just caused matters more than one that is already fading.
-            pool.reduce((a, b) => (a.life / a.maxLife > b.life / b.maxLife ? a : b));
-      if (pool.length < MAX_PARTICLES) pool.push(p);
+      // Once the pool is full, recycle round-robin rather than dropping the new
+      // particle: a burst the player just caused matters more than one that is
+      // already fading. The pool fills in emission order, so the slot after the
+      // one recycled last is very nearly the oldest, and the cursor costs
+      // nothing where a search for the oldest cost armageddon's 160 particles
+      // 160 scans of the whole pool in one frame.
+      const recycled = pool.length < MAX_PARTICLES ? undefined : pool[recycle];
+      let p: Particle;
+      if (recycled) {
+        p = recycled;
+        recycle = (recycle + 1) % MAX_PARTICLES;
+      } else {
+        p = {
+          dir: new THREE.Vector3(),
+          drift: new THREE.Vector3(),
+          rise: 0,
+          radius: 0,
+          life: 0,
+          maxLife: 1,
+          size: 1,
+          colour: new THREE.Color(),
+          fall: 1,
+        };
+        pool.push(p);
+      }
 
       // Scattered over the brush before it starts moving. `sqrt` of the sample
       // so the disc fills evenly instead of clumping at the centre.
@@ -196,6 +206,8 @@ export function createEffects(sim: Sim): Effects {
 
   /** Shake left to decay, in radii. */
   let shake = 0;
+  /** Next pool slot to recycle once the pool is full; see `emit`. */
+  let recycle = 0;
 
   const spawn = (ev: VerbEventView): void => {
     const cells = Math.max(1, ev.radius);
@@ -286,6 +298,13 @@ export function createEffects(sim: Sim): Effects {
       shake *= Math.exp(-3.4 * dt);
       if (shake < 1e-5) shake = 0;
       return shake;
+    },
+
+    reset(): void {
+      pool.length = 0;
+      recycle = 0;
+      shake = 0;
+      mesh.count = 0;
     },
   };
 }

@@ -75,10 +75,9 @@ let floor = SIEGE_FLOOR.min(w.settlements[slot].progress);
 w.settlements[slot].progress = (w.settlements[slot].progress - damage).max(floor);
 ```
 
-`combat::ticks_to_raze` **already computes against this floor**
-(`combat.rs:290`) — the bound exists in the documentation function and is
-missing from the mechanic. Rename it `ticks_to_subdue`; its only callers are
-tests.
+`combat::ticks_to_raze` computes against the level at which `settlements.rs`
+actually razes today, zero. When this floor lands it gets the floor back and a
+new name, `ticks_to_subdue`; its only callers are tests.
 
 What still razes, unchanged: `settlements.rs:190` — a footprint that is no
 longer flat loses `BUILD_RATE * 2` per tick and dies below zero. Earthquake,

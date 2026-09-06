@@ -190,18 +190,20 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     return mesh;
   };
 
-  // The geometry lives in `models.ts`, by tier: the primitives the game
-  // shipped with at tier 1, trees with trunks and tiers and fronds at tier 2.
-  // Each species has one or two variants, one instanced mesh each, and the
-  // cap is shared between them so a fully grown planet costs the same number
-  // of instances at either tier.
-  const models = floraModels(tier);
+  // Vegetation is a tier-2 feature (§7.3): tier 1 draws no flora, so it builds
+  // none — four instanced meshes with their matrix and colour buffers used to
+  // be allocated and never added to the scene. The geometry lives in
+  // `models.ts`; each species has two variants, one instanced mesh each, and
+  // the cap is shared between them.
+  const models = tier >= 2 ? floraModels(tier) : null;
   const caps = [MAX_CONIFERS, MAX_BROADLEAVES, MAX_PALMS, MAX_SCRUB];
-  const floraCaps: number[][] = models.geometries.map((variants, kind) =>
+  const floraCaps: number[][] = (models?.geometries ?? []).map((variants, kind) =>
     variants.map(() => Math.ceil((caps[kind] ?? 0) / variants.length)),
   );
-  const flora: THREE.InstancedMesh[][] = models.geometries.map((variants, kind) =>
-    variants.map((g, v) => species(g, models.colours[kind] ?? 0xffffff, floraCaps[kind]?.[v] ?? 0)),
+  const flora: THREE.InstancedMesh[][] = (models?.geometries ?? []).map((variants, kind) =>
+    variants.map((g, v) =>
+      species(g, models?.colours[kind] ?? 0xffffff, floraCaps[kind]?.[v] ?? 0),
+    ),
   );
 
   /** Species indices into `flora`, so the rules below read as what they mean. */
@@ -346,7 +348,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   magnets.count = 0;
 
   // Lighting lives in `atmosphere.ts`, with the sun it represents.
-  if (tier >= 2) group.add(...flora.flat());
+  if (models) group.add(...flora.flat());
   group.add(...buildings, walkers, pickupMesh, magnets);
 
   const dummy = new THREE.Object3D();
@@ -701,8 +703,11 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       builtAt = -1;
       rebuiltAt = -1;
       // Walker ids restart from zero with the world; a figure kept from the old
-      // match would interpolate from where its namesake used to stand.
+      // match would interpolate from where its namesake used to stand. The
+      // instance count goes with them, or the old figures stay on screen until
+      // the first `sync` of the new match rebuilds the list.
       figures.clear();
+      walkers.count = 0;
     },
     sync(tick: number, alpha: number): void {
       // The figures move between ticks; nothing else does.

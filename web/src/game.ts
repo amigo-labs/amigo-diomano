@@ -112,7 +112,13 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     pendingCasts.push({ verb, deadline: sim.e.dio_tick_count() + 4 });
   };
 
-  const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, trackCast);
+  // The sim is gated behind the title card: the planet renders idle behind
+  // the overlay, but ticks only start once the player is actually looking —
+  // otherwise the opponent builds a lead against someone reading the
+  // controls.
+  let matchStarted = false;
+
+  const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, trackCast, () => matchStarted);
   const effects = createEffects(sim);
   scene.add(hand.group, effects.group);
   /** High-water mark in the simulation's verb-event ring. */
@@ -143,11 +149,6 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   addEventListener("resize", applySize);
   applySize();
 
-  // The sim is gated behind the title card: the planet renders idle behind
-  // the overlay, but ticks only start once the player is actually looking —
-  // otherwise the opponent builds a lead against someone reading the
-  // controls.
-  let matchStarted = false;
   /** Non-zero once the end card has been handled; mirrors `dio_outcome`. */
   let handledOutcome = 0;
 
@@ -206,6 +207,14 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     // or it waits for the new one to catch up with the old one's clock.
     vegetation.reset();
     audio.reset();
+    // And everything that holds a piece of the old match outright: particles
+    // still fading over ground that no longer exists, sculpt steps banked
+    // against it, and a power menu left open over the end card — which kept
+    // its backdrop, its target cell and the hand's suppression.
+    effects.reset();
+    hand.reset();
+    radial.close();
+    menuWasOpen = false;
     if (introTimer !== null) {
       clearTimeout(introTimer);
       introTimer = null;
@@ -260,6 +269,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   let lastMeshedTick = -1;
   /** The opening tour's pan home, so a restart inside it can cancel it. */
   let introTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Set by `halt`; the tab-visibility handler must not start the loop again. */
+  let halted = false;
 
   /**
    * A trap inside the simulation is a determinism invariant that broke (the wasm
@@ -267,6 +278,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
    * every frame; stop, and say so where `main.ts` puts its epitaph.
    */
   const halt = (err: unknown): void => {
+    halted = true;
     loop.stop();
     matchStarted = false;
     hud.setVisible(false);
@@ -280,7 +292,15 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     }
   };
 
+  /** Last second's rates, read from the console as `diomano.perf`. */
+  const perf = { fps: 0, tps: 0, droppedTicks: 0 };
+
   const loop = createLoop({
+    stats(fps, tps, droppedTicks) {
+      perf.fps = fps;
+      perf.tps = tps;
+      perf.droppedTicks = droppedTicks;
+    },
     update() {
       if (!matchStarted) return;
       hand.beforeTick();
@@ -349,6 +369,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // able to hide one layer at a time is what turns "the planet looks wrong"
   // into a diagnosis.
   (window as unknown as { diomano: unknown }).diomano = {
+    perf,
     sim,
     renderer,
     scene,
@@ -371,7 +392,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     if (document.hidden) {
       loop.stop();
       void audio.suspend();
-    } else {
+    } else if (!halted) {
       loop.start();
       if (matchStarted) void audio.resume();
     }

@@ -21,6 +21,7 @@
 
 import * as THREE from "three";
 import type { Sim } from "../main";
+import { WARNING_RAMP_TICKS } from "../renderer/atmosphere";
 import { pickCell } from "../renderer/planet";
 import { HAND_MATERIAL } from "../verbs";
 import type { Synth } from "./synth";
@@ -124,6 +125,10 @@ export function createAmbience(synth: Synth): Ambience {
     let lavaSum = 0;
     let erodeSum = 0;
     let n = 0;
+    // The window is clamped to the face the look-at cell is on rather than
+    // walked across the seam: near a face edge it reads the edge cells twice
+    // instead of the neighbouring face. For a smoothed ambience level that is
+    // a small bias, and the seam arithmetic lives in `world.rs` alone.
     for (let dy = -16; dy <= 16; dy += 4) {
       for (let dx = -16; dx <= 16; dx += 4) {
         const x = Math.min(sim.N - 1, Math.max(0, cell.x + dx));
@@ -170,7 +175,8 @@ export function createAmbience(synth: Synth): Ambience {
       // pulls out: from the ground the air is still, from orbit it is all there is.
       const phase = sim.e.dio_tide_phase();
       const toImpact = sim.e.dio_ticks_to_impact();
-      const warning = phase === 1 ? 1 - Math.min(toImpact / 300, 1) : phase === 2 ? 1 : 0;
+      const warning =
+        phase === 1 ? 1 - Math.min(toImpact / WARNING_RAMP_TICKS, 1) : phase === 2 ? 1 : 0;
       const distance = camera.position.length();
       const orbit = Math.max(
         0,

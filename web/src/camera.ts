@@ -170,7 +170,10 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
 
   const onPointerUp = (ev: PointerEvent): void => {
     if (ev.button === 0 || ev.type === "pointercancel") sculpting = false;
-    if (ev.button !== 0 || ev.type === "pointercancel") panning = false;
+    // The orbit ends when neither orbiting button is held any more (bit 2 is
+    // the right button, bit 4 the middle one), not on any non-left release:
+    // letting go of the middle button used to end a right-drag in progress.
+    if (ev.type === "pointercancel" || (ev.buttons & 6) === 0) panning = false;
     // Keep the capture while any button is still down: letting go of the left
     // button mid-orbit used to release it, and the rest of the right-drag was
     // lost the moment the pointer left the canvas.

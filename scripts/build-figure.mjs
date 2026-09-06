@@ -225,32 +225,58 @@ function build(parts) {
     }
   }
 
-  for (const part of parts) {
+  for (const [k, part] of parts.entries()) {
+    const from = positions.length;
     if (Array.isArray(part)) box(part[0], part[1], part[2]);
     else prism(...part.prism);
+    // Every part is a closed solid of its own, so each has to be wound outward
+    // by itself. The whole-figure check in `assertWoundOutward` sums them, and
+    // one inside-out thumb would disappear under the torso's volume.
+    const v = signedVolume(positions, from, positions.length);
+    if (!(v > 0)) {
+      throw new Error(`part ${k}: signed volume ${v.toFixed(4)} — wound inward`);
+    }
   }
   return { positions: new Float32Array(positions), normals: new Float32Array(normals) };
+}
+
+/**
+ * Signed volume of the triangles in `positions[from, to)`: the divergence
+ * theorem, one tetrahedron per triangle against the origin. Positive for a
+ * closed, outward-wound surface.
+ */
+function signedVolume(positions, from, to) {
+  let volume = 0;
+  for (let i = from; i + 9 <= to; i += 9) {
+    const a = [positions[i], positions[i + 1], positions[i + 2]];
+    const b = [positions[i + 3], positions[i + 4], positions[i + 5]];
+    const c = [positions[i + 6], positions[i + 7], positions[i + 8]];
+    const n = cross(sub(b, a), sub(c, a));
+    volume += (a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) / 6;
+  }
+  return volume;
 }
 
 /**
  * The mesh must be wound outward: positive signed volume overall, and every
  * stored normal on the same side as the winding it was derived from.
  *
- * A closed, outward-wound triangle list has positive signed volume (the
- * divergence theorem, summed one tetrahedron per triangle). Inside out, the
- * whole figure is culled by a `FrontSide` material and what remains is lit by
- * inward normals — and nothing else in the pipeline notices, which is how both
- * villagers shipped that way once.
+ * Inside out, the whole figure is culled by a `FrontSide` material and what
+ * remains is lit by inward normals — and nothing else in the pipeline notices,
+ * which is how both villagers shipped that way once. `build` already checks
+ * each part's volume on its own; this is the whole-file check at the point
+ * where the bytes are written. The stored-normal comparison can only fire for
+ * the prism caps, whose normals are written by hand — `quad` derives its
+ * normal from the very winding it emits.
  */
 function assertWoundOutward(name, positions, normals) {
-  let volume = 0;
+  const volume = signedVolume(positions, 0, positions.length);
   let disagree = 0;
   for (let i = 0; i + 9 <= positions.length; i += 9) {
     const a = [positions[i], positions[i + 1], positions[i + 2]];
     const b = [positions[i + 3], positions[i + 4], positions[i + 5]];
     const c = [positions[i + 6], positions[i + 7], positions[i + 8]];
     const n = cross(sub(b, a), sub(c, a));
-    volume += (a[0] * n[0] + a[1] * n[1] + a[2] * n[2]) / 6;
     const stored = [normals[i], normals[i + 1], normals[i + 2]];
     if (n[0] * stored[0] + n[1] * stored[1] + n[2] * stored[2] < 0) disagree += 1;
   }

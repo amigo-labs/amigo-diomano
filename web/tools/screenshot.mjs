@@ -25,9 +25,11 @@ const MIME = {
 };
 
 /**
- * Thrown rather than `process.exit`: every `fail` inside `main` sits in a `try`
- * whose `finally` closes the browser and the server, and `process.exit` skips
- * `finally`. The `.catch` at the bottom is where the exit happens.
+ * Thrown rather than `process.exit`. Most `fail` calls sit inside `main`'s
+ * `try`, whose `finally` closes the browser and the server, and `process.exit`
+ * would skip that `finally`; the two before it (no build, no wasm) have nothing
+ * to clean up yet. Either way the `.catch` at the bottom is where the exit
+ * happens.
  */
 class Failure extends Error {}
 

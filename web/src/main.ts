@@ -584,7 +584,12 @@ function boot(): void {
         game.audio.setVolume(v);
         return;
       }
-      pendingVolume = Math.min(Math.max(v, 0), 1);
+      const next = Math.min(Math.max(v, 0), 1);
+      // Raising the level un-mutes, as `audio.setVolume` does once the graph
+      // exists: a slider dragged up on the title card means "I want sound", and
+      // a mute remembered from an earlier visit used to win over it.
+      if (next > pendingVolume) remember(KEY.muted, "0");
+      pendingVolume = next;
       remember(KEY.volume, String(pendingVolume));
     },
   };

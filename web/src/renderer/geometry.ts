@@ -140,6 +140,16 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
     }
     const bufferView = json.bufferViews?.[accessor.bufferView ?? -1];
     if (!bufferView) throw new Error(`GLB ${name} has no buffer view`);
+    // A tightly packed float VEC3 is 12 bytes per element, which is what the
+    // slice below assumes. An interleaved export — positions and normals
+    // sharing one buffer view at a 24-byte stride — would read every other
+    // normal as a position with no error: the same silent scrambling the index
+    // branch below exists to prevent.
+    if (bufferView.byteStride !== undefined && bufferView.byteStride !== 12) {
+      throw new Error(
+        `GLB ${name} is interleaved (byteStride ${bufferView.byteStride}); only tightly packed attributes are read`,
+      );
+    }
     const start = bin.byteOffset + (bufferView.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
     // Copied rather than viewed: the accessor's start need not be four-byte
     // aligned within the file, and `Float32Array` over a misaligned offset
@@ -198,5 +208,5 @@ interface GlbJson {
     count: number;
     type: string;
   }[];
-  bufferViews?: { byteOffset?: number; byteLength: number }[];
+  bufferViews?: { byteOffset?: number; byteLength: number; byteStride?: number }[];
 }

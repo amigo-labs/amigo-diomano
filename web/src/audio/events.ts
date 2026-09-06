@@ -160,14 +160,17 @@ export function createEvents(synth: Synth): Events {
 
       // --- settlements ---------------------------------------------------------
       seen.clear();
+      // The first sync of a match learns the seeded homes silently. Decided once,
+      // before the loop: evaluated per settlement, the first seeded home filled
+      // `known` and every further one in the same sync announced itself.
+      const learning = known.size === 0 && tick <= 1;
       for (const s of sim.settlements()) {
         seen.add(s.slot);
         const at = { face: s.face, x: s.x, y: s.y };
         const own = s.owner === localPlayer;
         const k = known.get(s.slot);
         if (!k) {
-          // The first sync of a match learns the seeded homes silently.
-          if (known.size > 0 || tick > 1) founded(at, own);
+          if (!learning) founded(at, own);
           known.set(s.slot, { tier: s.tier, owner: s.owner, face: s.face, x: s.x, y: s.y });
           continue;
         }

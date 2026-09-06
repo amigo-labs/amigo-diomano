@@ -100,6 +100,11 @@ export interface Radial {
   sync(): void;
   /** True while the menu is on screen (the camera does not care, but tests might). */
   readonly open: boolean;
+  /**
+   * Dismiss the menu if it is open. A restart calls this: the backdrop, the
+   * snapshotted target and the hand's suppression must not outlive the match.
+   */
+  close(): void;
 }
 
 export interface RadialActions {
@@ -281,13 +286,13 @@ export function createRadial(
       return;
     }
     if (backdrop) {
-      mods = modsFromKeys(ev);
+      mods = readModifier(ev);
       renderHub();
     }
   };
   const onKeyUp = (ev: KeyboardEvent): void => {
     if (backdrop) {
-      mods = modsFromKeys(ev);
+      mods = readModifier(ev);
       renderHub();
     }
   };
@@ -327,14 +332,7 @@ export function createRadial(
     get open(): boolean {
       return backdrop !== null;
     },
-  };
-}
 
-/** Modifier bits from a keyboard event's own modifier keys. */
-function modsFromKeys(ev: KeyboardEvent): number {
-  return (
-    (ev.shiftKey ? MOD.THROWN : 0) |
-    (ev.altKey ? MOD.INCREASED : 0) |
-    (ev.ctrlKey ? MOD.EXTREME : 0)
-  );
+    close,
+  };
 }
