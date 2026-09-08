@@ -35,7 +35,8 @@ import type { QualityTier } from "../main";
 import { SKY_GLSL } from "./atmosphere";
 import { readGlb } from "./geometry";
 import { SPECIES, buildingModels, floraModels, propModels } from "./models";
-import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
+import { cellDirectionInto } from "./planet";
+import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 import type { View } from "./view";
 
 /** Vegetation density below which a cell grows a tree. */

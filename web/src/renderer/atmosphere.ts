@@ -46,7 +46,7 @@
  */
 
 import * as THREE from "three";
-import { BASE_RADIUS } from "./planet";
+import { BASE_RADIUS } from "./scale";
 import type { View } from "./view";
 
 /** Tide phases, mirroring `world.rs`. */

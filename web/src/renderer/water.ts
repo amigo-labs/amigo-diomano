@@ -34,7 +34,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { SKY_GLSL } from "./atmosphere";
-import { BASE_RADIUS } from "./planet";
+import { BASE_RADIUS } from "./scale";
 import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
 

@@ -610,6 +610,13 @@ function boot(): void {
       await card.started;
       game.begin();
     } catch (err) {
+      // The card comes down first. `#fallback` draws above it (z-index 20 over
+      // 10) rather than replacing it, so leaving the card standing prints the
+      // epitaph across the controls table — which is exactly how the bundling
+      // fault that once shut the client down was reported to players: a grey
+      // line struck through the middle of the keybindings, reading more like a
+      // rendering glitch than like an error message.
+      ui.hide();
       canvas.style.display = "none";
       fallback.style.display = "grid";
       fallback.textContent =

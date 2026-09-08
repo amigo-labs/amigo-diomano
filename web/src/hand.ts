@@ -19,7 +19,8 @@ import type { OrbitCamera } from "./camera";
 import type { Sim } from "./main";
 import { mergeGeometries, withTransform } from "./renderer/geometry";
 import { taperedBox } from "./renderer/models";
-import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirection, pickCell } from "./renderer/planet";
+import { cellDirection, pickCell } from "./renderer/planet";
+import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./renderer/scale";
 import { MOD, POWER, VERB, readModifier } from "./verbs";
 
 /** Screen pixels of vertical drag per terrace command. */

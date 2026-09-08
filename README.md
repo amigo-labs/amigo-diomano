@@ -13,8 +13,9 @@ carry the values that have since been measured. `PLAN.md` says where the work is
 ## Quick start
 
 ```sh
-just check          # cargo test + clippy + biome + tsc, zero warnings
+just check          # cargo test + clippy + biome + tsc + import cycles, zero warnings
 just dev            # build the wasm, serve the client on :5173
+just verify-boot    # the built client, loaded in a real browser — does it start?
 just verify-cross   # native vs headless browser determinism — the important one
 just perf           # per-pass ms breakdown against the 12 ms budget
 ```
