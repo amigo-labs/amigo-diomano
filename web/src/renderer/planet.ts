@@ -22,13 +22,9 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL, SKY_GLSL } from "./atmosphere";
+import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
-
-/** Planet radius at height 0. Mirrors `mesh::BASE_RADIUS`. */
-export const BASE_RADIUS = 1.0;
-/** Radius change per height unit. Mirrors `mesh::HEIGHT_TO_RADIUS`. */
-export const HEIGHT_TO_RADIUS = 0.00008;
 
 /** Face bases, mirroring `mesh.rs` — needed to invert the projection for picking. */
 const FACE_NORMAL: readonly (readonly [number, number, number])[] = [

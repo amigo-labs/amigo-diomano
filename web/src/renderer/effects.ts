@@ -33,7 +33,8 @@
 import * as THREE from "three";
 import type { Sim, VerbEventView } from "../main";
 import { VERB } from "../verbs";
-import { BASE_RADIUS, HEIGHT_TO_RADIUS, cellDirectionInto } from "./planet";
+import { cellDirectionInto } from "./planet";
+import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 
 /** Live particles. Beyond this the oldest are recycled. */
 const MAX_PARTICLES = 900;

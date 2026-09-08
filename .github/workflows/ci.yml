@@ -59,10 +59,27 @@ jobs:
       - name: tsc
         run: just typecheck
 
+      # Guards the class of fault no type checker can see: a module cycle leaves
+      # the evaluation order to Rollup, and Rollup re-picks it whenever the graph
+      # changes. Cheap, so it runs before the build rather than after it.
+      - name: import cycles
+        run: just verify-cycles
+
       # Needs no credentials, so a malformed deploy config fails here on the pull
       # request rather than on main, where the only symptom is a failed deploy.
       - name: wrangler config (dry run)
         run: just deploy-check
+
+      - name: Install Chromium for the boot check
+        working-directory: web
+        run: bunx playwright install --with-deps chromium
+
+      # The last gap in the gate, closed after a release shipped a bundle that
+      # threw on load: every check above was green because none of them opened
+      # the page. This one does, and it is the only one that runs the artifact
+      # a player receives.
+      - name: verify-boot (the built client, in a real browser)
+        run: just verify-boot
 
   determinism:
     name: determinism

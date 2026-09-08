@@ -20,7 +20,7 @@ default:
 # ---------------------------------------------------------------------------
 
 # Everything CI runs. Zero warnings, all tests green.
-check: test lint fmt-check typecheck
+check: test lint fmt-check typecheck verify-cycles
 
 test:
     cargo test --workspace
@@ -34,6 +34,24 @@ fmt-check:
 
 typecheck:
     cd web && ./node_modules/.bin/tsc --noEmit
+
+# No runtime import cycles in the client.
+#
+# Cheap enough to sit in the fast gate, and it belongs there: a cycle hands the
+# module evaluation order to Rollup, which picks freely and re-picks on every
+# graph change. That is how a green `tsc` shipped a client that died on load
+# with `Cannot access 'ba' before initialization` — the cycle had been there for
+# weeks and an unrelated commit changed the draw.
+verify-cycles:
+    cd web && node tools/verify-cycles.mjs
+
+# Does the built client actually start? The bundle, in a real browser.
+#
+# The only check that runs the shipped artifact. `tsc`, `biome` and the whole
+# determinism suite were green while the front door said "diomano could not
+# start" to every visitor, because none of them ever loaded the page.
+verify-boot: build-web
+    cd web && node tools/verify-boot.mjs
 
 # Format everything in place.
 fmt:

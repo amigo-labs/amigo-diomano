@@ -29,7 +29,7 @@
  */
 
 import * as THREE from "three";
-import { BASE_RADIUS } from "./renderer/planet";
+import { BASE_RADIUS } from "./renderer/scale";
 
 /** Closest approach, as a multiple of the planet radius. */
 const MIN_DISTANCE = BASE_RADIUS * 1.35;
