@@ -71,14 +71,14 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
     // full hand or a champion with nobody to promote exercises nothing, and
     // §6.3's coverage criterion must not be satisfiable by a corpus of no-ops.
     let applied = match cmd.verb {
-        VERB_RAISE => {
-            sculpt(w, player, face, cx, cy, radius, true);
-            true
-        }
-        VERB_LOWER => {
-            sculpt(w, player, face, cx, cy, radius, false);
-            true
-        }
+        // A raise with an empty hand and a lower with a full one move nothing,
+        // and `sculpt` says so. Reporting them as applied fired a verb event,
+        // played the digging sound and retired the client's coaching hint for a
+        // command that did not happen — and it left the *most common verb in
+        // the game* as the only one with no refusal, because the client learns
+        // that a command was refused precisely by its event not arriving.
+        VERB_RAISE => sculpt(w, player, face, cx, cy, radius, true),
+        VERB_LOWER => sculpt(w, player, face, cx, cy, radius, false),
         VERB_MAGNET => {
             // The old leader stops leading. The flag has to come off the walker
             // as well as the magnet: `walkers::remove` drops the magnet wherever
@@ -173,16 +173,27 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
 /// The hand is a pipette, not only a shovel (§4.2): the same two verbs move
 /// earth, water or lava depending on what is held, which is where "carry water
 /// onto lava to make rock at a chosen location" comes from without a new verb.
-fn sculpt(w: &mut World, player: usize, face: usize, cx: i32, cy: i32, radius: i32, raise: bool) {
+///
+/// Returns whether anything moved. An empty hand cannot build and a full one
+/// cannot dig (§4.2), and that refusal has to reach the caller: it is what
+/// keeps the verb event, the census and therefore the client's feedback honest.
+fn sculpt(
+    w: &mut World,
+    player: usize,
+    face: usize,
+    cx: i32,
+    cy: i32,
+    radius: i32,
+    raise: bool,
+) -> bool {
     match w.hand[player].material {
-        HAND_EARTH => {
-            w.deform(player, face, cx, cy, radius, raise);
-        }
+        HAND_EARTH => w.deform(player, face, cx, cy, radius, raise) > 0,
         HAND_WATER => fluid(w, player, face, cx, cy, radius, raise, false),
         _ => fluid(w, player, face, cx, cy, radius, raise, true),
     }
 }
 
+/// Pour or draw water or lava. Returns whether anything moved — see `sculpt`.
 fn fluid(
     w: &mut World,
     player: usize,
@@ -192,8 +203,9 @@ fn fluid(
     radius: i32,
     raise: bool,
     lava: bool,
-) {
+) -> bool {
     let per_cell = i32::from(TERRACE) * 2;
+    let mut moved = false;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             if dx * dx + dy * dy > radius * radius + radius {
@@ -204,7 +216,7 @@ fn fluid(
             if raise {
                 let take = per_cell.min(i32::from(w.hand[player].amount));
                 if take <= 0 {
-                    return;
+                    return moved;
                 }
                 if lava {
                     let room = 255 - i32::from(w.lava[c]);
@@ -214,6 +226,7 @@ fn fluid(
                     }
                     w.lava[c] += take as u8;
                     w.hand[player].amount -= take as u16;
+                    moved = true;
                 } else {
                     // Charge the hand only for what the cell can hold, as the
                     // lava branch does: saturating the depth while debiting the
@@ -225,11 +238,12 @@ fn fluid(
                     }
                     w.water[c] += take as i16;
                     w.hand[player].amount -= take as u16;
+                    moved = true;
                 }
             } else {
                 let room = i32::from(HAND_CAPACITY) - i32::from(w.hand[player].amount);
                 if room <= 0 {
-                    return;
+                    return moved;
                 }
                 let have = if lava { i32::from(w.lava[c]) } else { i32::from(w.water[c]) };
                 let take = per_cell.min(room).min(have);
@@ -242,9 +256,11 @@ fn fluid(
                     w.water[c] -= take as i16;
                 }
                 w.hand[player].amount += take as u16;
+                moved = true;
             }
         }
     }
+    moved
 }
 
 /// Lowers and dents terrain (§5.2).
@@ -925,6 +941,61 @@ enabled = true
         );
         assert_eq!(w.state_hash(), before, "an unaffordable power changed the world");
         assert_eq!(w.mana[0], 0, "an unaffordable power still charged mana");
+    }
+
+    #[test]
+    fn a_sculpt_that_moves_nothing_is_not_reported_as_applied() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        w.init(&cfg);
+
+        // An empty hand cannot build (§4.2). The client learns that a command
+        // was refused by its verb event never arriving, so a raise that moves
+        // no earth must leave the ring and the census untouched — otherwise the
+        // most common verb in the game is the one with no refusal at all.
+        w.hand[0].amount = 0;
+        let events = w.census.verb_events_written;
+        let counted = w.census.verb_applied[VERB_RAISE as usize];
+        let before = w.state_hash();
+        let raise =
+            Command { tick: 0, x: 20, y: 20, player: 0, verb: VERB_RAISE, face: 4, modifier: 0 };
+        apply(&mut w, 0, &raise);
+        assert_eq!(w.state_hash(), before, "an empty hand raised land");
+        assert_eq!(
+            w.census.verb_events_written, events,
+            "a raise with an empty hand fired a verb event"
+        );
+        assert_eq!(
+            w.census.verb_applied[VERB_RAISE as usize], counted,
+            "a raise with an empty hand was counted"
+        );
+
+        // With something to place it is applied, and says so.
+        w.hand[0].amount = HAND_CAPACITY;
+        apply(&mut w, 0, &raise);
+        assert_ne!(w.state_hash(), before, "a full hand failed to raise land");
+        assert_eq!(
+            w.census.verb_events_written,
+            events + 1,
+            "an applied raise fired no verb event"
+        );
+
+        // And the mirror case: a full hand cannot dig. Refilled first — the
+        // raise above spent part of what it was holding.
+        w.hand[0].amount = HAND_CAPACITY;
+        let events = w.census.verb_events_written;
+        let before = w.state_hash();
+        apply(
+            &mut w,
+            0,
+            &Command { tick: 0, x: 20, y: 20, player: 0, verb: VERB_LOWER, face: 4, modifier: 0 },
+        );
+        assert_eq!(w.state_hash(), before, "a full hand dug");
+        assert_eq!(
+            w.census.verb_events_written, events,
+            "a lower with a full hand fired a verb event"
+        );
     }
 
     #[test]

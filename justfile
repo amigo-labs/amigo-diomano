@@ -126,6 +126,15 @@ deploy: build-web
 verify-cross: wasm
     cd web && node tools/verify-cross.mjs
 
+# Do the controls do what the control list says?
+#
+# The one part of the client no other check reaches: nothing else in the gate
+# presses a key, and the input layer is where this project's regressions have
+# actually come from. Drives the built client in a real browser and asserts on
+# the simulation's state. Minutes on a software renderer, hence its own recipe.
+verify-input: build-web
+    cd web && node tools/verify-input.mjs
+
 # Two simulations through the lockstep layer over a lossy, latent link.
 #
 # The Phase 7 DoD's network conditions — 120 ms RTT, 2% loss — without a network.

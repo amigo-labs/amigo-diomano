@@ -628,6 +628,71 @@ Two problems reported from play, both fixed at the root:
       bar to manage, and it hides for the title and end cards — what §8 was
       protecting is a screen that is mostly planet and verbs you feel rather
       than read, and that is intact
+- [x] **The keyboard does the verbs; the mouse only points** (user decision).
+      Raise/lower as a left-drag made vertical travel the *amount* and the
+      pointer the *location*, at the same time: one terrace was 14 px against a
+      cell about 20 px wide at the default zoom, so three terraces smeared over
+      two cells — a hill came out a ridge. It also needed a 5 px / 400 ms test
+      to tell a sculpt from a magnet, and that test is what once made nearly
+      every stroke end by teleporting the population.
+
+      `R` and `F` now raise and lower the cell under the hand, paced at
+      `HOLD_TICKS = 2` (15 steps a second): a tap is exactly one terrace, a hold
+      is a hill, and moving the mouse while holding is the deliberate way to
+      draw a ridge. `W A S D` / arrows orbit and `Q` / `E` zoom, so a hand
+      already on the keyboard need not go back to the mouse; the right-drag
+      orbit and the wheel are untouched. `Space` opens the power menu at the
+      pointer. New `keys.ts` owns the held-key set, releases everything on
+      `blur` (alt-tab with `R` held must not keep digging) and drops
+      Ctrl/Cmd/Alt chords — with verbs on letters, `Ctrl+R` would be an extreme
+      raise *and* a page reload, which is why alt and ctrl are no longer §5.3
+      modifiers at all: shift keeps *thrown* and `B` cycles the sizes.
+
+      The drag machinery went with it: `pendingSteps`, the post-release drain,
+      `dragOriginY`, the click test's time limit and the camera's
+      wheel-lock-while-sculpting. Four defects found in the same read are fixed
+      here rather than left in a control scheme nobody uses any more:
+      - **the intro tour captured the camera.** `camera` ends a *running* tour
+        on any input, but the two-second wait before the pan home was a
+        `setTimeout` only `restart` cleared, so a player who orbited immediately
+        lost the camera two seconds in and every drag until the tour's 4.5 s
+        were up went nowhere
+      - **horizontal drag inverted past the pole.** Screen-right is always
+        `east`, but the eye moves along `east * cos(pitch)`, so beyond the pole
+        the planet ran *against* the mouse. `yawSign` corrects the drag and the
+        keys alike; pitch needs no such fix, `d(eye)/d(pitch)` being `northish`
+        at every pitch
+      - **a sculpt that moved nothing reported itself as applied.** `sculpt`
+        discarded `deform`'s return, so a raise with an empty hand fired a verb
+        event, played the digging sound and retired the coaching hint — leaving
+        the most common verb in the game as the only one with no refusal, since
+        the client learns of a refusal precisely by the event *not* arriving.
+        `sculpt` and `fluid` return whether anything moved
+        (`a_sculpt_that_moves_nothing_is_not_reported_as_applied`)
+      - **`1`/`2`/`3` said nothing either way.** The switch is now a tracked
+        cast, so a full hand's silent refusal reaches the palm as its red flash,
+        and the footprint ring carries the carried material — the fill is a
+        volume, so with an empty hand the material a player just chose was
+        invisible until they had dug with it
+      Plus: a right click on a menu slice closes the menu, as it does everywhere
+      else in it, instead of doing nothing at all.
+
+      New `just verify-input` (`web/tools/verify-input.mjs`) is the evidence:
+      seventeen controls driven in a real browser against the *built* client,
+      asserting on the simulation afterwards — the hand's own target cell moved,
+      the verb ring did or did not grow, the magnet is active, the refusal fired
+      exactly once. It is the one part of the client no other check reaches, and
+      every input regression this project has had was found by playing rather
+      than by CI. Every wait is on `dio_tick_count`, not the wall clock: headless
+      Chromium renders at a few frames a second through SwiftShader and drops
+      the ticks it cannot run, so a `waitForTimeout` elapses with the simulation
+      having not advanced — which reads as "the key did nothing" for a control
+      that works. Minutes on a software renderer, so it is its own recipe rather
+      than part of `just check`.
+
+      **Accepted cost:** touch can no longer sculpt without a keyboard. It could
+      never orbit (a touch pointer is button 0 only), so it was not playable
+      before either; `touch-action: none` stays for whoever wires up gestures
 - [ ] **KNOWN GAP: "what just happened, over there?"** still unanswered.
       Screen-edge DOM markers for applied verbs were built and then withdrawn,
       because they could not be shown to work: the element sat in the document

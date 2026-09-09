@@ -46,16 +46,26 @@ indicator in one. It visibly fills as you dig and empties as you build, because
 material is conserved and a full hand cannot dig. Powers are cast from a
 transient radial menu on right-click.
 
+**The mouse points, the keys act.** Raise/lower used to be a left-drag, where
+vertical travel decided how much and the pointer decided where — both at once,
+so a hill came out a ridge. Now the pointer only aims the hand.
+
 | Input | Verb |
 |---|---|
-| left drag up / down | raise / lower land |
+| `R` / `F` | raise / lower land under the hand; hold to keep going |
 | left click | place the papal magnet — the only command in the game |
-| `1` `2` `3` | carry earth / water / lava |
+| right click or `Space` | open the power menu: magnet, earthquake, volcano, flood, champion, armageddon |
+| `W` `A` `S` `D` or arrows | orbit the planet |
+| `Q` / `E`, or the wheel | closer / further |
 | middle or right drag | orbit the planet |
-| right click | open the power menu: magnet, earthquake, volcano, flood, champion, armageddon |
-| shift / alt / ctrl | thrown / increased / extreme |
+| `1` `2` `3` | carry earth / water / lava (empty hand only) |
+| shift | thrown: a wider footprint at the impact point |
+| `B` | brush size: normal → increased → extreme |
 | `+` `=` `-` `M` | louder / quieter / mute |
 | `F1` or `?` | show or hide the full control list |
+
+Alt and ctrl are not modifiers: with verbs on letter keys, `Ctrl+R` would be an
+extreme raise *and* a page reload.
 
 The two peoples do **not** start connected by land. If they are on separate
 islands, raising the ground between them is the player's job.

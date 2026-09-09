@@ -2,8 +2,10 @@
  * The radial power menu. HANDOFF §8.
  *
  * A right-*click* on the planet (a press that neither strays nor lingers —
- * right-*drag* stays the camera orbit) opens a ring of the castable powers
- * around the cursor. Clicking a power casts it at the cell that was under the
+ * right-*drag* stays the camera orbit) or the space bar opens a ring of the
+ * castable powers around the cursor. Space is there because every other verb is
+ * a key now (`hand.ts`): a player sculpting with `R` and turning with `A`/`D`
+ * should be able to reach the powers without changing hands. Clicking a power casts it at the cell that was under the
  * cursor when the menu opened: the menu covers that ground, so the target is
  * snapshotted at open time rather than re-picked under the slices. Flood,
  * champion and armageddon ignore the target in the sim anyway.
@@ -23,8 +25,9 @@
  */
 
 import type { Hand, Target } from "./hand";
+import { CODE, type Keys } from "./keys";
 import type { Sim } from "./main";
-import { MOD, POWER, VERB, readModifier } from "./verbs";
+import { MOD, POWER, VERB } from "./verbs";
 
 /** The same click test the left button uses (hand.ts): slop and patience. */
 const CLICK_SLOP_SQ = 5 * 5;
@@ -119,6 +122,7 @@ export function createRadial(
   sim: Sim,
   player: number,
   hand: Hand,
+  keys: Keys,
   actions: RadialActions,
 ): Radial {
   let backdrop: HTMLDivElement | null = null;
@@ -132,6 +136,14 @@ export function createRadial(
   let hovered: Entry | null = null;
   /** Mana as last written into the hub, so `sync` only rewrites when it moves. */
   let hubMana = -1;
+
+  /**
+   * Where the pointer is, so the space bar can open the ring there. Starts at
+   * the centre of the screen: a space press before the mouse has ever moved
+   * should open the menu where the player is looking, not in a corner.
+   */
+  let pointerX = innerWidth / 2;
+  let pointerY = innerHeight / 2;
 
   // Right-button click detection, alongside the camera's right-drag orbit.
   let downX = 0;
@@ -171,7 +183,7 @@ export function createRadial(
    */
   const renderHub = (): void => {
     if (!hub) return;
-    const blurb = hovered ? hovered.blurb : "Kraft wählen — Umschalt / Alt / Strg wandeln sie ab.";
+    const blurb = hovered ? hovered.blurb : "Kraft wählen — Umschalt wirft, B wählt die Größe.";
     const line = modLine();
     hubMana = sim.e.dio_mana(player);
     hub.innerHTML =
@@ -204,7 +216,7 @@ export function createRadial(
     el.innerHTML = html;
   };
 
-  const openAt = (x: number, y: number, ev: MouseEvent): void => {
+  const openAt = (x: number, y: number): void => {
     const at = hand.target();
     if (!at) {
       // A menu opened over empty space would cast into nothing; same diegetic
@@ -213,7 +225,7 @@ export function createRadial(
       return;
     }
     target = at;
-    mods = readModifier(ev);
+    mods = keys.modifier();
     // The target cell is snapshotted above, so the hand has nothing left to
     // show — and it is the brightest thing on screen, sitting exactly where the
     // labels are about to go.
@@ -248,6 +260,14 @@ export function createRadial(
       });
       el.addEventListener("pointerdown", (pe) => {
         pe.stopPropagation();
+        // A right click closes, as it does on the backdrop and everywhere else
+        // in the menu. It used to do nothing at all on a slice, so the one
+        // gesture that closes the menu failed on the 40% of the screen the
+        // slices cover.
+        if (pe.button === 2) {
+          close();
+          return;
+        }
         if (pe.button !== 0) return;
         if (!affordable(entry)) {
           actions.refuse();
@@ -258,7 +278,7 @@ export function createRadial(
           renderSlice(el, entry);
           return;
         }
-        if (target) actions.cast(entry.verb, readModifier(pe), target);
+        if (target) actions.cast(entry.verb, keys.modifier(), target);
         close();
       });
       backdrop?.append(el);
@@ -280,21 +300,26 @@ export function createRadial(
     document.body.append(backdrop);
   };
 
+  /** Re-read the modifiers and rewrite the hub only if they moved. */
+  const refreshMods = (): void => {
+    const next = keys.modifier();
+    if (next === mods) return;
+    mods = next;
+    renderHub();
+  };
+
   const onKeyDown = (ev: KeyboardEvent): void => {
-    if (backdrop && ev.key === "Escape") {
+    if (!backdrop) return;
+    if (ev.key === "Escape") {
       close();
       return;
     }
-    if (backdrop) {
-      mods = readModifier(ev);
-      renderHub();
-    }
+    // Shift and `B` change what a cast would do while the menu is open, and the
+    // hub line has to say so without waiting for a mouse move.
+    refreshMods();
   };
-  const onKeyUp = (ev: KeyboardEvent): void => {
-    if (backdrop) {
-      mods = readModifier(ev);
-      renderHub();
-    }
+  const onKeyUp = (): void => {
+    if (backdrop) refreshMods();
   };
 
   return {
@@ -313,7 +338,21 @@ export function createRadial(
         const dy = ev.clientY - downY;
         const isClick =
           dx * dx + dy * dy < CLICK_SLOP_SQ && performance.now() - downT < CLICK_MAX_MS;
-        if (isClick) openAt(ev.clientX, ev.clientY, ev);
+        if (isClick) openAt(ev.clientX, ev.clientY);
+      });
+      // Space opens the menu at the pointer — the keyboard route to the powers,
+      // for a hand already on `R` and `A`/`D`. A second press closes it, so the
+      // key is a toggle rather than a way to stack backdrops.
+      keys.onPress(CODE.menu, () => {
+        if (backdrop) {
+          close();
+          return;
+        }
+        openAt(pointerX, pointerY);
+      });
+      canvas.addEventListener("pointermove", (ev) => {
+        pointerX = ev.clientX;
+        pointerY = ev.clientY;
       });
       addEventListener("keydown", onKeyDown);
       addEventListener("keyup", onKeyUp);
