@@ -18,13 +18,23 @@
  * event ring did or did not grow, the magnet is active, the camera is somewhere
  * else. It asserts on what the game did, never on a screenshot.
  *
- * # Every wait is on the tick counter
+ * # Every wait is on observed state, never on the wall clock
  *
  * Headless Chromium renders through SwiftShader at a few frames a second, and
  * the fixed-step loop drops ticks it cannot run. A `waitForTimeout` can
  * therefore elapse with the simulation not having advanced at all, which reads
- * as "the key did nothing" for a control that works perfectly. So `ticks(n)`
- * waits for `dio_tick_count` to advance and every hold is measured in ticks.
+ * as "the key did nothing" for a control that works perfectly.
+ *
+ * So there are two waits and no sleeps. `ticks(n)` waits for `dio_tick_count`
+ * to advance, and every hold is measured in ticks — that is the right
+ * instrument for anything the simulation does. `becomes` waits for a value the
+ * *client* owns to reach what is expected, which is the right one for the
+ * radial menu: the menu is not simulation state, it opens on the keypress
+ * itself, so a tick wait would be waiting for the wrong thing and a fixed
+ * sleep would be a race on a slow runner. It reports a timeout as a failed
+ * check rather than throwing, so one stuck control does not cost the report on
+ * the other sixteen.
+ *
  * For the same reason a reading that must be simultaneous with an event — the
  * hand's amount at the instant of a blur — is taken inside the same
  * `page.evaluate` as the event, not in the round trip after it.
@@ -154,6 +164,36 @@ async function main() {
       await page.waitForFunction((t) => window.diomano.sim.e.dio_tick_count() >= t, from + n, {
         timeout: 90000,
       });
+    };
+    /**
+     * Wait for a value the client owns to reach `expected`.
+     *
+     * Returns whether it got there inside the budget, so a control that never
+     * responds is one failed line in the report rather than a thrown error
+     * that loses every check after it.
+     */
+    const becomes = async (fn, expected, budgetMs = 15_000) => {
+      try {
+        await page.waitForFunction(fn, expected, { timeout: budgetMs, polling: 50 });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    /**
+     * Leave the radial menu closed, whatever state it is in.
+     *
+     * The menu suppresses the hand while it is open, so a backdrop left
+     * standing makes every later check fail for a reason that has nothing to
+     * do with the control it names. Escape first, then a click on the backdrop
+     * as the fallback; the return value says whether it worked.
+     */
+    const ensureMenuClosed = async () => {
+      if (!(await read(() => window.diomano.radial.open))) return true;
+      await page.keyboard.press("Escape");
+      if (await becomes((want) => window.diomano.radial.open === want, false)) return true;
+      await page.mouse.click(8, 8);
+      return becomes((want) => window.diomano.radial.open === want, false);
     };
     /** Hold a key across `n` ticks of simulation. */
     const hold = async (key, n) => {
@@ -321,29 +361,51 @@ async function main() {
     await page.mouse.move(CENTRE.x, CENTRE.y);
     await ticks(2);
     await page.keyboard.press("Space");
-    await page.waitForTimeout(400);
-    const opened = await read(() => window.diomano.radial.open);
+    const opened = await becomes((want) => window.diomano.radial.open === want, true);
     await page.keyboard.press("Space");
-    await page.waitForTimeout(400);
-    const closed = await read(() => window.diomano.radial.open);
-    check("Space toggles the power menu", opened && !closed, `open ${opened}, then ${closed}`);
+    const closed = await becomes((want) => window.diomano.radial.open === want, false);
+    check(
+      "Space toggles the power menu",
+      opened && closed,
+      opened
+        ? closed
+          ? ""
+          : "a second press did not close it"
+        : "the first press did not open it",
+    );
 
     // --- 8. right click on a slice closes ----------------------------------
     await page.keyboard.press("Space");
-    await page.waitForTimeout(400);
-    const slice = await page.$(".radial-slice");
+    // Wait on the slices being in the document, not on Playwright's notion of
+    // an element being *visible*: `waitForSelector` defaults to visibility, and
+    // a slice that is present and painted can still fail that check while the
+    // backdrop is fading, which reads as "the menu has no slices".
+    const sliceCount = () => read(() => document.querySelectorAll(".radial-slice").length);
+    const menuUp = await becomes(
+      (want) => document.querySelectorAll(".radial-slice").length > want,
+      0,
+    );
+    const slice = menuUp ? await page.$(".radial-slice") : null;
     if (slice) {
       const box = await slice.boundingBox();
       await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { button: "right" });
-      await page.waitForTimeout(400);
+      const dismissed = await becomes((want) => window.diomano.radial.open === want, false);
       check(
         "a right click on a slice closes the menu",
-        !(await read(() => window.diomano.radial.open)),
-        "",
+        dismissed,
+        dismissed ? "" : "the menu stayed open",
       );
     } else {
-      check("a right click on a slice closes the menu", false, "no slice rendered");
+      check(
+        "a right click on a slice closes the menu",
+        false,
+        `menu open: ${await read(() => window.diomano.radial.open)}, slices: ${await sliceCount()}`,
+      );
     }
+    // Whatever happened above, the menu must not be left standing: it suppresses
+    // the hand, so an open backdrop silently fails every check after it — which
+    // is how one stuck control once cost three lines of this report.
+    await ensureMenuClosed();
 
     // --- 9. B cycles the brush, and the ring grows with it -----------------
     const ringScale = () =>

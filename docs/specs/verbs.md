@@ -129,7 +129,7 @@ communicated diegetically:
 | menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
 | shift | thrown |
 | `B` | cycle the brush: normal → increased → extreme |
-| `1` `2` `3` | switch the hand to earth / water / lava |
+| `1` `2` `3` | switch the hand to earth / water / lava (empty hand only) |
 | `W A S D` / arrows, `Q` / `E` | orbit, zoom |
 | middle drag, wheel | orbit, zoom |
 
