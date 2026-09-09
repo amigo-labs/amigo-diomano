@@ -503,8 +503,9 @@ Multiply the verb set without adding verbs:
 
 - **Thrown vs. poured** — thrown: large radius at the impact point. Poured: same
   effect, small radius directly under the hand.
-- **Increased / extreme variants** — same verb scaled, at proportionally higher
-  cost, selected with a held modifier key (shift / alt / ctrl, §8).
+- **Increased / extreme variants** — same verb scaled. Thrown is a held modifier
+  (shift); the two sizes are cycled with `B` rather than held, because the verbs
+  themselves are letter keys now and `Ctrl+R` cannot be one of them (§8).
 - **One-shot pickups** — free single-use powers lying on the terrain. Contested map
   objects; excellent in a duel.
 
@@ -851,18 +852,21 @@ numbers in this document, replacing the `[START]` values.
   alphabet it described was retired by user decision in favour of a menu.)
 - Mana, held matter and influence reach are all communicated diegetically.
 
-**Controls.** The right button carries both camera and casting: a drag orbits,
-a click (under 5 px of travel, under 400 ms — the same test the left button
-uses for the magnet) opens the radial power menu at the cursor.
+**Controls.** The mouse points and the keys act (user decision; see
+`docs/specs/verbs.md` for why the raise/lower drag was retired). The right
+button carries both camera and casting: a drag orbits, a click (under 5 px of
+travel, under 400 ms) opens the radial power menu at the cursor.
 
 | Input | Verb |
 |---|---|
-| direct drag (left) | raise / lower land |
+| `R` / `F` (hold) | raise / lower land under the hand |
 | click (left) | place papal magnet |
 | drag (right) | orbit the planet |
-| click (right) | open the power menu |
+| click (right), or `Space` | open the power menu |
 | menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
-| shift / alt / ctrl | thrown / increased / extreme variant |
+| shift | thrown variant |
+| `B` | cycle increased / extreme |
+| `W A S D` / arrows, `Q` / `E` | orbit, zoom |
 
 The menu snapshots the cell under the cursor when it opens and casts there;
 flood, champion and armageddon ignore the target in the sim anyway. Slices

@@ -122,18 +122,39 @@ communicated diegetically:
 
 | Input | Verb |
 |---|---|
-| left drag up / down | raise / lower land |
-| left click (no drag) | place papal magnet |
+| `R` / `F` (hold) | raise / lower land under the hand |
+| left click | place papal magnet |
 | right drag | orbit the planet |
-| right click (no drag) | open the radial power menu |
+| right click (no drag), or `Space` | open the radial power menu |
 | menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
-| shift / alt / ctrl | thrown / increased / extreme |
+| shift | thrown |
+| `B` | cycle the brush: normal → increased → extreme |
 | `1` `2` `3` | switch the hand to earth / water / lava |
-| middle drag | orbit the planet |
+| `W A S D` / arrows, `Q` / `E` | orbit, zoom |
+| middle drag, wheel | orbit, zoom |
 
 Raise/lower deliberately has no menu entry — it is the constant verb and must
-stay a frictionless drag. Armageddon deliberately has the most friction; it is
+stay frictionless. Armageddon deliberately has the most friction; it is
 irreversible, so its slice demands a second, confirming click.
+
+**Why keys and not a drag.** The left-drag form made vertical travel the amount
+*and* the pointer the location, simultaneously. One terrace was 14 screen pixels
+against a cell about 20 wide at the default zoom, so three terraces smeared
+across two cells: you asked for a hill and got a ridge. It also needed a
+5 px / 400 ms test to tell a sculpt from a magnet placement, and that test —
+comparing a *residue* of the step accumulator — is what once made nearly every
+stroke end by teleporting the population.
+
+With `R` / `F` the hand works the cell it is pointed at, paced by the tick
+(`HOLD_TICKS = 2`, so 15 steps a second): a tap is exactly one terrace, a hold
+is a hill, and moving the mouse while holding is the deliberate way to draw a
+ridge. The left button is then the magnet with nothing to disambiguate.
+
+Alt and ctrl are no longer modifiers. With verbs on letter keys, `Ctrl+R` would
+be an extreme raise and a page reload; `Ctrl+F` an extreme lower and the find
+bar. Shift keeps *thrown* (the browser wants nothing with it) and the size
+modifiers moved onto `B`, which cycles them — the footprint ring already
+previews what they do, so the cycle needs no readout of its own.
 
 ### The power menu
 

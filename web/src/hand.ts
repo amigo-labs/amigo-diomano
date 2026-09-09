@@ -8,36 +8,53 @@
  * fills and empties* as matter moves, which is the diegetic budget display §4.2
  * asks for, and it glows brighter with mana.
  *
- * Raise/lower deliberately has no gesture (§8): it is the constant verb, where
- * roughly 90% of playtime goes, and it must stay frictionless. Left-drag up
- * raises, left-drag down lowers, and the command is emitted every tick the
- * button is held — so the response is continuous rather than per-click.
+ * # The mouse points, the keys act
+ *
+ * Raise/lower is the constant verb — roughly 90% of playtime — and it must stay
+ * frictionless (§8). It used to be a left-drag, and a drag is the wrong shape
+ * for it: vertical travel decided *how much* while the pointer decided *where*,
+ * both at once. One terrace was 14 px and a cell is about 20 at the default
+ * zoom, so three terraces smeared across two cells and a hill came out a ridge.
+ *
+ * Now the pointer only aims the hand and `R` / `F` do the work under it, paced
+ * by the simulation's clock: a tap is exactly one terrace, a hold is a hill,
+ * and moving the mouse *while* holding is the deliberate way to draw a ridge.
+ * The left button is therefore free for the magnet with no click-versus-drag
+ * test to get wrong — that test, comparing a residue of the drag accumulator,
+ * is what once made nearly every stroke end by teleporting the population.
  */
 
 import * as THREE from "three";
 import type { OrbitCamera } from "./camera";
+import { CODE, type Keys } from "./keys";
 import type { Sim } from "./main";
 import { mergeGeometries, withTransform } from "./renderer/geometry";
 import { taperedBox } from "./renderer/models";
 import { cellDirection, pickCell } from "./renderer/planet";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./renderer/scale";
-import { MOD, POWER, VERB, readModifier } from "./verbs";
-
-/** Screen pixels of vertical drag per terrace command. */
-const DRAG_PIXELS_PER_STEP = 14;
+import { MOD, POWER, VERB } from "./verbs";
 
 /**
- * A press that moved less than this (squared pixels) and released within
- * `CLICK_MAX_MS` is a click. Distance from the *down point*, not a residue of
- * the step accumulator: the old test compared against what was left of
- * `dragOriginY` after steps were consumed, so nearly every sculpting drag
- * ended by accidentally teleporting the population.
+ * Ticks between terrace steps while `R` or `F` is held: 15 steps a second
+ * against the 30 Hz simulation.
+ *
+ * Fast enough that a hold reads as a continuous motion, slow enough that a
+ * player who wanted two terraces does not get four. There is no press-repeat
+ * delay in front of it — the first step is immediate, so a tap and the start of
+ * a hold feel identical.
+ */
+const HOLD_TICKS = 2;
+
+/**
+ * A left press that strays less than this (squared pixels) still places the
+ * magnet.
+ *
+ * The button no longer does anything else, so this is not a click-versus-drag
+ * test any more — it is only the guard against a hand shifting on the mouse
+ * during a two-handed orbit. It therefore has no time limit: holding the button
+ * still means the magnet, however long you take about it.
  */
 const CLICK_SLOP_SQ = 5 * 5;
-const CLICK_MAX_MS = 400;
-
-/** Cap on queued terrace steps: a wild flick drains for at most ~0.8 s. */
-const MAX_PENDING_STEPS = 24;
 
 export interface Target {
   face: number;
@@ -67,9 +84,9 @@ export interface Hand {
    */
   setSuppressed(on: boolean): void;
   /**
-   * Forget the match in progress: queued sculpt steps, the cell they were
-   * draining onto and the refusal flash. A restart re-initialises the world in
-   * place, and steps banked against the old world would land on the new one.
+   * Forget the match in progress: held keys, the pending tap and the refusal
+   * flash. A restart re-initialises the world in place, and a key still down
+   * across it would keep sculpting the new world from the old one's press.
    */
   reset(): void;
 }
@@ -79,12 +96,20 @@ export function createHand(
   camera: OrbitCamera,
   canvas: HTMLCanvasElement,
   player: number,
-  /** Called for casts that cost mana (the magnet), so the feedback tracker sees them. */
+  keys: Keys,
+  /**
+   * Called for every command pushed from here, so the feedback tracker can
+   * confirm it against the simulation's applied-verb ring — or refuse it.
+   *
+   * Sculpt steps report only their *first* one per keypress: the simulation
+   * refuses an empty hand raise silently, and one red flash per press says so
+   * where a flash every other tick would strobe.
+   */
   onCast?: (verb: number) => void,
   /**
-   * Whether the match is running. The material keys are inert until it is:
-   * `1`/`2`/`3` pressed on the title card would otherwise queue a hand switch
-   * that fires at the match's first tick.
+   * Whether the match is running. Every key here is inert until it is: `R` or
+   * `1` pressed on the title card would otherwise queue work that fires at the
+   * match's first tick.
    */
   active: () => boolean = () => true,
 ): Hand {
@@ -287,27 +312,37 @@ export function createHand(
     return dearest > 0 ? dearest : 500;
   })();
 
-  let dragging = false;
-  let dragOriginY = 0;
-  /** Accumulated steps not yet emitted. Positive raises, negative lowers. */
-  let pendingSteps = 0;
-  let modifier = 0;
-  /** Where the press started and how far it ever strayed — the click test. */
+  /**
+   * One step owed to a keypress, so a tap shorter than a tick is never lost.
+   *
+   * A press at 60 fps can arrive and be released between two ticks: the held
+   * check in `beforeTick` would find nothing down and the terrace the player
+   * asked for would simply not happen. `+1` raises, `-1` lowers, and it is
+   * consumed by the next tick that has a target.
+   */
+  let pendingTap = 0;
+  /** Ticks until the held key may take its next step. */
+  let holdCooldown = 0;
+  /** Whether the current sculpt run has already asked for its one refusal. */
+  let reported = false;
+  /** Where the left press started — see `CLICK_SLOP_SQ`. */
   let downX = 0;
   let downY = 0;
-  let downT = 0;
+  let pressing = false;
   let movedSq = 0;
-  /** Where queued steps keep landing after the button is released. */
-  let drainTarget: Target | null = null;
-  /**
-   * Modifier frozen at release for the post-release drain, so a key let go
-   * afterwards does not change what the flick meant.
-   */
-  let drainModifier = 0;
   /** `performance.now()` until which the palm shows the refusal flash. */
   let flashUntil = 0;
   /** Set while the radial menu is open; see `setSuppressed`. */
   let suppressed = false;
+
+  /** Whether a sculpt key is down, and which way it goes. */
+  const sculptDirection = (): number => {
+    const raise = keys.held(CODE.raise);
+    const lower = keys.held(CODE.lower);
+    // Both down cancels rather than picking one: the player is between keys.
+    if (raise === lower) return 0;
+    return raise ? 1 : -1;
+  };
 
   /**
    * Which cell the pointer is over.
@@ -352,83 +387,36 @@ export function createHand(
   canvas.addEventListener("pointermove", (ev) => {
     pointer.x = (ev.clientX / innerWidth) * 2 - 1;
     pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
-    // Read on every move, not only mid-drag: the footprint ring previews the
-    // modifiers while the hand merely hovers.
-    modifier = readModifier(ev);
     updateTarget();
-    if (dragging) {
+    if (pressing) {
       const dx = ev.clientX - downX;
-      const dyTotal = ev.clientY - downY;
-      movedSq = Math.max(movedSq, dx * dx + dyTotal * dyTotal);
-      if (!current) {
-        // Off the planet nothing is sculpted, and nothing is banked either: a
-        // drag that swung past the horizon used to pile up steps that then all
-        // landed on whichever cell the pointer came back over.
-        dragOriginY = ev.clientY;
-        return;
-      }
-      // Vertical drag distance decides how much and which way. Upward raises,
-      // which is the only mapping anybody guesses correctly.
-      const dy = dragOriginY - ev.clientY;
-      const steps = Math.trunc(dy / DRAG_PIXELS_PER_STEP);
-      if (steps !== 0) {
-        pendingSteps = Math.max(
-          -MAX_PENDING_STEPS,
-          Math.min(MAX_PENDING_STEPS, pendingSteps + steps),
-        );
-        dragOriginY -= steps * DRAG_PIXELS_PER_STEP;
-      }
+      const dy = ev.clientY - downY;
+      movedSq = Math.max(movedSq, dx * dx + dy * dy);
     }
   });
 
-  // Modifier keys pressed or released with the mouse at rest: neither the ring
-  // nor a drag in progress should have to wait for the next `pointermove` to
-  // notice. Every keyboard event carries the current flags, so any key will do.
-  const onModifierKey = (ev: KeyboardEvent): void => {
-    modifier = readModifier(ev);
-  };
-  addEventListener("keydown", onModifierKey);
-  addEventListener("keyup", onModifierKey);
-
   canvas.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
-    dragging = true;
-    dragOriginY = ev.clientY;
+    pressing = true;
     downX = ev.clientX;
     downY = ev.clientY;
-    downT = performance.now();
     movedSq = 0;
-    // A fresh press abandons whatever a previous flick left queued: the player
-    // has visibly moved on.
-    pendingSteps = 0;
-    drainTarget = null;
-    // Thrown vs. poured, increased/extreme (§5.3) as drag modifiers, so the
-    // constant verb stays a single uninterrupted motion.
-    modifier = readModifier(ev);
     canvas.setPointerCapture(ev.pointerId);
   });
 
-  const endDrag = (ev: PointerEvent): void => {
-    // Only the left button ends a left drag. A mouse shares one pointer across
-    // its buttons, so a right click mid-sculpt used to arrive here, end the drag
-    // under a still-held button and — within the click window — place a magnet
-    // nobody asked for.
+  const endPress = (ev: PointerEvent): void => {
+    // Only the left button ends a left press. A mouse shares one pointer across
+    // its buttons, so a right click while the left is down used to arrive here
+    // and place a magnet nobody asked for.
     if (ev.type === "pointerup" && ev.button !== 0) return;
-    if (!dragging) return;
-    dragging = false;
-    // A click — a press that never strayed and released promptly — places the
-    // papal magnet, the only command in the game (§5.1). Anything that moved
-    // is a sculpt, however its pixel count divided into steps.
-    const isClick = movedSq < CLICK_SLOP_SQ && performance.now() - downT < CLICK_MAX_MS;
-    if (isClick && current) {
+    if (!pressing) return;
+    pressing = false;
+    // The papal magnet, the only command in the game (§5.1). The press has
+    // nothing to compete with on this button now; it only has to have stayed
+    // put, so that a hand shifting on the mouse mid-orbit is not a placement.
+    if (ev.type === "pointerup" && movedSq < CLICK_SLOP_SQ && current) {
       sim.push(player, VERB.MAGNET, current.face, current.x, current.y, 0);
       onCast?.(VERB.MAGNET);
-      pendingSteps = 0;
-    } else if (pendingSteps !== 0 && current) {
-      // A fast flick accumulates more steps than the drag had ticks; they
-      // drain one per tick where the drag ended instead of being discarded.
-      drainTarget = current;
-      drainModifier = modifier;
     }
     // Keep the capture while any other button is still down, exactly as
     // `camera.ts` does: releasing it here on a left-button-up mid-right-orbit
@@ -438,11 +426,27 @@ export function createHand(
       canvas.releasePointerCapture(ev.pointerId);
     }
   };
-  canvas.addEventListener("pointerup", endDrag);
-  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("pointerup", endPress);
+  canvas.addEventListener("pointercancel", endPress);
 
-  // Switching what the hand carries. Mixing is impossible (§4.2), and the sim
-  // refuses the switch while the hand is full — nothing here needs to know that.
+  // The sculpt keys. A press owes one step immediately — see `pendingTap` — and
+  // `beforeTick` takes over for as long as the key stays down.
+  keys.onPress(CODE.raise, () => {
+    if (!active() || suppressed) return;
+    pendingTap = 1;
+    holdCooldown = 0;
+    reported = false;
+  });
+  keys.onPress(CODE.lower, () => {
+    if (!active() || suppressed) return;
+    pendingTap = -1;
+    holdCooldown = 0;
+    reported = false;
+  });
+
+  // Switching what the hand carries. Mixing is impossible (§4.2): the sim
+  // refuses the switch while the hand is full, and the tracked cast is what
+  // turns that silent refusal into the hand's red flash.
   addEventListener("keydown", (ev) => {
     if (!active()) return;
     // Bare digits only: Ctrl/Cmd+1 is the browser switching tabs, not the god
@@ -451,6 +455,7 @@ export function createHand(
     const material = ev.key === "1" ? 0 : ev.key === "2" ? 1 : ev.key === "3" ? 2 : -1;
     if (material < 0) return;
     sim.push(player, VERB.SET_HAND, 0, material, 0, 0);
+    onCast?.(VERB.SET_HAND);
   });
 
   const position = new THREE.Vector3();
@@ -472,25 +477,43 @@ export function createHand(
     target: () => current,
 
     beforeTick(): void {
-      if (pendingSteps === 0) return;
-      // While dragging the steps land under the live pointer; after release
-      // they keep draining where the drag ended.
-      const at = dragging ? current : drainTarget;
-      if (!at) return;
-      // One terrace step per tick at most: the simulation applies exactly one
-      // command per verb per tick, and queueing twenty at once would make a
-      // fast flick dig a canyon in a single tick.
-      const step = pendingSteps > 0 ? 1 : -1;
-      pendingSteps -= step;
-      if (pendingSteps === 0 && !dragging) drainTarget = null;
+      if (!active() || suppressed) return;
+      const held = sculptDirection();
+      if (holdCooldown > 0) holdCooldown -= 1;
+      // The tap owed by a keypress goes first and unconditionally: it is what
+      // makes a press shorter than a tick still worth one terrace.
+      let step = pendingTap;
+      if (step === 0) {
+        if (held === 0 || holdCooldown > 0) return;
+        step = held;
+      }
+      // Under the hand, wherever the hand now is. There is no accumulator and
+      // nothing banked: a key held while the pointer moves *means* a ridge, and
+      // a key held still means a hill.
+      if (!current) {
+        // Off the planet there is nothing to sculpt. The tap is dropped rather
+        // than saved for whichever cell the pointer next crosses.
+        pendingTap = 0;
+        return;
+      }
+      pendingTap = 0;
+      holdCooldown = HOLD_TICKS;
       sim.push(
         player,
         step > 0 ? VERB.RAISE : VERB.LOWER,
-        at.face,
-        at.x,
-        at.y,
-        dragging ? modifier : drainModifier,
+        current.face,
+        current.x,
+        current.y,
+        keys.modifier(),
       );
+      // One tracked cast per run of steps. The simulation refuses a raise with
+      // an empty hand (and a lower with a full one) without a sound of its own,
+      // so the client owes the player a "no" — but a flash every second tick
+      // for as long as the key is down would be a strobe, not an answer.
+      if (!reported) {
+        reported = true;
+        onCast?.(step > 0 ? VERB.RAISE : VERB.LOWER);
+      }
     },
 
     sync(alpha: number): void {
@@ -563,12 +586,18 @@ export function createHand(
       // Never quite flat, even at rest: a hand with straight fingers is a
       // paddle, and the resting curl is what gives the fingertips a silhouette
       // of their own from directly above.
-      const wanted = dragging ? 1.0 : 0.16 + carried * 0.6;
+      const wanted = sculptDirection() !== 0 ? 1.0 : 0.16 + carried * 0.6;
       grip += (wanted - grip) * (0.18 + alpha * 0.12);
       knuckles.rotation.x = -grip * 1.15;
       const material = sim.e.dio_hand_material(player);
+      const materialColour = material === 1 ? 0x4fa8d8 : material === 2 ? 0xff6a2a : 0xc9a06a;
       const mat = fill.material as THREE.MeshBasicMaterial;
-      mat.color.setHex(material === 1 ? 0x4fa8d8 : material === 2 ? 0xff6a2a : 0xc9a06a);
+      mat.color.setHex(materialColour);
+      // And on the footprint ring, which is the only place it can be read with
+      // an *empty* hand: the fill is a volume, so at zero carried it is a dot
+      // the size of a nail, and the material a player just chose with `1`/`2`/
+      // `3` was invisible until they had already dug something with it.
+      (ring.material as THREE.MeshBasicMaterial).color.setHex(materialColour);
 
       // Mana as a glow on the palm: more mana, brighter hand. Diegetic, and it
       // reads peripherally without ever being a number (§8). The sqrt curve is
@@ -624,6 +653,7 @@ export function createHand(
       // extreme (+3) wins over increased (+1) rather than stacking.
       ring.position.copy(dir).multiplyScalar(surface + 0.002);
       ring.quaternion.setFromUnitVectors(ringNormal, dir);
+      const modifier = keys.modifier();
       const radius =
         (modifier & MOD.THROWN ? 2 : 1) +
         (modifier & MOD.EXTREME ? 3 : modifier & MOD.INCREASED ? 1 : 0);
@@ -645,9 +675,14 @@ export function createHand(
     },
 
     reset(): void {
-      dragging = false;
-      pendingSteps = 0;
-      drainTarget = null;
+      // Including the keys themselves: a key still down across a restart would
+      // otherwise keep sculpting the new world on the old world's press, with
+      // no keypress of its own to have started it.
+      keys.release();
+      pendingTap = 0;
+      holdCooldown = 0;
+      reported = false;
+      pressing = false;
       flashUntil = 0;
     },
   };

@@ -20,6 +20,7 @@ import { type Audio, createAudio } from "./audio";
 import { createCamera } from "./camera";
 import { createHand } from "./hand";
 import { createHud } from "./hud";
+import { createKeys } from "./keys";
 import { createLoop } from "./loop";
 import { type QualityTier, type Sim, TIDE, type VerbEventView } from "./main";
 import { createRadial } from "./radial";
@@ -74,7 +75,11 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // Every shader's shared values live in one place; see `renderer/view.ts` for
   // the three features that broke when they were per-material copies.
   const view = createView();
-  const camera = createCamera(canvas);
+  // One keyboard, read by the hand (raise/lower, materials), the camera (orbit,
+  // zoom) and the menu (space, and the modifiers the hub reports). Built before
+  // any of them, because all three take it.
+  const keys = createKeys();
+  const camera = createCamera(canvas, keys);
   const planet = createPlanet(sim, view, renderer.capabilities.getMaxAnisotropy());
   const water = createWater(sim, view);
   const atmosphere = createAtmosphere(view);
@@ -118,7 +123,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // controls.
   let matchStarted = false;
 
-  const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, trackCast, () => matchStarted);
+  const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, keys, trackCast, () => matchStarted);
   const effects = createEffects(sim);
   scene.add(hand.group, effects.group);
   /** High-water mark in the simulation's verb-event ring. */
@@ -126,7 +131,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // The power menu replaces the gesture recogniser: a right-*click* (right-
   // *drag* stays the orbit) opens a radial menu at the cursor, and a chosen
   // power casts at the cell that was under the cursor when it opened.
-  const radial = createRadial(canvas, sim, LOCAL_PLAYER, hand, {
+  const radial = createRadial(canvas, sim, LOCAL_PLAYER, hand, keys, {
     cast(verb, modifier, target) {
       sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
       trackCast(verb);
@@ -157,7 +162,15 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     const tick = sim.e.dio_tick_count();
     for (const ev of events) {
       if (ev.player === LOCAL_PLAYER) {
+        const i = pendingCasts.findIndex((p) => p.verb === ev.verb);
         if (ev.verb === VERB.RAISE || ev.verb === VERB.LOWER) {
+          // A sculpt has its own voice, so it does not take the one-shot the
+          // cast tracker would play — but it must still *clear* its pending
+          // entry. `hand.ts` tracks the first step of every keypress precisely
+          // so that a raise the simulation refused (an empty hand) becomes a
+          // refusal, and an entry left behind here would turn every raise that
+          // worked into one four ticks later.
+          if (i >= 0) pendingCasts.splice(i, 1);
           // Tuned to what moved: the ground's material under the brush, and
           // what the hand is carrying.
           audio.sculpt(
@@ -166,7 +179,6 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
           );
           continue;
         }
-        const i = pendingCasts.findIndex((p) => p.verb === ev.verb);
         if (i >= 0) {
           pendingCasts.splice(i, 1);
           audio.verbSfx(ev.verb, 1, ev);
@@ -188,6 +200,27 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       }
     }
   };
+
+  /** The opening tour's pan home, so a restart or any input can cancel it. */
+  let introTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Cancel the pan home that has not started yet.
+   *
+   * `camera` already ends a *running* tour on any input, but the two-second
+   * wait on the opponent's spawn is a `setTimeout` this module owns, and it
+   * used to fire regardless: a player who started orbiting immediately had the
+   * camera taken off them two seconds in, and every drag until the tour's 4.5
+   * seconds were up went nowhere. Only a restart cleared it.
+   */
+  const cancelIntro = (): void => {
+    if (introTimer === null) return;
+    clearTimeout(introTimer);
+    introTimer = null;
+  };
+  canvas.addEventListener("pointerdown", cancelIntro);
+  canvas.addEventListener("wheel", cancelIntro, { passive: true });
+  addEventListener("keydown", cancelIntro);
 
   const restart = (newSeed: boolean): void => {
     const nextSeed = newSeed ? (Math.random() * 0xffffffff) >>> 0 : currentSeed;
@@ -215,10 +248,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     hand.reset();
     radial.close();
     menuWasOpen = false;
-    if (introTimer !== null) {
-      clearTimeout(introTimer);
-      introTimer = null;
-    }
+    cancelIntro();
     // `dio_init` re-meshes, but its dirty flags are cleared inside the next
     // `meshUpdate` before `sync` reads them and the content hashes then
     // match — without a full re-upload the screen keeps the dead world.
@@ -267,8 +297,6 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   let menuWasOpen = false;
   /** The tick the mesh was last brought up to date for — see `render`. */
   let lastMeshedTick = -1;
-  /** The opening tour's pan home, so a restart inside it can cancel it. */
-  let introTimer: ReturnType<typeof setTimeout> | null = null;
   /** Set by `halt`; the tab-visibility handler must not start the loop again. */
   let halted = false;
 
@@ -382,6 +410,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     effects,
     radial,
     audio,
+    keys,
+    hand,
   };
 
   // Honest tab handling: a hidden tab pauses the world instead of silently

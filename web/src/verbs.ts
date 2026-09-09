@@ -11,6 +11,10 @@
  * table. They already drifted once — the card listed `+ / − / M` while the
  * handler also accepted `=`, and the docs listed neither.
  *
+ * The live keyboard *state* is not here: `keys.ts` owns which keys are down and
+ * therefore what §5.3's modifier bits currently are. This module is constants
+ * and one table, and imports nothing.
+ *
  * They are not exported from wasm one getter each because that would be forty
  * exports to avoid one comment; `assertLayout` in `main.ts` checks the things
  * that actually change silently (grid size, struct strides) at load time. The
@@ -53,20 +57,6 @@ export const POWER = {
 } as const;
 
 /**
- * §5.3's modifiers, read live so releasing shift mid-drag takes effect.
- *
- * Keyboard events carry the same three flags as pointer events, so the hand and
- * the radial menu can refresh on a bare Shift press with the mouse at rest.
- */
-export function readModifier(ev: PointerEvent | MouseEvent | KeyboardEvent): number {
-  return (
-    (ev.shiftKey ? MOD.THROWN : 0) |
-    (ev.altKey ? MOD.INCREASED : 0) |
-    (ev.ctrlKey ? MOD.EXTREME : 0)
-  );
-}
-
-/**
  * Every binding the player has, in the order they are worth learning.
  *
  * One table, two readers: the title card lists it before the match (`ui.ts`)
@@ -75,12 +65,14 @@ export function readModifier(ev: PointerEvent | MouseEvent | KeyboardEvent): num
  * code and comments stay English.
  */
 export const CONTROLS: readonly (readonly [string, string])[] = [
-  ["Ziehen (links)", "Land heben / senken — die Hand füllt und leert sich"],
+  ["R / F", "Land heben / senken — halten formt weiter"],
   ["Klick (links)", "Magnet setzen: dein Volk folgt ihm"],
-  ["Ziehen (rechts)", "Planet drehen · Mausrad: Zoom"],
-  ["Klick (rechts)", "Kraftmenü öffnen — Kräfte kosten Mana"],
-  ["1 / 2 / 3", "Erde / Wasser / Lava greifen"],
-  ["Umschalt / Alt / Strg", "geworfen / verstärkt / extrem"],
+  ["Rechtsklick / Leertaste", "Kraftmenü öffnen — Kräfte kosten Mana"],
+  ["W A S D / Pfeile", "Planet drehen"],
+  ["Q / E · Mausrad", "näher / weiter"],
+  ["1 / 2 / 3", "Erde / Wasser / Lava greifen (nur mit leerer Hand)"],
+  ["Umschalt", "geworfen: größerer Umkreis am Einschlagpunkt"],
+  ["B", "Pinselgröße: normal → verstärkt → extrem"],
   ["Esc", "Kraftmenü schließen"],
   ["+ / = / − / M", "lauter / leiser / stumm"],
   ["F1 oder ?", "diese Steuerung ein- und ausblenden"],

@@ -156,8 +156,14 @@ export function createHud(sim: Sim, player: number): Hud {
   let controlsShown = rememberedFlag(KEY.controls, false);
   const applyControls = (): void => {
     controlsEl.classList.toggle("shown", controlsShown);
+    // The card *is* the whole control list, so a coaching line naming one
+    // binding has nothing left to teach while it is open — and the two of them
+    // sit in the same corner of the frame: the hint is centred with a 30em
+    // width and the card is bottom-right, so the longer hints overlapped the
+    // card's own "F1 schließt diese Übersicht" line.
+    if (controlsShown) hintEl.classList.remove("shown");
+    else hintEl.classList.toggle("shown", shownHint >= 0);
   };
-  applyControls();
 
   // Last written values, so a frame that changed nothing touches no DOM. Sixty
   // layout invalidations a second for a number that moves once a tick is the
@@ -166,6 +172,7 @@ export function createHud(sim: Sim, player: number): Hud {
   let shownTide = "";
   let shownShare = -1;
   let shownHint = -1;
+  applyControls();
 
   let bannerUntil = 0;
   let lastPhase = -1;
@@ -173,9 +180,9 @@ export function createHud(sim: Sim, player: number): Hud {
   let lastTerritoryTick = -TERRITORY_EVERY;
 
   const hints: Hint[] = [
-    { text: "Links ziehen hebt und senkt Land.", done: false },
+    { text: "R hebt Land, F senkt es — halten formt weiter.", done: false },
     { text: "Linksklick setzt den Magneten — dein Volk folgt ihm.", done: false },
-    { text: "Rechtsklick öffnet das Kraftmenü.", done: false },
+    { text: "Rechtsklick oder Leertaste öffnet das Kraftmenü.", done: false },
     { text: "F1 zeigt die ganze Steuerung.", done: false },
   ];
   /** When the hud first became visible, which is when the match actually began. */
@@ -294,7 +301,7 @@ export function createHud(sim: Sim, player: number): Hud {
       if (due !== shownHint) {
         shownHint = due;
         hintEl.textContent = due >= 0 ? (hints[due]?.text ?? "") : "";
-        hintEl.classList.toggle("shown", due >= 0);
+        hintEl.classList.toggle("shown", due >= 0 && !controlsShown);
       }
     },
 

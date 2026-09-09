@@ -20,6 +20,14 @@
  * the rule and destroy close work, and widening the FOV enough to see the limb
  * from 1.35 R needs about 96°, which is a fisheye.
  *
+ * # Keys as well as the mouse
+ *
+ * `W`/`A`/`S`/`D` (and the arrows) orbit, `Q`/`E` zoom, at rates chosen to match
+ * what a drag does. Raise and lower are keys now (see `hand.ts`), so a player
+ * whose left hand is already on the keyboard should not have to go back to the
+ * mouse to turn the planet — and the right-drag orbit stays exactly as it was
+ * for everyone who prefers it.
+ *
  * So the camera tilts instead. It looks at the planet's centre when pulled back
  * and swings progressively toward the horizon as it comes in, which is what a
  * low orbit actually looks like: the curved edge sits in the upper part of the
@@ -29,6 +37,7 @@
  */
 
 import * as THREE from "three";
+import { CODE, type Keys } from "./keys";
 import { BASE_RADIUS } from "./renderer/scale";
 
 /** Closest approach, as a multiple of the planet radius. */
@@ -50,6 +59,17 @@ const DRAG_SENSITIVITY = 0.005;
 const SMOOTHING = 0.014;
 /** Zoom smoothing. Slower than rotation: a snapped zoom reads as a cut. */
 const ZOOM_SMOOTHING = 0.009;
+/**
+ * Keyboard orbit rate, in radians per second at `DEFAULT_DISTANCE`.
+ *
+ * Scaled by distance exactly as the drag rate is. 1.1 rad/s crosses a
+ * hemisphere in about three seconds, which is the same order as a comfortable
+ * drag and slow enough to stop on a coastline.
+ */
+const KEY_ORBIT = 1.1;
+/** Keyboard zoom rate, in log-distance per second: the full range in ~2.4 s. */
+const KEY_ZOOM = 0.5;
+
 /**
  * How far off nadir the camera looks, in radians, at `MIN_DISTANCE`.
  *
@@ -93,7 +113,7 @@ export interface OrbitCamera {
   drift(radPerSec: number): void;
 }
 
-export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
+export function createCamera(canvas: HTMLCanvasElement, keys: Keys): OrbitCamera {
   const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
 
   // Spherical coordinates: yaw around the world Y axis, pitch from the equator.
@@ -108,8 +128,22 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   let targetDistance = distance;
 
   let panning = false;
-  /** Left button held: the hand is raising or lowering land. */
-  let sculpting = false;
+
+  /**
+   * Which way a rightward drag has to turn yaw, given where the camera is.
+   *
+   * Screen-right is always `east` — the camera's basis is built from `eye` and
+   * `east` — but the eye moves along `east * cos(pitch)` as yaw increases. Past
+   * the pole `cos(pitch)` is negative, so a fixed `targetYaw -= dx` sent the
+   * planet *against* the mouse: the one place the unbounded pitch of the drag
+   * handler leaked out as a broken control rather than as a flipped horizon.
+   *
+   * Read off the smoothed `pitch` rather than `targetPitch`, so the sign
+   * matches the picture on screen and not where the picture is headed. Exactly
+   * at the pole `cos` is 0 and either sign is as good; `+1` keeps it defined.
+   */
+  const yawSign = (): number => Math.sign(Math.cos(pitch)) || 1;
+
   let lastX = 0;
   let lastY = 0;
   /** Intro pan state. Interpolates yaw/pitch directly: the 71 ms smoothing
@@ -130,10 +164,7 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
   const onPointerDown = (ev: PointerEvent): void => {
     // Any press ends the intro tour — the player's intent wins.
     introActive = false;
-    // Middle or right button pans; left is the hand (§8: direct drag is
-    // raise/lower, and it must stay frictionless). Remembered, because the
-    // wheel must not zoom under a stroke — see `onWheel`.
-    if (ev.button === 0) sculpting = true;
+    // Middle or right button pans; the left button is the magnet (`hand.ts`).
     if (ev.button !== 2 && ev.button !== 1) return;
     // Middle-click is platform autoscroll on some browsers, and that fires on
     // mousedown regardless of what the pointer handler does afterwards.
@@ -151,7 +182,7 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
     // Sensitivity tracks distance, so a pixel of drag moves about the same
     // amount of ground at every zoom level.
     const rate = (DRAG_SENSITIVITY * distance) / DEFAULT_DISTANCE;
-    targetYaw -= (ev.clientX - lastX) * rate;
+    targetYaw -= (ev.clientX - lastX) * rate * yawSign();
     // Unclamped, in both axes. There used to be a 0.49pi pitch limit, and it
     // meant that dragging north eventually just *stopped*: a globe you cannot
     // walk over the top of. What the limit was really guarding was the
@@ -163,13 +194,17 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
     // carrying on north over the pole leaves you facing south down the far
     // side. Yaw has always been free to wind without bound; pitch now is too,
     // and for the same reason it was never a problem there.
+    //
+    // What *was* a bug is the yaw sign there — see `yawSign`. Pitch needs no
+    // such correction: `d(eye)/d(pitch)` is `northish` at every pitch, which is
+    // exactly the camera's own up vector, so dragging down always moves the
+    // ground down the screen.
     targetPitch += (ev.clientY - lastY) * rate;
     lastX = ev.clientX;
     lastY = ev.clientY;
   };
 
   const onPointerUp = (ev: PointerEvent): void => {
-    if (ev.button === 0 || ev.type === "pointercancel") sculpting = false;
     // The orbit ends when neither orbiting button is held any more (bit 2 is
     // the right button, bit 4 the middle one), not on any non-left release:
     // letting go of the middle button used to end a right-drag in progress.
@@ -184,15 +219,11 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
 
   const onWheel = (ev: WheelEvent): void => {
     ev.preventDefault();
-    // Not while the left button is down. That drag is raise/lower (§8), and a
-    // zoom in the middle of it — which also swings the orbit toward the
-    // pointer — moves the ground out from under the brush, so the stroke lands
-    // somewhere else. The page still does not scroll; the wheel just waits.
-    // Both the remembered state and the event's own button mask, because a
-    // wheel event that arrives without a matching pointerdown (a stroke begun
-    // off-canvas) still carries the mask, and a synthetic one carries only the
-    // state.
-    if (sculpting || (ev.buttons & 1) !== 0) return;
+    // The wheel is no longer locked out while the left button is down. It used
+    // to be, because that drag *was* raise/lower and a zoom mid-stroke moved
+    // the ground out from under the brush. The left button only places the
+    // magnet now, and the magnet is a single instant, so there is no stroke to
+    // protect.
     introActive = false;
     const before = targetDistance;
     targetDistance = clamp(
@@ -240,6 +271,29 @@ export function createCamera(canvas: HTMLCanvasElement): OrbitCamera {
       camera.updateProjectionMatrix();
     },
     update(dtMs: number): void {
+      // Keyboard orbit and zoom, at the same distance-scaled rate the drag
+      // uses, so a pixel of drag and a second of key cover comparable ground at
+      // every zoom level. Any of them cancels the intro tour, exactly as a
+      // pointer or a wheel does: the player's intent wins over a cinematic.
+      const dt = dtMs * 0.001;
+      const turn = keys.axis(CODE.orbitLeft, CODE.orbitRight);
+      const lift = keys.axis(CODE.orbitUp, CODE.orbitDown);
+      const dolly = keys.axis(CODE.zoomOut, CODE.zoomIn);
+      if (turn !== 0 || lift !== 0 || dolly !== 0) {
+        introActive = false;
+        const rate = (KEY_ORBIT * distance) / DEFAULT_DISTANCE;
+        // Same sense as the drag: `D` pushes the planet left under a camera
+        // moving right, and the pole correction applies for the same reason.
+        targetYaw -= turn * rate * dt * yawSign();
+        targetPitch += lift * rate * dt;
+        if (dolly !== 0) {
+          targetDistance = clamp(
+            targetDistance * Math.exp(-dolly * KEY_ZOOM * dt),
+            MIN_DISTANCE,
+            MAX_DISTANCE,
+          );
+        }
+      }
       if (driftRate !== 0 && !panning && !introActive) {
         targetYaw += driftRate * dtMs * 0.001;
       }
