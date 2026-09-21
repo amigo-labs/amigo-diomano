@@ -22,6 +22,18 @@
  * The left button is therefore free for the magnet with no click-versus-drag
  * test to get wrong — that test, comparing a residue of the drag accumulator,
  * is what once made nearly every stroke end by teleporting the population.
+ *
+ * # The hand takes what it is dipped into
+ *
+ * There is no material key. An empty hand lowered over the sea comes up with
+ * water, over a vent with lava, over ground with earth — the simulation decides
+ * from the cell under the hand (`World::material_under`), and the fill and the
+ * footprint ring show what *this* cell would give before the key is pressed. A
+ * hand that holds something keeps holding it until it has put it all down: earth
+ * in the hand over the sea digs the seabed, water in the hand over dry ground
+ * moves nothing and the palm says so. `1` / `2` / `3` used to switch the
+ * material by command; the player asked, reasonably, why the position of the
+ * hand did not decide that — and nothing in the design said it should not.
  */
 
 import * as THREE from "three";
@@ -66,7 +78,10 @@ export interface Hand {
   readonly group: THREE.Group;
   /** The cell currently under the hand, or `null` if it is off the planet. */
   target(): Target | null;
-  /** Emit this tick's held-drag command, if any. Called before `sim.tick()`. */
+  /**
+   * Emit this tick's sculpt step, if a key owes one. Called before `sim.tick()`,
+   * so the step goes into the same tick's command buffer.
+   */
   beforeTick(): void;
   /** Update the visual. `alpha` is the sub-tick interpolation factor. */
   sync(alpha: number): void;
@@ -107,11 +122,18 @@ export function createHand(
    */
   onCast?: (verb: number) => void,
   /**
-   * Whether the match is running. Every key here is inert until it is: `R` or
-   * `1` pressed on the title card would otherwise queue work that fires at the
+   * Whether the match is running. Every key here is inert until it is: `R`
+   * pressed on the title card would otherwise queue work that fires at the
    * match's first tick.
    */
   active: () => boolean = () => true,
+  /**
+   * The diegetic "no", for a refusal the client can see coming without asking
+   * the simulation: a held key whose hand ran empty or full mid-stroke. The
+   * first step of every press still goes through `onCast` and the simulation's
+   * own verdict; this is for the steps after it, which are not tracked.
+   */
+  onRefuse?: () => void,
 ): Hand {
   const group = new THREE.Group();
 
@@ -323,8 +345,16 @@ export function createHand(
   let pendingTap = 0;
   /** Ticks until the held key may take its next step. */
   let holdCooldown = 0;
-  /** Whether the current sculpt run has already asked for its one refusal. */
+  /** Whether the current sculpt run has already sent its one tracked step. */
   let reported = false;
+  /**
+   * Whether the current run has hit the hand's budget — empty on a raise, full
+   * on a lower — and said so. One "no" per stall, not one per step: a key held
+   * against an empty hand would otherwise flash the palm fifteen times a second.
+   */
+  let stalled = false;
+  /** `HAND_CAPACITY`, a constant of the build; read once. */
+  const capacity = sim.e.dio_hand_capacity();
   /** Where the left press started — see `CLICK_SLOP_SQ`. */
   let downX = 0;
   let downY = 0;
@@ -431,31 +461,23 @@ export function createHand(
 
   // The sculpt keys. A press owes one step immediately — see `pendingTap` — and
   // `beforeTick` takes over for as long as the key stays down.
-  keys.onPress(CODE.raise, () => {
+  const press = (direction: number): void => {
     if (!active() || suppressed) return;
-    pendingTap = 1;
+    pendingTap = direction;
     holdCooldown = 0;
     reported = false;
-  });
-  keys.onPress(CODE.lower, () => {
-    if (!active() || suppressed) return;
-    pendingTap = -1;
-    holdCooldown = 0;
-    reported = false;
-  });
+    stalled = false;
+  };
+  keys.onPress(CODE.raise, () => press(1));
+  keys.onPress(CODE.lower, () => press(-1));
 
-  // Switching what the hand carries. Mixing is impossible (§4.2): the sim
-  // refuses the switch while the hand is full, and the tracked cast is what
-  // turns that silent refusal into the hand's red flash.
-  addEventListener("keydown", (ev) => {
-    if (!active()) return;
-    // Bare digits only: Ctrl/Cmd+1 is the browser switching tabs, not the god
-    // reaching for earth.
-    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-    const material = ev.key === "1" ? 0 : ev.key === "2" ? 1 : ev.key === "3" ? 2 : -1;
-    if (material < 0) return;
-    sim.push(player, VERB.SET_HAND, 0, material, 0, 0);
-    onCast?.(VERB.SET_HAND);
+  // A tap owed at the moment the keyboard goes away is a tap nobody is
+  // waiting for. `keys.ts` releases the held set on blur; the owed step lives
+  // here, and left alone it fired at the match's next tick — minutes later, in
+  // a tab the player had just come back to, on whatever cell the pointer
+  // happened to be over.
+  addEventListener("blur", () => {
+    pendingTap = 0;
   });
 
   const position = new THREE.Vector3();
@@ -480,11 +502,26 @@ export function createHand(
       if (!active() || suppressed) return;
       const held = sculptDirection();
       if (holdCooldown > 0) holdCooldown -= 1;
+      // Both sculpt keys down is "between keys", and it cancels a tap owed to
+      // either: a player rolling from `R` onto `F` did not ask for one terrace
+      // down on the way. Read off the keys themselves rather than off
+      // `sculptDirection()`, which is also 0 when *neither* is held — and that
+      // is exactly when a tap shorter than a tick still has to happen.
+      if (keys.held(CODE.raise) && keys.held(CODE.lower)) pendingTap = 0;
       // The tap owed by a keypress goes first and unconditionally: it is what
       // makes a press shorter than a tick still worth one terrace.
       let step = pendingTap;
       if (step === 0) {
-        if (held === 0 || holdCooldown > 0) return;
+        if (held === 0) {
+          // Nothing down and nothing owed: the run is over, however it ended.
+          // Cleared here as well as on the press, because a press that landed
+          // while the menu was open was never seen by `press`, and the key may
+          // still be down when the menu closes.
+          reported = false;
+          stalled = false;
+          return;
+        }
+        if (holdCooldown > 0) return;
         step = held;
       }
       // Under the hand, wherever the hand now is. There is no accumulator and
@@ -498,22 +535,42 @@ export function createHand(
       }
       pendingTap = 0;
       holdCooldown = HOLD_TICKS;
-      sim.push(
-        player,
-        step > 0 ? VERB.RAISE : VERB.LOWER,
-        current.face,
-        current.x,
-        current.y,
-        keys.modifier(),
-      );
+      const verb = step > 0 ? VERB.RAISE : VERB.LOWER;
+
+      // The one limit the client can see for itself: an empty hand cannot
+      // build and a full one cannot dig (§4.2), for every material alike.
+      // Everything else the simulation may refuse — a water hand over dry
+      // ground, a cell at `HEIGHT_MAX`, lava piled a full byte deep — it alone
+      // knows about, and it says so through the tracked step below.
+      const amount = sim.e.dio_hand_amount(player);
+      const blocked = step > 0 ? amount === 0 : amount >= capacity;
+
       // One tracked cast per run of steps. The simulation refuses a raise with
       // an empty hand (and a lower with a full one) without a sound of its own,
       // so the client owes the player a "no" — but a flash every second tick
-      // for as long as the key is down would be a strobe, not an answer.
+      // for as long as the key is down would be a strobe, not an answer. The
+      // first step is sent whatever the budget says, so the verdict is the
+      // simulation's and the "no" arrives once, through the tracker; `stalled`
+      // remembers that it has, so the steps below do not add a second.
       if (!reported) {
         reported = true;
-        onCast?.(step > 0 ? VERB.RAISE : VERB.LOWER);
+        stalled = blocked;
+        sim.push(player, verb, current.face, current.x, current.y, keys.modifier());
+        onCast?.(verb);
+        return;
       }
+      // Later steps are not tracked, so a hand that runs empty or full
+      // *during* a hold used to go silent: the ground stopped moving and
+      // nothing said why. Now the stall is the one refusal of the run.
+      if (blocked) {
+        if (!stalled) {
+          stalled = true;
+          onRefuse?.();
+        }
+        return;
+      }
+      stalled = false;
+      sim.push(player, verb, current.face, current.x, current.y, keys.modifier());
     },
 
     sync(alpha: number): void {
@@ -574,7 +631,8 @@ export function createHand(
       // How full the hand is, straight from the simulation. This is the matter
       // budget of pillar 4, shown as a volume rather than as a number — and now
       // it is held *in the palm*, which is where a hand holds things.
-      const carried = sim.e.dio_hand_amount(player) / sim.e.dio_hand_capacity();
+      const amount = sim.e.dio_hand_amount(player);
+      const carried = amount / capacity;
       const held = Math.cbrt(Math.max(carried, 0.001));
       fill.position.copy(position).addScaledVector(dir, cellScale * 0.1);
       fill.scale.setScalar(cellScale * 0.62 * held);
@@ -589,14 +647,21 @@ export function createHand(
       const wanted = sculptDirection() !== 0 ? 1.0 : 0.16 + carried * 0.6;
       grip += (wanted - grip) * (0.18 + alpha * 0.12);
       knuckles.rotation.x = -grip * 1.15;
-      const material = sim.e.dio_hand_material(player);
+      // What the hand holds — or, while it holds nothing, what `F` would take
+      // from the cell it is over. The same rule the simulation applies on the
+      // press, read from the simulation, so the preview cannot disagree with
+      // the pickup.
+      const material =
+        amount > 0
+          ? sim.e.dio_hand_material(player)
+          : sim.e.dio_material_under(current.face, current.x, current.y);
       const materialColour = material === 1 ? 0x4fa8d8 : material === 2 ? 0xff6a2a : 0xc9a06a;
       const mat = fill.material as THREE.MeshBasicMaterial;
       mat.color.setHex(materialColour);
       // And on the footprint ring, which is the only place it can be read with
       // an *empty* hand: the fill is a volume, so at zero carried it is a dot
-      // the size of a nail, and the material a player just chose with `1`/`2`/
-      // `3` was invisible until they had already dug something with it.
+      // the size of a nail. Over the sea the ring turns blue before anything is
+      // pressed — that is how the player learns the hand is a pipette.
       (ring.material as THREE.MeshBasicMaterial).color.setHex(materialColour);
 
       // Mana as a glow on the palm: more mana, brighter hand. Diegetic, and it
@@ -671,7 +736,12 @@ export function createHand(
 
     setSuppressed(on: boolean): void {
       suppressed = on;
-      if (on) group.visible = false;
+      if (on) {
+        group.visible = false;
+        // A tap that raced the menu opening must not fire the moment it
+        // closes, on whatever the pointer is over by then.
+        pendingTap = 0;
+      }
     },
 
     reset(): void {
@@ -682,6 +752,7 @@ export function createHand(
       pendingTap = 0;
       holdCooldown = 0;
       reported = false;
+      stalled = false;
       pressing = false;
       flashUntil = 0;
     },

@@ -318,25 +318,143 @@ async function main() {
       `${refusedNow} refusals for one held keypress`,
     );
 
-    // --- 5. material keys, and the ring shows the choice -------------------
-    await page.keyboard.press("2");
-    await ticks(3);
-    const water = await state();
-    const ringColour = await read(() => {
-      const g = window.diomano;
-      let found = null;
-      g.scene.traverse((o) => {
-        if (o.geometry?.type === "RingGeometry") found = o.material.color.getHex();
+    // --- 5. the empty hand takes what is under it ---------------------------
+    //
+    // There is no material key: lowered over the sea the hand comes up with
+    // water, and the ring says so before the key goes down. The map decides
+    // where the sea is, so the cell is found in the simulation and the camera
+    // is pointed at it through the console handle.
+    const ringColour = () =>
+      read(() => {
+        const g = window.diomano;
+        let found = null;
+        g.scene.traverse((o) => {
+          if (o.geometry?.type === "RingGeometry") found = o.material.color.getHex();
+        });
+        return found;
       });
-      return found;
-    });
-    check("2 switches the hand to water", water.material === 1, `material ${water.material}`);
-    check(
-      "the footprint ring shows the material",
-      ringColour === 0x4fa8d8,
-      `ring #${ringColour?.toString(16)}`,
-    );
-    await page.keyboard.press("1");
+    /** A cell whose whole 5x5 neighbourhood is deep sea, or dry high ground. */
+    const findCell = (wet) =>
+      read((wantWet) => {
+        const s = window.diomano.sim;
+        const sea = s.e.dio_sea_level();
+        const ok = (f, x, y) => {
+          const c = s.idx(f, x, y);
+          return wantWet
+            ? s.water[c] >= 200
+            : s.water[c] === 0 && s.lava[c] === 0 && s.height[c] > sea + 48;
+        };
+        for (let f = 0; f < 6; f++) {
+          for (let y = 4; y < s.N - 4; y += 2) {
+            for (let x = 4; x < s.N - 4; x += 2) {
+              let all = true;
+              for (let dy = -2; dy <= 2 && all; dy++) {
+                for (let dx = -2; dx <= 2; dx++) {
+                  if (!ok(f, x + dx, y + dy)) {
+                    all = false;
+                    break;
+                  }
+                }
+              }
+              if (all) return { face: f, x, y };
+            }
+          }
+        }
+        return null;
+      }, wet);
+    const SCREEN_CENTRE = { x: 400, y: 300 };
+    /** Point the hand at a cell: aim the camera at it, pointer to the centre. */
+    const aimAt = async (cell) => {
+      await read((c) => window.diomano.aimAtCell(c.face, c.x, c.y), cell);
+      await page.mouse.move(SCREEN_CENTRE.x, SCREEN_CENTRE.y);
+      await ticks(3);
+      await page.mouse.move(SCREEN_CENTRE.x + 1, SCREEN_CENTRE.y);
+      await ticks(2);
+    };
+    const underHand = () =>
+      read(() => {
+        const g = window.diomano;
+        const t = g.hand.target();
+        return t ? g.sim.e.dio_material_under(t.face, t.x, t.y) : null;
+      });
+
+    const seaCell = await findCell(true);
+    const landCell = await findCell(false);
+    if (seaCell && landCell) {
+      await aimAt(seaCell);
+      const previewOverSea = await ringColour();
+      const underSea = await underHand();
+      await hold("f", 6);
+      const water = await state();
+      check(
+        "F over the sea fills the hand with water",
+        underSea === 1 && water.material === 1 && water.hand > 0,
+        `under hand ${underSea}, material ${water.material}, hand ${water.hand}`,
+      );
+      check(
+        "the footprint ring previews water before the key",
+        previewOverSea === 0x4fa8d8,
+        `ring #${previewOverSea?.toString(16)}`,
+      );
+
+      // A hand holding water keeps holding water: over dry ground `F` moves
+      // nothing, and says so exactly once.
+      await aimAt(landCell);
+      const underLand = await underHand();
+      const refusedBeforeDry = await refusals();
+      await hold("f", 8);
+      await ticks(6);
+      const dry = await state();
+      check(
+        "water in the hand over dry ground is refused, once",
+        underLand === 0 &&
+          dry.material === 1 &&
+          dry.hand === water.hand &&
+          (await refusals()) - refusedBeforeDry === 1,
+        `under hand ${underLand}, material ${dry.material}, hand ${water.hand} -> ${dry.hand}, ` +
+          `${(await refusals()) - refusedBeforeDry} refusals`,
+      );
+
+      // Pour it back into the sea, which absorbs it (§4.3: the sea is a
+      // boundary condition), so the ground stays dry for what follows.
+      await aimAt(seaCell);
+      guard = 0;
+      while ((await state()).hand > 0 && guard++ < 40) await hold("r", 4);
+      const emptiedAgain = await state();
+
+      // Held `F` on ground until the hand is full: the stall is one "no", not a
+      // strobe — and the ground stops moving with a reason on screen.
+      await aimAt(landCell);
+      const refusedBeforeFull = await refusals();
+      const capacity = await read(() => window.diomano.sim.e.dio_hand_capacity());
+      await page.keyboard.down("f");
+      guard = 0;
+      while ((await state()).hand < capacity && guard++ < 60) await ticks(4);
+      await ticks(12);
+      await page.keyboard.up("f");
+      await ticks(1);
+      const full = await state();
+      check(
+        "a hand that fills up mid-hold is refused, once",
+        emptiedAgain.hand === 0 &&
+          full.hand === capacity &&
+          full.material === 0 &&
+          (await refusals()) - refusedBeforeFull === 1,
+        `hand ${emptiedAgain.hand} -> ${full.hand} of ${capacity}, material ${full.material}, ` +
+          `${(await refusals()) - refusedBeforeFull} refusals`,
+      );
+      // And empty it again on the same ground, so the checks below start from
+      // a hand that can still dig.
+      guard = 0;
+      while ((await state()).hand > 0 && guard++ < 60) await hold("r", 4);
+    } else {
+      check(
+        "F over the sea fills the hand with water",
+        false,
+        `no cell found: sea ${JSON.stringify(seaCell)}, land ${JSON.stringify(landCell)}`,
+      );
+    }
+    await page.mouse.move(CENTRE.x, CENTRE.y);
     await ticks(2);
 
     // --- 6. keyboard camera -------------------------------------------------

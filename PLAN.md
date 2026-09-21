@@ -693,6 +693,60 @@ Two problems reported from play, both fixed at the root:
       **Accepted cost:** touch can no longer sculpt without a keyboard. It could
       never orbit (a touch pointer is button 0 only), so it was not playable
       before either; `touch-action: none` stays for whoever wires up gestures
+- [x] **The empty hand takes what is under it** (user decision: "why do I have
+      to choose 1/2/3 — doesn't the position of the hand decide that?"). It does
+      now. On a lower with an empty hand, `powers::sculpt` sets the material
+      from the brush's centre cell (`World::material_under`: lava if molten,
+      water if a terrace deep, earth otherwise — `passable`'s thresholds, so a
+      puddle does not turn a dig into a sip). A hand holding something keeps
+      its material until empty: earth over the sea digs the seabed, water over
+      dry ground is refused. The `1`/`2`/`3` keys are gone from the client, the
+      control list, README and the spec; `VERB_SET_HAND` stays in the sim as an
+      override for replay logs and the §6.3 corpus, which still emits it. The
+      fill and the footprint ring preview the pickup while the hand is empty,
+      read from `dio_material_under` rather than a mirrored rule.
+
+      Found and fixed in the same read, all of them the "picking up and putting
+      down is buggy" report:
+      - **land raised out of the sea stayed wet.** `refresh_cell_water` only
+        handled the sinking case; a raised ocean cell kept its depth and the
+        flow rule (`(surface difference) / 4`, integer) cannot move less than
+        four units, so every interior cell of a raised plateau kept up to three
+        units of water for the rest of the match — never `habitable`, never a
+        settlement site, drawn as a puddle. A cell that was seabed is now
+        re-pinned to the sea, which dries it the moment it clears
+        (`raising_the_seabed_above_the_sea_leaves_it_dry`); a lake bed keeps
+        its lake. `earthquake` gets the same treatment
+      - **land the tide uncovered stayed wet**, by the same mechanism:
+        `apply_sea_level` released each cell with the last film the pin left.
+        It now takes `sea_before` and zeroes the band `sea <= h < sea_before` —
+        the sea takes its water with it (`a_receding_sea_leaves_no_film`).
+        Every flooded plateau used to come back from a wave `buildable ==
+        false`, and the settlement on it decayed for want of a flat footprint
+      - **a hold that ran the hand empty or full went silent.** The one tracked
+        step per press is the first, so when the budget ran out mid-hold the
+        ground simply stopped moving. The hand now watches its own budget on
+        the untracked steps and gives exactly one "no" per stall — never a
+        second one on top of the tracker's, which is what the existing
+        "refused, once" check guards
+      - **an owed tap outlived the keyboard.** `pendingTap` survived `blur`,
+        the tab going hidden and the menu opening, and fired at the next tick
+        wherever the pointer then was. Cleared on all three, and when both
+        sculpt keys are down
+      - the volume keys read `Ctrl+-` as "quieter" while the browser zoomed
+
+      Fixture hashes moved (`just record`, `just record-corpus`): the demo
+      script and the scripted opponent raise ground on coasts, which now comes
+      up dry. `verify-input` gains three checks in place of the material-key
+      one: `F` over the sea fills the hand with water and the ring previews it,
+      water over dry ground is refused once, and a hand that fills up mid-hold
+      is refused once.
+
+      **Left as designed, documented in `docs/specs/simulation.md`:** the sea is
+      a boundary condition, so drawing from it is free and pouring into it is
+      absorbed; water poured on land above the line stays (no evaporation); lava
+      caps at 255 a cell against a 4096 hand, so a small brush cannot take a
+      full lava hand.
 - [ ] **KNOWN GAP: "what just happened, over there?"** still unanswered.
       Screen-edge DOM markers for applied verbs were built and then withdrawn,
       because they could not be shown to work: the element sat in the document

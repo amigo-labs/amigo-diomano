@@ -1141,6 +1141,7 @@ impl World {
                 }
                 let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
                 let c = idx(f, x, y);
+                let was_sea = self.is_seabed(c);
                 if raise {
                     let room = i32::from(HEIGHT_MAX) - i32::from(self.height[c]);
                     let take =
@@ -1162,21 +1163,41 @@ impl World {
                     self.hand[player].amount += take as u16;
                     moved += take;
                 }
-                self.refresh_cell_water(c);
+                self.refresh_cell_water(c, was_sea);
             }
         }
         moved
     }
 
-    /// Re-settle a cell against the current sea level after its height moved.
+    /// Whether a cell's bed lies under the sea — the ocean's, not a lake's.
     ///
-    /// Only the sunk case needs handling here. Terrain that rises out from under
-    /// standing water keeps its depth — the land comes up through the sea — and
-    /// `transfer_water` drains the excess to the neighbours on the next tick.
-    fn refresh_cell_water(&mut self, c: usize) {
+    /// Checked against the calm sea as well as the current one: during the
+    /// tide's drawback a shelf cell sits a few units above `sea_level` with the
+    /// last film the pin left on it, and a flood cast moves `sea_base` a tick
+    /// before `sea_level` follows. A lake bed is never below `sea_base`, because
+    /// `water::apply_sea_level` would have pinned it as ocean.
+    #[inline]
+    #[must_use]
+    pub fn is_seabed(&self, c: usize) -> bool {
+        i32::from(self.height[c]) < i32::from(self.sea_level.max(self.sea_base))
+    }
+
+    /// Re-settle a cell against the sea after its height moved.
+    ///
+    /// A cell that sinks below the sea fills to it. A cell that *was* seabed is
+    /// pinned to the sea too: while it stays submerged that changes nothing, and
+    /// the moment it rises clear it is dry. It used to keep its depth on the way
+    /// up, on the theory that `transfer_water` would drain it — but the flow
+    /// rule rounds `(surface difference) / 4` to zero below four units, so every
+    /// cell of a raised plateau whose neighbours came up with it kept up to three
+    /// units of water for the rest of the match: never `habitable`, never a
+    /// settlement site, and drawn as a puddle. The sea is a boundary condition
+    /// (§4.3); land raised out of it comes up dry, exactly as land the tide
+    /// uncovers does in `water::apply_sea_level`.
+    pub(crate) fn refresh_cell_water(&mut self, c: usize, was_sea: bool) {
         let surface = i32::from(self.height[c]) + i32::from(self.water[c]);
         let sea = i32::from(self.sea_level);
-        if surface < sea {
+        if surface < sea || was_sea {
             self.water[c] = (sea - i32::from(self.height[c])).clamp(0, i32::from(i16::MAX)) as i16;
         }
     }
@@ -1193,6 +1214,25 @@ impl World {
             && self.material[c] != MAT_SWAMP
             && i32::from(self.height[c]) > i32::from(self.sea_level)
             && i32::from(self.water[c]) < i32::from(TERRACE)
+    }
+
+    /// What an empty hand picks up here (§4.2): the hand is a pipette, and what
+    /// it draws is whatever it is dipped into.
+    ///
+    /// Lava if any is molten, water if it stands at least a terrace deep, earth
+    /// otherwise. The thresholds are `passable`'s, on purpose: a film thinner
+    /// than a terrace is ground a walker crosses, so it is ground the hand digs
+    /// — otherwise every puddle would turn a dig into a sip.
+    #[inline]
+    #[must_use]
+    pub fn material_under(&self, c: usize) -> u8 {
+        if self.lava[c] > 0 {
+            HAND_LAVA
+        } else if i32::from(self.water[c]) >= i32::from(TERRACE) {
+            HAND_WATER
+        } else {
+            HAND_EARTH
+        }
     }
 
     /// Contributes to mana (§4.6): above sea level, soil or rock.
@@ -1369,7 +1409,11 @@ impl World {
         // 2. command application
         self.apply_commands(commands);
 
-        // 2a. tide (§5.5) — before water, because it moves the sea level.
+        // 2a. tide (§5.5) — before water, because it moves the sea level. The
+        // level it moves *from* goes to the water pass too, so a receding sea
+        // takes its water with it rather than leaving a film on the land it
+        // uncovers.
+        let sea_before = self.sea_level;
         tide::step(self);
 
         // 2b. scripted opponent — emits commands, applies them like any others.
@@ -1380,7 +1424,7 @@ impl World {
         }
 
         // 3. water transfer (checkerboard: even, then odd)
-        water::transfer_water(self);
+        water::transfer_water(self, sea_before);
         // 4. lava transfer (checkerboard: even, then odd)
         water::transfer_lava(self);
         // 5. material interactions (single pass, §4.4)
@@ -1931,6 +1975,80 @@ mod tests {
         assert_eq!(w.deform(0, 0, 10, 10, 1, true), 0, "built something out of nothing");
         w.hand[0].amount = HAND_CAPACITY;
         assert_eq!(w.deform(0, 0, 10, 10, 1, false), 0, "dug with a full hand");
+    }
+
+    #[test]
+    fn raising_the_seabed_above_the_sea_leaves_it_dry() {
+        // A shelf 40 units under the sea, wide enough that the brush's interior
+        // cells have neighbours that rise with them. Three raises of a terrace
+        // each bring the footprint clear of the water. Then the water pass runs:
+        // it is what used to be relied on to drain the land, and what could not,
+        // because `(surface difference) / 4` is zero below four units — the
+        // interior kept a film for the rest of the match and was never
+        // `habitable`.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let sea = w.sea_level;
+        let (face, cx, cy) = (4usize, 32i32, 32i32);
+        for dy in -6..=6i32 {
+            for dx in -6..=6i32 {
+                let c = idx(face, (cx + dx) as usize, (cy + dy) as usize);
+                w.height[c] = sea - 40;
+                w.water[c] = 40;
+                w.lava[c] = 0;
+                w.material[c] = MAT_SOIL;
+                w.vegetation[c] = 0;
+            }
+        }
+        w.hand[0] = Hand { material: HAND_EARTH, _pad: 0, amount: HAND_CAPACITY };
+        for _ in 0..3 {
+            assert!(w.deform(0, face, cx, cy, 2, true) > 0, "the raise moved nothing");
+        }
+        for _ in 0..30 {
+            w.ghost_copy_all();
+            let sea = w.sea_level;
+            water::transfer_water(&mut w, sea);
+        }
+        for dy in -2..=2i32 {
+            for dx in -2..=2i32 {
+                if dx * dx + dy * dy > 6 {
+                    continue;
+                }
+                let c = idx(face, (cx + dx) as usize, (cy + dy) as usize);
+                assert!(w.height[c] > sea, "cell ({dx},{dy}) did not clear the sea");
+                assert_eq!(w.water[c], 0, "cell ({dx},{dy}) kept {} units of water", w.water[c]);
+                assert!(w.habitable(c), "cell ({dx},{dy}) raised out of the sea is not habitable");
+            }
+        }
+    }
+
+    #[test]
+    fn raising_a_lake_bed_keeps_the_lake() {
+        // Water the sea did not put there is the player's, and stays.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let c = idx(4, 10, 10);
+        w.height[c] = w.sea_level.max(w.sea_base) + 100;
+        w.water[c] = 50;
+        w.hand[0] = Hand { material: HAND_EARTH, _pad: 0, amount: HAND_CAPACITY };
+        assert!(w.deform(0, 4, 10, 10, 0, true) > 0);
+        assert_eq!(w.water[c], 50, "raising a lake bed drained the lake");
+    }
+
+    #[test]
+    fn material_under_follows_passable_thresholds() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let c = idx(4, 10, 10);
+        w.lava[c] = 0;
+        w.water[c] = 0;
+        assert_eq!(w.material_under(c), HAND_EARTH);
+        w.water[c] = TERRACE - 1;
+        assert_eq!(w.material_under(c), HAND_EARTH, "a film thinner than a terrace is ground");
+        w.water[c] = TERRACE;
+        assert_eq!(w.material_under(c), HAND_WATER);
+        w.lava[c] = 1;
+        assert_eq!(w.material_under(c), HAND_LAVA, "molten ground is lava before it is anything");
     }
 
     #[test]

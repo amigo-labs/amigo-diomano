@@ -29,8 +29,9 @@
  *
  * Every key here is ignored when Ctrl, Cmd or Alt is down (those chords belong
  * to the browser and the window manager), auto-repeat is dropped in favour of
- * this module's own cadence, and `blur` releases everything: alt-tabbing away
- * with `R` held must not leave the hand digging in a tab nobody is looking at.
+ * the hand's own cadence (`HOLD_TICKS` in `hand.ts`, paced by the tick), and
+ * `blur` releases everything: alt-tabbing away with `R` held must not leave the
+ * hand digging in a tab nobody is looking at.
  */
 
 import { MOD } from "./verbs";

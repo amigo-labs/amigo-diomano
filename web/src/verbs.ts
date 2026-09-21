@@ -70,7 +70,10 @@ export const CONTROLS: readonly (readonly [string, string])[] = [
   ["Rechtsklick / Leertaste", "Kraftmenü öffnen — Kräfte kosten Mana"],
   ["W A S D / Pfeile", "Planet drehen"],
   ["Q / E · Mausrad", "näher / weiter"],
-  ["1 / 2 / 3", "Erde / Wasser / Lava greifen (nur mit leerer Hand)"],
+  [
+    "F über Wasser / Lava",
+    "schöpft Wasser / Lava statt Erde — die leere Hand nimmt, was unter ihr liegt",
+  ],
   ["Umschalt", "geworfen: größerer Umkreis am Einschlagpunkt"],
   ["B", "Pinselgröße: normal → verstärkt → extrem"],
   ["Esc", "Kraftmenü schließen"],

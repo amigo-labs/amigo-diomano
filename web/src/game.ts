@@ -98,6 +98,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // the match. The banner is the feedback — a level you cannot hear changing
   // (because you set it during a quiet stretch) has to say so on screen.
   addEventListener("keydown", (ev) => {
+    // Chords belong to the browser: `Ctrl+-` is page zoom, not "quieter".
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
     // "=" as well as "+": on a US layout the plus needs shift, and a player
     // reaching for it without one should still get louder.
     if (ev.key === "+" || ev.key === "=") audio.setVolume(audio.volume() + 0.1);
@@ -123,7 +125,22 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   // controls.
   let matchStarted = false;
 
-  const hand = createHand(sim, camera, canvas, LOCAL_PLAYER, keys, trackCast, () => matchStarted);
+  // The refusal the hand can see coming on its own — a held key against an
+  // empty or full hand — takes the same "no" as a cast the simulation refused.
+  const refuse = (): void => {
+    audio.refusal();
+    hand.flash();
+  };
+  const hand = createHand(
+    sim,
+    camera,
+    canvas,
+    LOCAL_PLAYER,
+    keys,
+    trackCast,
+    () => matchStarted,
+    refuse,
+  );
   const effects = createEffects(sim);
   scene.add(hand.group, effects.group);
   /** High-water mark in the simulation's verb-event ring. */
@@ -136,10 +153,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       sim.push(LOCAL_PLAYER, verb, target.face, target.x, target.y, modifier);
       trackCast(verb);
     },
-    refuse() {
-      audio.refusal();
-      hand.flash();
-    },
+    refuse,
   });
 
   const applySize = (): void => {
@@ -412,6 +426,13 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     audio,
     keys,
     hand,
+    /**
+     * Put a cell at the centre of the screen. For `verify-input`, which has to
+     * point the hand at water without knowing where the map put any.
+     */
+    aimAtCell: (face: number, x: number, y: number): void => {
+      camera.aimAt(cellDirection(face, x, y, sim.N), true);
+    },
   };
 
   // Honest tab handling: a hidden tab pauses the world instead of silently

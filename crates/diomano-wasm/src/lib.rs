@@ -364,6 +364,16 @@ pub extern "C" fn dio_hand_capacity() -> u32 {
     u32::from(diomano_sim::world::HAND_CAPACITY)
 }
 
+/// What an empty hand would come up with if lowered at this cell — earth, water
+/// or lava. The client's preview of `F`, read from the same rule `sculpt` uses
+/// rather than a mirrored copy of its thresholds.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_material_under(face: u32, x: u32, y: u32) -> u32 {
+    use diomano_sim::world::{N, idx};
+    let c = idx((face as usize) % 6, (x as usize).min(N - 1), (y as usize).min(N - 1));
+    u32::from(world().material_under(c))
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_walker_count(player: u32) -> u32 {
     u32::from(world().walker_count[(player as usize) % PLAYERS])

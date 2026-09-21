@@ -58,7 +58,7 @@ so a hill came out a ridge. Now the pointer only aims the hand.
 | `W` `A` `S` `D` or arrows | orbit the planet |
 | `Q` / `E`, or the wheel | closer / further |
 | middle or right drag | orbit the planet |
-| `1` `2` `3` | carry earth / water / lava (empty hand only) |
+| `F` over water / lava | the empty hand takes what is under it: water or lava instead of earth |
 | shift | thrown: a wider footprint at the impact point |
 | `B` | brush size: normal → increased → extreme |
 | `+` `=` `-` `M` | louder / quieter / mute |

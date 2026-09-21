@@ -139,6 +139,32 @@ each `[START]`. Mixing is impossible: switching material requires an empty hand.
 The same two verbs (raise, lower) move whatever is held, which is where "carry
 water onto lava to make rock at a chosen location" comes from with no new verb.
 
+**The empty hand takes what is under it** (user decision: "doesn't the position
+of the hand decide that?"). On a lower with `amount == 0`, `powers::sculpt` sets
+the material from the brush's centre cell via `World::material_under`: lava if
+any is molten, water if it stands at least `TERRACE` deep, earth otherwise — the
+same thresholds as `passable`, so a film a walker crosses is ground the hand
+digs. A hand that holds something keeps its material until it is empty: earth in
+the hand over the sea digs the seabed (how the sea is deepened), water in the
+hand over dry ground moves nothing and is refused. `VERB_SET_HAND` remains as an
+explicit override for replay logs and the §6.3 corpus; the client no longer
+sends it. Water and lava move `2 * TERRACE` per cell per step against earth's
+`TERRACE`; lava is a `u8` and caps at 255 per cell, so a small brush cannot take
+a full lava hand.
+
+**The sea is a boundary condition, both ways.** Drawing water from a cell below
+sea level is free — `apply_sea_level` refills it the same tick — and water
+poured below sea level is absorbed. Land raised out of the sea comes up dry
+(`World::refresh_cell_water` re-pins a cell that was seabed), and land the tide
+uncovers comes back dry (`apply_sea_level` zeroes every cell in
+`sea <= h < sea_before`). Both used to leave whatever the last pin had put
+there, and the flow rule cannot move less than four units, so a raised plateau
+and every flooded flat kept a permanent film: never `habitable`, never
+`buildable`, drawn as a puddle. Asserted by
+`world::raising_the_seabed_above_the_sea_leaves_it_dry` and
+`water::a_receding_sea_leaves_no_film`. Water the sea did not bring — a lake, a
+poured puddle above the line — stays; there is deliberately no evaporation.
+
 ## Water
 
 **Not a fluid simulation.** Per-cell integer depth, checkerboard two-pass so the
