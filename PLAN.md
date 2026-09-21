@@ -737,8 +737,10 @@ Two problems reported from play, both fixed at the root:
 
       Fixture hashes moved (`just record`, `just record-corpus`): the demo
       script and the scripted opponent raise ground on coasts, which now comes
-      up dry. `verify-input` gains three checks in place of the material-key
-      one: `F` over the sea fills the hand with water and the ring previews it,
+      up dry. `verify-input` gains four checks in place of the material-key
+      one: it starts over dry ground (the opening view at the default seed is
+      open sea, where `F` now rightly takes water), `F` over the sea fills the
+      hand with water and the ring previews it,
       water over dry ground is refused once, and a hand that fills up mid-hold
       is refused once.
 

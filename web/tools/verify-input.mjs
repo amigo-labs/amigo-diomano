@@ -235,9 +235,79 @@ async function main() {
         };
       });
 
+    const ringColour = () =>
+      read(() => {
+        const g = window.diomano;
+        let found = null;
+        g.scene.traverse((o) => {
+          if (o.geometry?.type === "RingGeometry") found = o.material.color.getHex();
+        });
+        return found;
+      });
+    /** A cell whose whole 5x5 neighbourhood is deep sea, or dry high ground. */
+    const findCell = (wet) =>
+      read((wantWet) => {
+        const s = window.diomano.sim;
+        const sea = s.e.dio_sea_level();
+        const ok = (f, x, y) => {
+          const c = s.idx(f, x, y);
+          return wantWet
+            ? s.water[c] >= 200
+            : s.water[c] === 0 && s.lava[c] === 0 && s.height[c] > sea + 48;
+        };
+        for (let f = 0; f < 6; f++) {
+          for (let y = 4; y < s.N - 4; y += 2) {
+            for (let x = 4; x < s.N - 4; x += 2) {
+              let all = true;
+              for (let dy = -2; dy <= 2 && all; dy++) {
+                for (let dx = -2; dx <= 2; dx++) {
+                  if (!ok(f, x + dx, y + dy)) {
+                    all = false;
+                    break;
+                  }
+                }
+              }
+              if (all) return { face: f, x, y };
+            }
+          }
+        }
+        return null;
+      }, wet);
+    const SCREEN_CENTRE = { x: 400, y: 300 };
+    /** Point the hand at a cell: aim the camera at it, pointer to the centre. */
+    const aimAt = async (cell) => {
+      // A middle click first: any press ends the opening tour, and while the
+      // tour is running it owns the camera and would override the aim on the
+      // next frame. Middle has no verb of its own, so nothing else happens.
+      await page.mouse.click(SCREEN_CENTRE.x, SCREEN_CENTRE.y, { button: "middle" });
+      await read((c) => window.diomano.aimAtCell(c.face, c.x, c.y), cell);
+      await page.mouse.move(SCREEN_CENTRE.x, SCREEN_CENTRE.y);
+      await ticks(3);
+      await page.mouse.move(SCREEN_CENTRE.x + 1, SCREEN_CENTRE.y);
+      await ticks(2);
+    };
+    const underHand = () =>
+      read(() => {
+        const g = window.diomano;
+        const t = g.hand.target();
+        return t ? g.sim.e.dio_material_under(t.face, t.x, t.y) : null;
+      });
+
     await ticks(4);
-    await page.mouse.move(CENTRE.x, CENTRE.y);
+    // Start on dry ground. The empty hand takes what is under it, and at this
+    // seed the centre of the opening view is open sea — where `F` would come up
+    // with water and the earth checks below would have nothing to measure. The
+    // sea gets its own checks once the hand has proven itself on land.
+    const landCell = await findCell(false);
+    const seaCell = await findCell(true);
+    if (landCell) await aimAt(landCell);
+    else await page.mouse.move(CENTRE.x, CENTRE.y);
     await ticks(2);
+    check(
+      "the hand starts over dry ground",
+      landCell !== null && (await underHand()) === 0,
+      `land ${JSON.stringify(landCell)}, under hand ${await underHand()}`,
+    );
 
     // The refusal is the diegetic "no": a sound and a red palm. Counting the
     // audio call is the only way to see it from out here, and it is the call
@@ -324,62 +394,6 @@ async function main() {
     // water, and the ring says so before the key goes down. The map decides
     // where the sea is, so the cell is found in the simulation and the camera
     // is pointed at it through the console handle.
-    const ringColour = () =>
-      read(() => {
-        const g = window.diomano;
-        let found = null;
-        g.scene.traverse((o) => {
-          if (o.geometry?.type === "RingGeometry") found = o.material.color.getHex();
-        });
-        return found;
-      });
-    /** A cell whose whole 5x5 neighbourhood is deep sea, or dry high ground. */
-    const findCell = (wet) =>
-      read((wantWet) => {
-        const s = window.diomano.sim;
-        const sea = s.e.dio_sea_level();
-        const ok = (f, x, y) => {
-          const c = s.idx(f, x, y);
-          return wantWet
-            ? s.water[c] >= 200
-            : s.water[c] === 0 && s.lava[c] === 0 && s.height[c] > sea + 48;
-        };
-        for (let f = 0; f < 6; f++) {
-          for (let y = 4; y < s.N - 4; y += 2) {
-            for (let x = 4; x < s.N - 4; x += 2) {
-              let all = true;
-              for (let dy = -2; dy <= 2 && all; dy++) {
-                for (let dx = -2; dx <= 2; dx++) {
-                  if (!ok(f, x + dx, y + dy)) {
-                    all = false;
-                    break;
-                  }
-                }
-              }
-              if (all) return { face: f, x, y };
-            }
-          }
-        }
-        return null;
-      }, wet);
-    const SCREEN_CENTRE = { x: 400, y: 300 };
-    /** Point the hand at a cell: aim the camera at it, pointer to the centre. */
-    const aimAt = async (cell) => {
-      await read((c) => window.diomano.aimAtCell(c.face, c.x, c.y), cell);
-      await page.mouse.move(SCREEN_CENTRE.x, SCREEN_CENTRE.y);
-      await ticks(3);
-      await page.mouse.move(SCREEN_CENTRE.x + 1, SCREEN_CENTRE.y);
-      await ticks(2);
-    };
-    const underHand = () =>
-      read(() => {
-        const g = window.diomano;
-        const t = g.hand.target();
-        return t ? g.sim.e.dio_material_under(t.face, t.x, t.y) : null;
-      });
-
-    const seaCell = await findCell(true);
-    const landCell = await findCell(false);
     if (seaCell && landCell) {
       await aimAt(seaCell);
       const previewOverSea = await ringColour();
