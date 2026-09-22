@@ -107,7 +107,8 @@ function serve() {
 
 /**
  * Materials that three.js resolved to one compiled program while their
- * `onBeforeCompile` hooks write different GLSL, as `"a / b"` name pairs.
+ * `onBeforeCompile` hooks write different GLSL, as `"a / b"` name pairs — and,
+ * while the page is up, whether the tier-2 cloud shell is visible.
  *
  * Asked of the running client after `renderer.compile`, so every material in
  * the scene has a program. The hooks are then replayed against one stub shader
@@ -155,7 +156,11 @@ async function sharedPrograms(browser, port, tier) {
           if (patched(material) !== source) clashes.push(`${first[1]} / ${name}`);
         }
       }
-      return clashes;
+      let clouds = null;
+      scene.traverse((object) => {
+        if (object.name === "clouds") clouds = object.visible;
+      });
+      return { clashes, clouds };
     });
   } finally {
     await page.close();
@@ -287,7 +292,15 @@ FULL UPLOAD NARROWED — a refresh after a world reset uploads only the dirty ch
     // at once starve each other past the boot budget.
     await page.close();
     for (const tier of [1, 2]) {
-      const shared = await sharedPrograms(browser, port, tier);
+      const { clashes: shared, clouds } = await sharedPrograms(browser, port, tier);
+      // §7.3 puts the cloud shell in tier 2, with the ground shadows the terrain
+      // shader draws only there.
+      if (clouds !== tier >= 2) {
+        console.error(
+          `\nTIERS — the cloud shell is ${clouds === null ? "missing (no mesh named clouds)" : clouds ? "drawn" : "not drawn"} at tier ${tier}.\n`,
+        );
+        process.exit(1);
+      }
       if (shared.length > 0) {
         console.error(`
 SHADER PROGRAMS — materials with different shaders share one program (tier ${tier}).

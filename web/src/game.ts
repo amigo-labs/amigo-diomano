@@ -83,7 +83,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   const camera = createCamera(canvas, keys);
   const planet = createPlanet(sim, view, renderer.capabilities.getMaxAnisotropy());
   const water = createWater(sim, view);
-  const atmosphere = createAtmosphere(view);
+  const atmosphere = createAtmosphere(view, tier);
   const vegetation = createVegetation(sim, tier, view);
   planet.material.uniforms.uTier!.value = tier;
   water.material.uniforms.uTier!.value = tier;
