@@ -316,6 +316,105 @@ SHADER PROGRAMS — materials with different shaders share one program (tier ${t
       }
     }
 
+    // The hand picks the ground the player sees. Zoomed in, the camera tilts
+    // toward the horizon and the upper half of the frame meets the ground at a
+    // glancing angle, where a pick that is not the ray's *first* contact with
+    // the terrain lands behind the hill the pointer is on. Each pick is checked
+    // against an independent march along the same ray at a fiftieth of a cell.
+    const picking = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await picking.goto(`http://127.0.0.1:${port}/?seed=5eed&tier=1`, { waitUntil: "load" });
+      await picking.waitForFunction(() => window.diomano !== undefined, null, {
+        timeout: BOOT_BUDGET,
+      });
+      await picking.evaluate(() => {
+        const canvas = document.querySelector("canvas");
+        for (let i = 0; i < 8; i++) {
+          canvas.dispatchEvent(
+            new WheelEvent("wheel", {
+              deltaY: -400,
+              clientX: innerWidth / 2,
+              clientY: innerHeight / 2,
+            }),
+          );
+        }
+      });
+      await picking.waitForFunction(
+        () => window.diomano.camera.camera.position.length() < 1.37,
+        null,
+        {
+          timeout: BOOT_BUDGET,
+        },
+      );
+      const misses = await picking.evaluate(() => {
+        const { sim, camera, planet, hand } = window.diomano;
+        const cam = camera.camera;
+        const canvas = document.querySelector("canvas");
+        const surface = (cell) => {
+          const c = sim.idx(cell.face, cell.x, cell.y);
+          return 1 + ((sim.height[c] ?? 0) + Math.max(sim.water[c] ?? 0, 0)) * 0.00008;
+        };
+        const truth = (x, y) => {
+          const origin = cam.position.clone();
+          const dir = cam.position
+            .clone()
+            .set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1, 0.5)
+            .unproject(cam)
+            .sub(origin)
+            .normalize();
+          const p = origin.clone();
+          for (let t = 0; t < 6; t += 0.0005) {
+            p.copy(origin).addScaledVector(dir, t);
+            const r = p.length();
+            if (r > 1.7) continue;
+            const cell = planet.pick(p);
+            if (r <= surface(cell)) return cell;
+          }
+          return null;
+        };
+        const out = [];
+        for (let j = 0; j < 4; j++) {
+          for (let i = 0; i < 5; i++) {
+            const x = innerWidth * (0.1 + 0.2 * i);
+            const y = innerHeight * (0.08 + 0.12 * j);
+            canvas.dispatchEvent(
+              new PointerEvent("pointermove", {
+                clientX: x,
+                clientY: y,
+                pointerType: "mouse",
+                bubbles: true,
+              }),
+            );
+            const got = hand.target();
+            const want = truth(x, y);
+            const ok =
+              want === null
+                ? got === null
+                : got !== null &&
+                  got.face === want.face &&
+                  Math.abs(got.x - want.x) <= 1 &&
+                  Math.abs(got.y - want.y) <= 1;
+            const show = (c) => (c ? `${c.face}:${c.x},${c.y}` : "none");
+            if (!ok) out.push(`(${x | 0}, ${y | 0}): hand ${show(got)}, ray ${show(want)}`);
+          }
+        }
+        return out;
+      });
+      if (misses.length > 0) {
+        console.error(`
+PICKING — the hand is not on the ground the pointer is over (${misses.length} of 20).
+
+  The pick has to be the ray's first contact with the drawn surface. Relief
+  reaches several cells' worth of radius, and at a glancing angle a pick that
+  refines from the mean sphere converges behind the hill in front of it.
+`);
+        for (const m of misses) console.error(`  ${m}`);
+        process.exit(1);
+      }
+    } finally {
+      await picking.close();
+    }
+
     // A crash after the boot: a throw inside a frame must stop the loop and say
     // so, rather than escape the rAF callback and throw again every frame
     // behind a picture that has silently stopped. Injected into the render
