@@ -57,6 +57,13 @@ pub const TOTAL_VERTS: usize = CHUNKS * VERTS_PER_CHUNK;
 /// the same 1944 indices would be 96 times the memory for no reason.
 pub const INDICES_PER_CHUNK: usize = (VERTS_PER_EDGE - 1) * (VERTS_PER_EDGE - 1) * 6;
 /// Dual-grid corners per planet: `0..=N` along both axes of each face.
+/// Side of [`Mesh::scratch_dual`]: the corner grid's `CHUNK + 3` slots plus one
+/// on each side for the warp, which moves a sample under a cell
+/// (`WARP_CELLS`), so its bilinear footprint reaches one corner further out.
+const DUAL_TILE: usize = CHUNK + 5;
+/// Where the tile starts, relative to the chunk's first corner.
+const DUAL_TILE_ORIGIN: i32 = -2;
+
 pub const CORNER_SLOTS: usize = 6 * (N + 1) * (N + 1);
 
 /// Index into a per-corner table for `(face, gx, gy)`, `gx, gy` in `0..=N`.
@@ -210,6 +217,16 @@ pub struct Mesh {
     /// ring reads the border slot it duplicates, exactly as it does for the
     /// height, so the water surface sits on the same ray as the ground.
     scratch_dirs: [f32; VERTS_PER_CHUNK * 3],
+    /// The dual grid ([`Mesh::dual_height`]) over one chunk's corners and the
+    /// cell of warp reach around them, filled once per chunk rebuilt.
+    ///
+    /// A warped corner samples four dual heights and each of those averages four
+    /// cells, so the corner grid was reading `smooth` sixteen times per slot —
+    /// for values its neighbours had just read. The tile holds each dual height
+    /// once, from the same integer expression, so every sample is the same `f32`
+    /// it was. Entries outside `0 ..= N` are never written or read; a coordinate
+    /// outside the tile falls back to the direct computation.
+    scratch_dual: [f32; DUAL_TILE * DUAL_TILE],
     /// Content hash per chunk; a chunk is re-meshed only when this changes.
     chunk_hash: [u64; CHUNKS],
     /// The domain warp of [`Mesh::corner_height`], tabulated: the warped dual-grid
@@ -271,6 +288,7 @@ impl Mesh {
             scratch_corners: [0.0; VERTS_PER_CHUNK * 3],
             scratch_heights: [0.0; VERTS_PER_CHUNK],
             scratch_dirs: [0.0; VERTS_PER_CHUNK * 3],
+            scratch_dual: [0.0; DUAL_TILE * DUAL_TILE],
             chunk_hash: [0; CHUNKS],
             warp_xy: [0.0; CORNER_SLOTS * 2],
             smooth_input_hash: 0,
@@ -477,6 +495,7 @@ impl Mesh {
         // This costs no extra `corner_height` work: `positions` is filled from
         // this grid, and the skirt ring is a copy of the border rather than a
         // fresh evaluation.
+        self.fill_dual_tile(face, cgx, cgy);
         for gj in 0..VERTS_PER_EDGE {
             for gi in 0..VERTS_PER_EDGE {
                 // Clamped to the corners the one-deep ghost ring can support:
@@ -487,7 +506,7 @@ impl Mesh {
                 // real neighbour.
                 let gx = (cgx as i32 + gi as i32 - 1).clamp(0, N as i32);
                 let gy = (cgy as i32 + gj as i32 - 1).clamp(0, N as i32);
-                let terrain = self.corner_height(face, gx, gy);
+                let terrain = self.corner_height_tiled(face, gx, gy, cgx, cgy);
                 let dir = corner_direction(face, gx, gy);
                 let r = BASE_RADIUS + terrain * HEIGHT_TO_RADIUS;
                 let slot = gj * VERTS_PER_EDGE + gi;
@@ -754,15 +773,61 @@ impl Mesh {
     /// the fade below has already reached zero there anyway.
     #[must_use]
     pub fn corner_height(&self, face: usize, gx: i32, gy: i32) -> f32 {
+        self.corner_height_with(face, gx, gy, |x, y| self.dual_height(face, x, y))
+    }
+
+    /// [`Mesh::corner_height`] reading the dual grid from the chunk's tile,
+    /// which [`Mesh::fill_dual_tile`] must have filled for `(cgx, cgy)`.
+    fn corner_height_tiled(&self, face: usize, gx: i32, gy: i32, cgx: usize, cgy: usize) -> f32 {
+        let (ox, oy) = (cgx as i32 + DUAL_TILE_ORIGIN, cgy as i32 + DUAL_TILE_ORIGIN);
+        self.corner_height_with(face, gx, gy, |x, y| {
+            let (tx, ty) = (x - ox, y - oy);
+            if (0..DUAL_TILE as i32).contains(&tx) && (0..DUAL_TILE as i32).contains(&ty) {
+                self.scratch_dual[ty as usize * DUAL_TILE + tx as usize]
+            } else {
+                self.dual_height(face, x, y)
+            }
+        })
+    }
+
+    /// The body of [`Mesh::corner_height`], with the dual-grid read supplied, so
+    /// the tiled and untiled forms are one sequence of `f32` operations and
+    /// cannot round differently.
+    #[inline]
+    fn corner_height_with(
+        &self,
+        face: usize,
+        gx: i32,
+        gy: i32,
+        dual: impl Fn(i32, i32) -> f32,
+    ) -> f32 {
         if let Some(cells) = cube_corner_cells(face, gx, gy) {
             let sum: i32 = cells.iter().map(|&c| self.smooth[c]).sum();
             return (sum / 3) as f32 / 256.0;
         }
         if warp_fade(gx, gy) <= 0.0 {
-            return self.dual_height(face, gx, gy);
+            return dual(gx, gy);
         }
         let k = corner_slot(face, gx, gy) * 2;
-        self.dual_height_at(face, self.warp_xy[k], self.warp_xy[k + 1])
+        bilinear_dual(self.warp_xy[k], self.warp_xy[k + 1], dual)
+    }
+
+    /// Fill [`Mesh::scratch_dual`] for the chunk whose first corner is
+    /// `(cgx, cgy)`, over the corners `0 ..= N` the tile covers.
+    fn fill_dual_tile(&mut self, face: usize, cgx: usize, cgy: usize) {
+        let (ox, oy) = (cgx as i32 + DUAL_TILE_ORIGIN, cgy as i32 + DUAL_TILE_ORIGIN);
+        for ty in 0..DUAL_TILE {
+            let gy = oy + ty as i32;
+            if !(0..=N as i32).contains(&gy) {
+                continue;
+            }
+            for tx in 0..DUAL_TILE {
+                let gx = ox + tx as i32;
+                if (0..=N as i32).contains(&gx) {
+                    self.scratch_dual[ty * DUAL_TILE + tx] = self.dual_height(face, gx, gy);
+                }
+            }
+        }
     }
 
     /// The untabulated form of [`Mesh::corner_height`], kept so a test can pin
@@ -790,29 +855,10 @@ impl Mesh {
         ((a + b + c + d) / 4) as f32 / 256.0
     }
 
-    /// The dual grid sampled bilinearly at a continuous corner coordinate.
-    ///
-    /// Clamped to the corners `1 ..= N - 1`, whose four cells are all live. The
-    /// corners on the face edge (`0` and `N`) average a ghost cell, and at a
-    /// cube corner that is the diagonal ghost, which the ghost copy never writes
-    /// — reading it put a dent of height zero into the vertices nearest the
-    /// corner. `warp_fade` has brought the offset to zero well before the edge;
-    /// the clamp is the belt.
+    /// [`bilinear_dual`] over the untiled grid, for the tests that pin the table.
+    #[cfg(test)]
     fn dual_height_at(&self, face: usize, fx: f32, fy: f32) -> f32 {
-        let last = N as i32 - 1;
-        let cx = fx.clamp(1.0, last as f32);
-        let cy = fy.clamp(1.0, last as f32);
-        let x0 = (cx as i32).clamp(1, last - 1);
-        let y0 = (cy as i32).clamp(1, last - 1);
-        let tx = cx - x0 as f32;
-        let ty = cy - y0 as f32;
-        let h00 = self.dual_height(face, x0, y0);
-        let h10 = self.dual_height(face, x0 + 1, y0);
-        let h01 = self.dual_height(face, x0, y0 + 1);
-        let h11 = self.dual_height(face, x0 + 1, y0 + 1);
-        let top = h00 + (h10 - h00) * tx;
-        let bottom = h01 + (h11 - h01) * tx;
-        top + (bottom - top) * ty
+        bilinear_dual(fx, fy, |x, y| self.dual_height(face, x, y))
     }
 
     /// Water surface altitude and depth at a corner, on the same dual grid.
@@ -900,6 +946,33 @@ const WARP_FADE_CELLS: f32 = 3.0;
 /// coast rather than as noise on it, and long enough to carry the amplitude
 /// above without folding.
 const WARP_PERIOD_CELLS: f32 = 8.0;
+
+/// The dual grid sampled bilinearly at a continuous corner coordinate, read
+/// through `dual`.
+///
+/// Clamped to the corners `1 ..= N - 1`, whose four cells are all live. The
+/// corners on the face edge (`0` and `N`) average a ghost cell, and at a
+/// cube corner that is the diagonal ghost, which the ghost copy never writes
+/// — reading it put a dent of height zero into the vertices nearest the
+/// corner. `warp_fade` has brought the offset to zero well before the edge;
+/// the clamp is the belt.
+#[inline]
+fn bilinear_dual(fx: f32, fy: f32, dual: impl Fn(i32, i32) -> f32) -> f32 {
+    let last = N as i32 - 1;
+    let cx = fx.clamp(1.0, last as f32);
+    let cy = fy.clamp(1.0, last as f32);
+    let x0 = (cx as i32).clamp(1, last - 1);
+    let y0 = (cy as i32).clamp(1, last - 1);
+    let tx = cx - x0 as f32;
+    let ty = cy - y0 as f32;
+    let h00 = dual(x0, y0);
+    let h10 = dual(x0 + 1, y0);
+    let h01 = dual(x0, y0 + 1);
+    let h11 = dual(x0 + 1, y0 + 1);
+    let top = h00 + (h10 - h00) * tx;
+    let bottom = h01 + (h11 - h01) * tx;
+    top + (bottom - top) * ty
+}
 
 /// Zero within `WARP_FADE_CELLS` of a face boundary, one in the interior.
 fn warp_fade(gx: i32, gy: i32) -> f32 {
@@ -1940,6 +2013,35 @@ mod tests {
                         m.corner_height_direct(face, gx, gy).to_bits(),
                         "corner ({face}, {gx}, {gy}) differs through the table"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dual_tile_covers_every_sample_and_changes_no_bit() {
+        // The tile is only a saving if the fallback never runs, and only
+        // correct if what it holds is what `dual_height` returns. Both, for
+        // every corner-grid slot of every chunk.
+        let (_w, mut m) = meshed();
+        for chunk in 0..CHUNKS {
+            let (face, cgx, cgy) = chunk_origin(chunk);
+            m.fill_dual_tile(face, cgx, cgy);
+            let (ox, oy) = (cgx as i32 + DUAL_TILE_ORIGIN, cgy as i32 + DUAL_TILE_ORIGIN);
+            for gj in 0..VERTS_PER_EDGE as i32 {
+                for gi in 0..VERTS_PER_EDGE as i32 {
+                    let gx = (cgx as i32 + gi - 1).clamp(0, N as i32);
+                    let gy = (cgy as i32 + gj - 1).clamp(0, N as i32);
+                    let tiled = m.corner_height_with(face, gx, gy, |x, y| {
+                        let (tx, ty) = (x - ox, y - oy);
+                        assert!(
+                            (0..DUAL_TILE as i32).contains(&tx)
+                                && (0..DUAL_TILE as i32).contains(&ty),
+                            "chunk {chunk} corner ({gx}, {gy}) samples ({x}, {y}) outside its tile"
+                        );
+                        m.scratch_dual[ty as usize * DUAL_TILE + tx as usize]
+                    });
+                    assert_eq!(tiled.to_bits(), m.corner_height(face, gx, gy).to_bits());
                 }
             }
         }
