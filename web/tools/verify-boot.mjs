@@ -233,6 +233,54 @@ async function main() {
       process.exit(1);
     }
 
+    // And: does a full re-upload stay full? `restart` resets the world in place
+    // and asks the terrain and the sea for a whole-buffer upload; when a tick
+    // lands before the next frame renders, that frame's `sync` sees dirty
+    // chunks, and adding their ranges would narrow the upload to them — every
+    // other chunk would keep drawing the dead world.
+    const narrowed = await page.evaluate(() => {
+      const g = window.diomano;
+      const buffers = (object) => {
+        const out = [];
+        object.traverse((o) => {
+          if (o.geometry) {
+            for (const [name, a] of Object.entries(o.geometry.attributes)) out.push([name, a]);
+          }
+        });
+        return out;
+      };
+      g.planet.refreshAll();
+      g.water.refreshAll();
+      // One chunk, as a single tick would leave it.
+      g.sim.meshDirty.fill(0);
+      g.sim.meshDirty[0] = 1;
+      g.planet.sync(g.sim.e.dio_sea_level());
+      g.water.sync();
+      const problems = [];
+      for (const [layer, root] of [
+        ["terrain", g.planet.group],
+        ["water", g.water.mesh],
+      ]) {
+        for (const [name, a] of buffers(root)) {
+          if (a.updateRanges.length > 0) {
+            problems.push(`${layer} ${name}: ${a.updateRanges.length} ranges after refreshAll`);
+          }
+        }
+      }
+      g.sim.meshDirty.fill(0);
+      return problems;
+    });
+    if (narrowed.length > 0) {
+      console.error(`
+FULL UPLOAD NARROWED — a refresh after a world reset uploads only the dirty chunks.
+
+  \`refreshAll\` asks for the whole buffer; a \`sync\` before the frame that
+  uploads it added per-chunk update ranges, and three then uploads only those.
+`);
+      for (const n of narrowed) console.error(`  ${n}`);
+      process.exit(1);
+    }
+
     // Also: does every patched material get the shader it patched? Asked of
     // both tiers, because each one puts a different set of materials together.
     // The booted page is closed first: two clients rasterising on SwiftShader
