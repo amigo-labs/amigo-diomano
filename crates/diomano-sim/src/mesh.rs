@@ -502,30 +502,28 @@ impl Mesh {
             }
         }
 
-        for gj in 0..VERTS_PER_EDGE {
-            for gi in 0..VERTS_PER_EDGE {
-                // The skirt ring clamps onto the border corner and drops.
-                let i = (gi as i32 - 1).clamp(0, CHUNK as i32);
-                let j = (gj as i32 - 1).clamp(0, CHUNK as i32);
+        // The chunk's own corners. The skirt ring is filled afterwards, by copy.
+        for gj in 1..VERTS_PER_EDGE - 1 {
+            for gi in 1..VERTS_PER_EDGE - 1 {
+                let i = gi as i32 - 1;
+                let j = gj as i32 - 1;
 
                 let gx = cgx as i32 + i;
                 let gy = cgy as i32 + j;
 
                 // Read back from the corner grid rather than recomputed, so the two
                 // can never disagree *and* the dual-grid average runs once per
-                // vertex: the skirt ring reads the border slot it duplicates,
-                // exactly as the `i`/`j` clamp above says it should.
-                let slot = gj.clamp(1, VERTS_PER_EDGE - 2) * VERTS_PER_EDGE
-                    + gi.clamp(1, VERTS_PER_EDGE - 2);
+                // vertex.
+                let slot = gj * VERTS_PER_EDGE + gi;
                 let terrain = self.scratch_heights[slot];
                 let (surface, depth) = self.corner_water(w, face, gx, gy, terrain);
                 let (mat, veg, infl) = corner_attribs(w, face, gx, gy);
                 let (lava, fert, sed) = corner_attribs2(w, face, gx, gy);
                 let splat = corner_material_weights(w, face, gx, gy);
 
-                // The same slot's direction: `(cgx + i, cgy + j)` with `i, j`
-                // clamped to `0..=CHUNK` is exactly the corner the first pass
-                // projected there, its `clamp(0, N)` being a no-op inside a face.
+                // The same slot's direction: `(cgx + i, cgy + j)` with `i, j` in
+                // `0..=CHUNK` is exactly the corner the first pass projected
+                // there, its `clamp(0, N)` being a no-op inside a face.
                 let vi = vbase + gj * VERTS_PER_EDGE + gi;
                 let src = slot * 3;
                 let dir = [
@@ -571,6 +569,7 @@ impl Mesh {
                 self.water_attribs[vi * 4 + 3] = ((depth / 4.0) as i32 + 128).clamp(0, 255) as u8;
             }
         }
+        self.copy_skirt_ring(chunk);
 
         // Any water in the chunk or its one-cell apron: a waterline can cross a
         // border quad whose wet cell belongs to the neighbour.
@@ -590,6 +589,33 @@ impl Mesh {
         // the artefact the skirt exists to prevent.
         self.build_normals(chunk);
         self.sink_skirt(chunk);
+    }
+
+    /// Fill the skirt ring with a copy of the border vertex each slot duplicates.
+    ///
+    /// A ring vertex clamps onto its border corner — same `(gx, gy)`, same grid
+    /// slot — so every attribute it would compute is the border's, bit for bit.
+    /// It used to compute them anyway: 72 of the 361 vertices of every chunk,
+    /// each with its two 4 x 4 blocks, re-deriving a value already in the
+    /// buffer. Normals and the skirt drop are applied afterwards, as before.
+    fn copy_skirt_ring(&mut self, chunk: usize) {
+        let vbase = chunk * VERTS_PER_CHUNK;
+        let last = VERTS_PER_EDGE - 1;
+        for gj in 0..VERTS_PER_EDGE {
+            for gi in 0..VERTS_PER_EDGE {
+                if gi != 0 && gj != 0 && gi != last && gj != last {
+                    continue;
+                }
+                let dst = vbase + gj * VERTS_PER_EDGE + gi;
+                let src = vbase + gj.clamp(1, last - 1) * VERTS_PER_EDGE + gi.clamp(1, last - 1);
+                self.positions.copy_within(src * 3..src * 3 + 3, dst * 3);
+                self.water_positions.copy_within(src * 3..src * 3 + 3, dst * 3);
+                self.attribs.copy_within(src * 4..src * 4 + 4, dst * 4);
+                self.attribs2.copy_within(src * 4..src * 4 + 4, dst * 4);
+                self.attribs3.copy_within(src * 4..src * 4 + 4, dst * 4);
+                self.water_attribs.copy_within(src * 4..src * 4 + 4, dst * 4);
+            }
+        }
     }
 
     /// Push the outer ring inward, hiding cracks against a stale neighbour.
