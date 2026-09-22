@@ -21,6 +21,10 @@
  * gameplay and exists to be looked at. This one asks one question in a few
  * seconds and answers it with an exit code.
  *
+ * It also asks one thing only a running client can answer: whether every
+ * material that patches three's shaders is drawn with the program its patch
+ * produced, rather than with one three cached for another material.
+ *
  * Usage:  node tools/verify-boot.mjs
  * Exits 0 when the game handle appears with a clean console, 1 otherwise.
  */
@@ -101,6 +105,63 @@ function serve() {
   });
 }
 
+/**
+ * Materials that three.js resolved to one compiled program while their
+ * `onBeforeCompile` hooks write different GLSL, as `"a / b"` name pairs.
+ *
+ * Asked of the running client after `renderer.compile`, so every material in
+ * the scene has a program. The hooks are then replayed against one stub shader
+ * carrying every marker the client injects at: two materials sharing a program
+ * must produce the same text from it, or one of them is not drawn with its own.
+ */
+async function sharedPrograms(browser, port, tier) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  try {
+    await page.goto(`http://127.0.0.1:${port}/?seed=5eed&tier=${tier}`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.diomano !== undefined, null, { timeout: BOOT_BUDGET });
+    return await page.evaluate(() => {
+      const { renderer, scene, camera } = window.diomano;
+      renderer.compile(scene, camera.camera);
+      const markers = [
+        "#include <common>",
+        "#include <beginnormal_vertex>",
+        "#include <begin_vertex>",
+        "#include <project_vertex>",
+        "#include <opaque_fragment>",
+      ].join("\n");
+      const patched = (material) => {
+        const shader = { uniforms: {}, vertexShader: markers, fragmentShader: markers };
+        material.onBeforeCompile(shader, renderer);
+        return `${shader.vertexShader}\n----\n${shader.fragmentShader}`;
+      };
+      const byProgram = new Map();
+      scene.traverse((object) => {
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) {
+          if (!material || material.onBeforeCompile.toString() === "function () {}") continue;
+          const program = renderer.properties.get(material).currentProgram;
+          if (!program) continue;
+          const group = byProgram.get(program) ?? new Map();
+          group.set(material, object.name || object.type);
+          byProgram.set(program, group);
+        }
+      });
+      const clashes = [];
+      for (const group of byProgram.values()) {
+        const [first, ...rest] = [...group.entries()];
+        if (!first) continue;
+        const source = patched(first[0]);
+        for (const [material, name] of rest) {
+          if (patched(material) !== source) clashes.push(`${first[1]} / ${name}`);
+        }
+      }
+      return clashes;
+    });
+  } finally {
+    await page.close();
+  }
+}
+
 async function main() {
   if (!existsSync(join(DIST, "index.html"))) fail("no build; run `just build-web` first");
   if (!existsSync(join(DIST, "diomano.wasm"))) {
@@ -172,6 +233,28 @@ async function main() {
       process.exit(1);
     }
 
+    // Also: does every patched material get the shader it patched? Asked of
+    // both tiers, because each one puts a different set of materials together.
+    // The booted page is closed first: two clients rasterising on SwiftShader
+    // at once starve each other past the boot budget.
+    await page.close();
+    for (const tier of [1, 2]) {
+      const shared = await sharedPrograms(browser, port, tier);
+      if (shared.length > 0) {
+        console.error(`
+SHADER PROGRAMS — materials with different shaders share one program (tier ${tier}).
+
+  three.js caches a compiled program by \`customProgramCacheKey()\`, which
+  defaults to \`onBeforeCompile.toString()\`. Two materials built by the same
+  function with different injected GLSL therefore have the same key, and the
+  second is drawn with the first one's program — its own patch never compiles.
+  Give the material a key that names what it injects.
+`);
+        for (const s of shared) console.error(`  ${s}`);
+        process.exit(1);
+      }
+    }
+
     // Second question: when the boot *does* fail, does the front door say so
     // legibly? The epitaph is written into `#fallback`, which sits above the
     // title card rather than replacing it, so a real failure once shipped as a
@@ -202,7 +285,8 @@ FRONT DOOR — the epitaph is printed over the title card.
     }
 
     console.log(`verify-boot: OK — the built client reaches a running game with a clean
-            console, and a failed boot reports itself on a cleared page.`);
+            console, every patched material compiles its own shader at both
+            tiers, and a failed boot reports itself on a cleared page.`);
   } finally {
     await browser.close();
     server.close();

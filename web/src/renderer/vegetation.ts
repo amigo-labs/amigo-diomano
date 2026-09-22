@@ -948,6 +948,15 @@ function hazedLambert(
     );
     shader.fragmentShader = fragment;
   };
+  // three caches a compiled program by this key, and its default is
+  // `onBeforeCompile.toString()` — the same text for every material this
+  // function builds, whatever `extra` and `walk` it closed over. So the first
+  // one compiled was the program for all of them that also agreed on
+  // `vertexColors`: the settlements drew with the flora's shader and never lit
+  // their windows, and the walkers drew with the buildings' and lost their
+  // rim light and their walk cycle. `verify-boot` asserts it.
+  const key = `dio|${extra}|${walk ? `${walk.vertex}|${walk.normal}|${walk.position}` : ""}`;
+  material.customProgramCacheKey = () => key;
   return material;
 }
 
