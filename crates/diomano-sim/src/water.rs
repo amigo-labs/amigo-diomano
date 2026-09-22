@@ -341,6 +341,39 @@ mod tests {
     }
 
     #[test]
+    fn lava_is_conserved_across_seams() {
+        // Lava across a seam is staged in `seam_flux` against the room the
+        // ghost copy showed at the start of the half, and the real cell can
+        // fill from its own face in the same half. Deep, uneven lava along
+        // every face edge over rough ground makes that happen everywhere at
+        // once; nothing but the transfer runs, so any change in the total is
+        // the seams.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let mut rng = 0x2545_f491_u32;
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    w.water[c] = 0;
+                    let edge = x.min(y).min(N - 1 - x).min(N - 1 - y);
+                    rng ^= rng << 13;
+                    rng ^= rng >> 17;
+                    rng ^= rng << 5;
+                    w.height[c] = 2000 + (rng & 511) as i16;
+                    w.lava[c] = if edge < 3 { (rng >> 24) as u8 } else { 0 };
+                }
+            }
+        }
+        let before = total_lava(&w);
+        for _ in 0..20 {
+            w.ghost_copy_all();
+            transfer_lava(&mut w);
+        }
+        assert_eq!(total_lava(&w), before, "lava leaked at a face boundary");
+    }
+
+    #[test]
     fn vegetation_damping_channels_flow_through_a_gap() {
         // HANDOFF §4.3: an open gap in a forest channels and amplifies a strong
         // current. This must fall out of the damping term with no special case

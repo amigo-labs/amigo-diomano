@@ -943,7 +943,19 @@ impl World {
     /// A flow pass writing into a ghost cell would lose that matter, because
     /// ghosts are overwritten on the next copy. Instead each such transfer is
     /// recorded against the seam entry it crossed and applied here.
+    ///
+    /// Lava is capped at a byte, and the room its flow was limited by is the
+    /// ghost copy's, taken before the half began — while the real cell can fill
+    /// from its own face in the same half. What the cap turns away goes back to
+    /// the live cell it left, in a second sweep once every seam has landed; it
+    /// used to be clamped off and destroyed (`lava_is_conserved_across_seams`).
+    /// The sender has room for it: it gave at least that much, nothing on its
+    /// own face flows into it during its own half, and a seam flux into it was
+    /// limited by the room it had when the half began. The one exception is a
+    /// cell at a cube corner receiving over *two* seams in the same half, where
+    /// the `min` below can still turn a remainder away.
     pub fn apply_seam_flux_i16(&mut self, field: FluxField) {
+        let mut returned = false;
         for k in 0..GHOST_ENTRIES {
             let f = self.seam_flux[k];
             if f == 0 {
@@ -957,13 +969,29 @@ impl World {
                         (i32::from(self.water[dst]) + f).clamp(0, i32::from(i16::MAX)) as i16;
                 }
                 FluxField::Lava => {
-                    self.lava[dst] = (i32::from(self.lava[dst]) + f).clamp(0, 255) as u8;
+                    let total = i32::from(self.lava[dst]) + f;
+                    self.lava[dst] = total.clamp(0, 255) as u8;
+                    if total > 255 {
+                        self.seam_flux[k] = total - 255;
+                        returned = true;
+                    }
                 }
                 FluxField::Height => {
                     self.height[dst] = (i32::from(self.height[dst]) + f)
                         .clamp(i32::from(HEIGHT_MIN), i32::from(HEIGHT_MAX))
                         as i16;
                 }
+            }
+        }
+        if returned {
+            for k in 0..GHOST_ENTRIES {
+                let back = self.seam_flux[k];
+                if back == 0 {
+                    continue;
+                }
+                self.seam_flux[k] = 0;
+                let src = seam_entry_source(k);
+                self.lava[src] = (i32::from(self.lava[src]) + back).min(255) as u8;
             }
         }
     }
@@ -1518,6 +1546,21 @@ impl World {
             self.mana[p] = self.mana[p].saturating_add(per_tick);
             self.mana[p] = self.mana[p].min(9_999 << 16);
         }
+    }
+}
+
+/// The live cell a seam entry's flux leaves from: entry
+/// `(face * 4 + dir) * N + t` is cell `t` along `face`'s `dir` edge — the
+/// numbering `seam_entry` in `water.rs` and `materials.rs` writes.
+const fn seam_entry_source(k: usize) -> usize {
+    let t = k % N;
+    let dir = (k / N) % 4;
+    let face = k / (4 * N);
+    match dir {
+        crate::seams::DIR_N => idx(face, t, N - 1),
+        crate::seams::DIR_E => idx(face, N - 1, t),
+        crate::seams::DIR_S => idx(face, t, 0),
+        _ => idx(face, 0, t),
     }
 }
 
