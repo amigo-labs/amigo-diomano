@@ -706,6 +706,41 @@ async function main() {
       orbiting ? (released ? "" : "the camera kept orbiting") : "the right drag never orbited",
     );
 
+    // --- 15. holding F1 toggles the control list once -----------------------
+    const controlsShown = () =>
+      read(() => document.querySelector(".hud-controls")?.classList.contains("shown") ?? null);
+    const shownBefore = await controlsShown();
+    await page.keyboard.down("F1");
+    // Further `down`s on a held key arrive with `repeat` set, as the OS's
+    // auto-repeat would send them.
+    for (let i = 0; i < 5; i++) await page.keyboard.down("F1");
+    await page.keyboard.up("F1");
+    await ticks(1);
+    const shownAfter = await controlsShown();
+    check(
+      "holding F1 toggles the control list once",
+      shownBefore !== null && shownAfter === !shownBefore,
+      `shown ${shownBefore} -> ${shownAfter} after one press and five repeats`,
+    );
+    if (shownAfter) await page.keyboard.press("F1");
+
+    // --- 16. a command-key chord does not leave a sculpt key held -----------
+    //
+    // macOS sends no keyup for a key released while Command is down, so
+    // Command releases the keys the game was holding rather than leave `R`
+    // down with no way for the page to hear it come up.
+    await page.keyboard.down("r");
+    await ticks(2);
+    await page.keyboard.down("Meta");
+    await page.keyboard.up("Meta");
+    const heldAfterMeta = await read(() => window.diomano.keys.inspect());
+    await page.keyboard.up("r");
+    check(
+      "Command releases the keys the game holds",
+      !heldAfterMeta.includes("KeyR"),
+      `held after Command: ${JSON.stringify(heldAfterMeta)}`,
+    );
+
     // --- 12. the intro tour does not take the camera back ------------------
     const idleBefore = await cam();
     await ticks(30);

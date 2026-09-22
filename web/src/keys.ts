@@ -102,6 +102,11 @@ export function createKeys(): Keys {
   let shift = false;
 
   addEventListener("keydown", (ev) => {
+    // macOS delivers no `keyup` for a key released while Command is down, so a
+    // sculpt key held into a Command chord would read as held until it was
+    // pressed again. Command takes the keyboard for the chord; let go of
+    // everything, as a blur does.
+    if (ev.key === "Meta") forget();
     // Those chords are the browser's and the window manager's. Reading them as
     // game input is how `Ctrl+R` becomes "extreme raise" and reloads the page.
     if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
