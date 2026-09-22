@@ -303,6 +303,48 @@ SHADER PROGRAMS — materials with different shaders share one program (tier ${t
       }
     }
 
+    // A crash after the boot: a throw inside a frame must stop the loop and say
+    // so, rather than escape the rAF callback and throw again every frame
+    // behind a picture that has silently stopped. Injected into the render
+    // half, which is the half that used to have no handler.
+    const crashing = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const crashErrors = [];
+    crashing.on("pageerror", (err) => crashErrors.push(err.message));
+    try {
+      await crashing.goto(`http://127.0.0.1:${port}/?seed=5eed`, { waitUntil: "load" });
+      await crashing.waitForFunction(() => window.diomano !== undefined, null, {
+        timeout: BOOT_BUDGET,
+      });
+      await crashing.evaluate(() => {
+        window.diomano.radial.sync = () => {
+          throw new Error("injected render fault");
+        };
+      });
+      let reported = true;
+      try {
+        await crashing.waitForFunction(
+          () => (document.querySelector("#fallback")?.textContent ?? "").includes("injected"),
+          null,
+          { timeout: BOOT_BUDGET },
+        );
+      } catch {
+        reported = false;
+      }
+      if (!reported || crashErrors.length > 0) {
+        console.error(`
+RENDER FAULT — a throw inside a frame is not reported.
+
+  The loop calls \`render\` from requestAnimationFrame. A throw there must reach
+  \`halt\`, which stops the loop and writes the epitaph; otherwise it escapes the
+  callback, the next frame throws again, and the page shows a frozen picture.
+  epitaph shown: ${reported}; uncaught errors: ${crashErrors.length}
+`);
+        process.exit(1);
+      }
+    } finally {
+      await crashing.close();
+    }
+
     // Second question: when the boot *does* fail, does the front door say so
     // legibly? The epitaph is written into `#fallback`, which sits above the
     // title card rather than replacing it, so a real failure once shipped as a
@@ -334,7 +376,9 @@ FRONT DOOR — the epitaph is printed over the title card.
 
     console.log(`verify-boot: OK — the built client reaches a running game with a clean
             console, every patched material compiles its own shader at both
-            tiers, and a failed boot reports itself on a cleared page.`);
+            tiers, a full re-upload stays full, a fault inside a frame stops
+            the loop and says so, and a failed boot reports itself on a
+            cleared page.`);
   } finally {
     await browser.close();
     server.close();

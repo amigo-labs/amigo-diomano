@@ -319,13 +319,21 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
    * A trap inside the simulation is a determinism invariant that broke (the wasm
    * shell aborts on panic). Left alone, the loop would re-enter the same trap on
    * every frame; stop, and say so where `main.ts` puts its epitaph.
+   *
+   * A throw while drawing a frame ends up here too. It used to escape the rAF
+   * callback — which had already asked for the next frame — so it threw again
+   * sixty times a second behind a picture that had stopped, and the epitaph
+   * never went up.
    */
-  const halt = (err: unknown): void => {
+  const halt = (err: unknown, where: "simulation" | "frame" = "simulation"): void => {
     halted = true;
     loop.stop();
     matchStarted = false;
     hud.setVisible(false);
-    console.error("diomano: the simulation trapped", err);
+    console.error(
+      where === "simulation" ? "diomano: the simulation trapped" : "diomano: a frame failed",
+      err,
+    );
     const fallback = document.querySelector<HTMLElement>("#fallback");
     if (fallback) {
       fallback.style.display = "grid";
@@ -354,58 +362,66 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       }
     },
     render(alpha, dtMs) {
-      // The camera goes first. Everything below reads its matrix — the shared
-      // view uniforms, the hand's pick ray, the trail's unprojection — and
-      // running it last meant all of them used the previous frame's view. With
-      // 71 ms of orbit smoothing that lag is visible as the cursor sliding
-      // behind the terrain during a drag.
-      camera.update(dtMs);
-      const tick = sim.e.dio_tick_count();
-      view.sync(camera.camera, tick, dtMs);
-
-      // Meshing follows the *tick*, not the frame. Vertex data can only change
-      // when the simulation advanced, and `Mesh::update` is three smoothing
-      // passes plus 96 chunk hashes even when nothing did — at 60 Hz against a
-      // 30 Hz simulation that was every second call wasted, at 144 Hz four in
-      // five. The three go together: `Mesh::update` clears `meshDirty` as it
-      // starts, so a `sync` in a frame without an update would re-upload the
-      // previous tick's chunks again.
-      if (tick !== lastMeshedTick) {
-        lastMeshedTick = tick;
-        sim.meshUpdate();
-        planet.sync(sim.e.dio_sea_level());
-        water.sync();
+      try {
+        renderFrame(alpha, dtMs);
+      } catch (err) {
+        halt(err, "frame");
       }
-      vegetation.sync(tick, alpha);
-      hand.sync(alpha);
-      radial.sync();
-      // Effects read what the simulation *applied*, so the opponent's powers
-      // are visible too and a power refused on cost throws nothing.
-      const fired = sim.verbEvents(seenVerbEvents);
-      seenVerbEvents = fired.written;
-      consumeVerbFeedback(fired.events);
-      camera.shake(effects.sync(sim, fired.events, dtMs));
-      // The same applied-verb list the effects and the sounds read, so a
-      // coaching hint retires on what the simulation did.
-      hud.sync(fired.events);
-      if (radial.open && !menuWasOpen) hud.noteMenuOpened();
-      menuWasOpen = radial.open;
-      atmosphere.sync(
-        sim.e.dio_tide_phase(),
-        sim.e.dio_ticks_to_impact(),
-        sim.e.dio_tide_offset(),
-        sim.e.dio_tide_strength(),
-      );
-      audio.sync(sim, camera.camera, dtMs);
-
-      // The match result, finally read by someone. The sim freezes itself
-      // once the outcome is decided; the client's job is the presentation.
-      const outcome = sim.e.dio_outcome();
-      if (outcome !== 0 && handledOutcome === 0) onMatchEnd(outcome);
-
-      post.render();
     },
   });
+
+  function renderFrame(alpha: number, dtMs: number): void {
+    // The camera goes first. Everything below reads its matrix — the shared
+    // view uniforms, the hand's pick ray, the trail's unprojection — and
+    // running it last meant all of them used the previous frame's view. With
+    // 71 ms of orbit smoothing that lag is visible as the cursor sliding
+    // behind the terrain during a drag.
+    camera.update(dtMs);
+    const tick = sim.e.dio_tick_count();
+    view.sync(camera.camera, tick, dtMs);
+
+    // Meshing follows the *tick*, not the frame. Vertex data can only change
+    // when the simulation advanced, and `Mesh::update` is three smoothing
+    // passes plus 96 chunk hashes even when nothing did — at 60 Hz against a
+    // 30 Hz simulation that was every second call wasted, at 144 Hz four in
+    // five. The three go together: `Mesh::update` clears `meshDirty` as it
+    // starts, so a `sync` in a frame without an update would re-upload the
+    // previous tick's chunks again.
+    if (tick !== lastMeshedTick) {
+      lastMeshedTick = tick;
+      sim.meshUpdate();
+      planet.sync(sim.e.dio_sea_level());
+      water.sync();
+    }
+    vegetation.sync(tick, alpha);
+    hand.sync(alpha);
+    radial.sync();
+    // Effects read what the simulation *applied*, so the opponent's powers
+    // are visible too and a power refused on cost throws nothing.
+    const fired = sim.verbEvents(seenVerbEvents);
+    seenVerbEvents = fired.written;
+    consumeVerbFeedback(fired.events);
+    camera.shake(effects.sync(sim, fired.events, dtMs));
+    // The same applied-verb list the effects and the sounds read, so a
+    // coaching hint retires on what the simulation did.
+    hud.sync(fired.events);
+    if (radial.open && !menuWasOpen) hud.noteMenuOpened();
+    menuWasOpen = radial.open;
+    atmosphere.sync(
+      sim.e.dio_tide_phase(),
+      sim.e.dio_ticks_to_impact(),
+      sim.e.dio_tide_offset(),
+      sim.e.dio_tide_strength(),
+    );
+    audio.sync(sim, camera.camera, dtMs);
+
+    // The match result, finally read by someone. The sim freezes itself
+    // once the outcome is decided; the client's job is the presentation.
+    const outcome = sim.e.dio_outcome();
+    if (outcome !== 0 && handledOutcome === 0) onMatchEnd(outcome);
+
+    post.render();
+  }
 
   // A development handle. There is no HUD and no debug overlay (§8), so the
   // only way to interrogate a running world is from the console — and being
