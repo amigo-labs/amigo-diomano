@@ -127,9 +127,16 @@ export function createKeys(): Keys {
   // key-up that lands on another window never reaches this page, so without
   // this a hand holding `R` at the moment of alt-tab digs until the player
   // comes back and presses it again.
-  addEventListener("blur", () => {
+  const forget = (): void => {
     down.clear();
     shift = false;
+  };
+  addEventListener("blur", forget);
+  // And the tab going hidden, which a browser can do without a `blur`: the
+  // `keyup` for a key held at that moment lands on whatever took the screen,
+  // and the key would read as down until it was pressed again.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) forget();
   });
 
   return {

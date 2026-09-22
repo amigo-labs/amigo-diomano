@@ -472,12 +472,17 @@ export function createHand(
   keys.onPress(CODE.lower, () => press(-1));
 
   // A tap owed at the moment the keyboard goes away is a tap nobody is
-  // waiting for. `keys.ts` releases the held set on blur; the owed step lives
-  // here, and left alone it fired at the match's next tick — minutes later, in
-  // a tab the player had just come back to, on whatever cell the pointer
-  // happened to be over.
-  addEventListener("blur", () => {
+  // waiting for. `keys.ts` releases the held set on blur and on the tab going
+  // hidden; the owed step lives here, and left alone it fired at the match's
+  // next tick — minutes later, in a tab the player had just come back to, on
+  // whatever cell the pointer happened to be over. Both events, because a
+  // browser can hide a tab without blurring its window.
+  const forgetTap = (): void => {
     pendingTap = 0;
+  };
+  addEventListener("blur", forgetTap);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) forgetTap();
   });
 
   const position = new THREE.Vector3();

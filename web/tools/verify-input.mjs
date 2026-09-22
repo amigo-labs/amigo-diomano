@@ -273,19 +273,40 @@ async function main() {
         }
         return null;
       }, wet);
-    const SCREEN_CENTRE = { x: 400, y: 300 };
-    /** Point the hand at a cell: aim the camera at it, pointer to the centre. */
+    /**
+     * Point the hand at a cell. Returns the cell the hand actually picked, so a
+     * check can insist it landed where it was sent.
+     *
+     * The camera tilts toward the horizon, so the cell `aimAtCell` centres on
+     * is below the middle of the viewport, by an amount that depends on the
+     * zoom. Rather than guess the screen point, ask the client where the cell
+     * is once the camera has moved and put the pointer there.
+     */
     const aimAt = async (cell) => {
       // A middle click first: any press ends the opening tour, and while the
       // tour is running it owns the camera and would override the aim on the
       // next frame. Middle has no verb of its own, so nothing else happens.
-      await page.mouse.click(SCREEN_CENTRE.x, SCREEN_CENTRE.y, { button: "middle" });
+      await page.mouse.click(CENTRE.x, CENTRE.y, { button: "middle" });
       await read((c) => window.diomano.aimAtCell(c.face, c.x, c.y), cell);
-      await page.mouse.move(SCREEN_CENTRE.x, SCREEN_CENTRE.y);
       await ticks(3);
-      await page.mouse.move(SCREEN_CENTRE.x + 1, SCREEN_CENTRE.y);
+      const at = await read((c) => window.diomano.cellScreen(c.face, c.x, c.y), cell);
+      await page.mouse.move(at.x, at.y);
       await ticks(2);
+      // A second, one-pixel move: the hand re-picks every frame anyway, but a
+      // pointer that never moved after the camera settled has been seen to
+      // report the previous frame's cell on a slow renderer.
+      await page.mouse.move(at.x + 1, at.y);
+      await ticks(2);
+      return read(() => window.diomano.hand.target());
     };
+    /** Whether the hand landed inside the 5x5 `findCell` vouched for. */
+    const near = (target, cell) =>
+      target !== null &&
+      cell !== null &&
+      target.face === cell.face &&
+      Math.abs(target.x - cell.x) <= 2 &&
+      Math.abs(target.y - cell.y) <= 2;
+    const show = (t) => (t ? `${t.face}:${t.x},${t.y}` : "none");
     const underHand = () =>
       read(() => {
         const g = window.diomano;
@@ -300,13 +321,14 @@ async function main() {
     // sea gets its own checks once the hand has proven itself on land.
     const landCell = await findCell(false);
     const seaCell = await findCell(true);
-    if (landCell) await aimAt(landCell);
+    let landed = null;
+    if (landCell) landed = await aimAt(landCell);
     else await page.mouse.move(CENTRE.x, CENTRE.y);
     await ticks(2);
     check(
       "the hand starts over dry ground",
-      landCell !== null && (await underHand()) === 0,
-      `land ${JSON.stringify(landCell)}, under hand ${await underHand()}`,
+      near(landed, landCell) && (await underHand()) === 0,
+      `sent to ${show(landCell)}, hand on ${show(landed)}, under hand ${await underHand()}`,
     );
 
     // The refusal is the diegetic "no": a sound and a red palm. Counting the
@@ -395,15 +417,16 @@ async function main() {
     // where the sea is, so the cell is found in the simulation and the camera
     // is pointed at it through the console handle.
     if (seaCell && landCell) {
-      await aimAt(seaCell);
+      const onSea = await aimAt(seaCell);
       const previewOverSea = await ringColour();
       const underSea = await underHand();
       await hold("f", 6);
       const water = await state();
       check(
         "F over the sea fills the hand with water",
-        underSea === 1 && water.material === 1 && water.hand > 0,
-        `under hand ${underSea}, material ${water.material}, hand ${water.hand}`,
+        near(onSea, seaCell) && underSea === 1 && water.material === 1 && water.hand > 0,
+        `sent to ${show(seaCell)}, hand on ${show(onSea)}, under hand ${underSea}, ` +
+          `material ${water.material}, hand ${water.hand}`,
       );
       check(
         "the footprint ring previews water before the key",
@@ -413,7 +436,7 @@ async function main() {
 
       // A hand holding water keeps holding water: over dry ground `F` moves
       // nothing, and says so exactly once.
-      await aimAt(landCell);
+      const onLand = await aimAt(landCell);
       const underLand = await underHand();
       const refusedBeforeDry = await refusals();
       await hold("f", 8);
@@ -421,11 +444,13 @@ async function main() {
       const dry = await state();
       check(
         "water in the hand over dry ground is refused, once",
-        underLand === 0 &&
+        near(onLand, landCell) &&
+          underLand === 0 &&
           dry.material === 1 &&
           dry.hand === water.hand &&
           (await refusals()) - refusedBeforeDry === 1,
-        `under hand ${underLand}, material ${dry.material}, hand ${water.hand} -> ${dry.hand}, ` +
+        `hand on ${show(onLand)}, under hand ${underLand}, material ${dry.material}, ` +
+          `hand ${water.hand} -> ${dry.hand}, ` +
           `${(await refusals()) - refusedBeforeDry} refusals`,
       );
 

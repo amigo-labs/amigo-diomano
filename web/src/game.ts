@@ -28,6 +28,7 @@ import { createAtmosphere } from "./renderer/atmosphere";
 import { createEffects } from "./renderer/effects";
 import { cellDirection, createPlanet } from "./renderer/planet";
 import { createPost } from "./renderer/post";
+import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./renderer/scale";
 import { createVegetation } from "./renderer/vegetation";
 import { createView } from "./renderer/view";
 import { createWater } from "./renderer/water";
@@ -432,6 +433,20 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
      */
     aimAtCell: (face: number, x: number, y: number): void => {
       camera.aimAt(cellDirection(face, x, y, sim.N), true);
+    },
+    /**
+     * Where a cell's surface is on screen, in CSS pixels, for the camera as it
+     * stands this frame. The camera tilts toward the horizon as it comes in,
+     * so the cell `aimAtCell` centred on is *not* at the middle of the
+     * viewport; a test that wants the hand on that cell asks here rather than
+     * guessing a screen point.
+     */
+    cellScreen: (face: number, x: number, y: number): { x: number; y: number } => {
+      const c = sim.idx(face, x, y);
+      const surface =
+        BASE_RADIUS + ((sim.height[c] ?? 0) + Math.max(sim.water[c] ?? 0, 0)) * HEIGHT_TO_RADIUS;
+      const p = cellDirection(face, x, y, sim.N).multiplyScalar(surface).project(camera.camera);
+      return { x: ((p.x + 1) / 2) * innerWidth, y: ((1 - p.y) / 2) * innerHeight };
     },
   };
 
