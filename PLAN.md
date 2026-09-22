@@ -159,7 +159,7 @@ All run, all green:
 
 ```
 just check                              # clean, zero warnings
-cargo test --workspace                  # 155 tests
+cargo test --workspace                  # 221 tests
 cargo run -p diomano-cli -- perf        # per-pass ms breakdown
 cargo run -p diomano-cli -- replay fixtures/session.log --verify
 just build-web && just dev
@@ -216,6 +216,23 @@ Recorded rather than resolved silently. See the run summary for the full list.
 7. **The originals' balance numbers do not exist in public sources.**
    `docs/balance-research.md`. §2 assumes they can be researched; for mechanics
    that is true and productive, for quantities it is not.
+8. **Two seam defects whose fixes move every fixture.** Found in §22's audit,
+   deliberately not fixed, because regenerating the corpus is a design
+   decision and not a repair:
+   - The first checkerboard half of water and of granular movement reads a
+     ghost ring copied *before* `apply_commands`, the tide and the material
+     interactions, so for half a tick a seam compares against its neighbour's
+     previous surface — a raise, a pour or lava cooling into rock on the far
+     side is invisible to it, and sand can slide uphill across a face edge.
+     Matter is conserved. The fix is `ghost_copy_flow_fields()` at the top of
+     both passes.
+   - Sand sliding across a seam moves height but not material
+     (`materials.rs`, the seam branch of the slide), so the same slide leaves a
+     different surface depending on whether a face edge lies between the two
+     cells. The fix needs a material flux through the seam scatter.
+   Both are deterministic and identical native and in the browser; the
+   question is only whether to take the hash change now or with the pacing
+   rules of `docs/specs/pacing.md`, which move the fixtures anyway.
 
 ---
 
@@ -813,6 +830,68 @@ one machine, and none moving a fixture hash (`just verify`, the corpus,
 - [ ] **Not measured on the §7.6 floor**, as before. The tier-2 models are
       gated behind the same setting as the tier-2 effects for exactly that
       reason; tier 1 is pixel-identical to what shipped
+
+### 22. Bugs found by reading, and the mesher again ✅
+
+A pass for defects and measured speed, with the one rule that makes it safe:
+nothing here changes the simulation, and no fixture hash moved. Every fix
+landed with a check that failed on the old code first.
+
+- [x] **Settlements and walkers compiled their own shaders — or didn't.** three
+      caches programs by `customProgramCacheKey()`, whose default is
+      `onBeforeCompile.toString()`, identical for every `hazedLambert` material.
+      At tier 2 the settlements drew with the flora's program and never lit
+      their windows; at tier 1 walkers and magnets lost the rim light and the
+      walk cycle. `verify-boot` now replays each program's materials' hooks
+      against one stub and requires identical source
+- [x] **A restart re-uploads the whole planet**, not just the chunks the first
+      tick changed: a `sync` between `refreshAll` and its upload added ranges and
+      narrowed it. `verify-boot`
+- [x] **A throw while drawing a frame stops the game and says so** instead of
+      throwing every frame behind a frozen picture (876 uncaught errors in 30 s
+      before). `verify-boot`
+- [x] **The hand picks the ray's first contact with the ground.** The
+      mean-sphere fixed point landed behind hills at glancing angles and missed
+      peaks above the mean sphere; 2 of 20 rays disagreed with an independent
+      march. `verify-boot`
+- [x] **The cloud shell is tier 2**, as §7.3 and its own comment said; tier 1
+      drew it without its shadows. Tier 1 no longer shows clouds. `verify-boot`
+- [x] **Input:** the wheel zooms toward the pointer on the far side of the pole
+      (`yawSign` was missing), an orbit whose release was never delivered ends on
+      the next buttonless move, a held F1 toggles once, and Command releases held
+      keys (macOS sends no keyup under it). Four new `verify-input` checks, 24 in
+      all
+- [x] **A brush across a rotating seam stays a brush.** `world::walk` dropped the
+      x-leg's heading turn, so past the east and west edges of faces 2 and 3 the
+      footprint folded back onto its own face and one cell took several terraces
+      per command — raise, lower, earthquake, volcano, flood, swamp and the
+      opponent's aim alike.
+      `a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners`
+- [x] **Lava is conserved across seams.** A seam flux landing on a cell that had
+      filled from its own face was clamped to a byte and the excess destroyed; it
+      now goes back to its sender. `lava_is_conserved_across_seams`
+- [x] Both change behaviour and move **no** fixture hash — the session and all
+      ten corpus matches verify unchanged; no recorded match crosses either case
+- [x] **Meshing 2.29 → 1.63 ms/tick** at 37.0 chunks, one commit per change,
+      every mesh buffer byte-identical — `docs/specs/rendering.md`
+
+Found and deliberately not fixed here, each for a stated reason:
+
+- [ ] The founding chime can sound for every seeded home at match start when
+      the first frame after `begin` runs two ticks (`audio/events.ts` learns
+      silently only at `tick <= 1`) — below 30 fps, i.e. on the §7.6 floor. The
+      fix is a learn-once flag; nothing in the gate reaches the audio event layer
+      to test it, and a new harness is its own change
+- [ ] Lava crackle rolls a burst per render frame, so its density scales with
+      the display's refresh rate, and `setTargetAtTime` is scheduled every frame
+      for the whole session. Same reason
+- [ ] A right press while the left button is already down never starts an orbit:
+      Pointer Events deliver a chorded press as `pointermove`, not `pointerdown`.
+      The buttonless-move rule above covers the dangerous half (an orbit that
+      never ends); starting one on a chord is a behaviour choice
+- [ ] After the radial menu closes, the hand keeps the aim from where it
+      opened until the pointer next moves over the canvas
+- [ ] Two simulation findings that would move the fixtures — decision 8 below
 
 ## Next
 

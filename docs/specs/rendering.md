@@ -219,6 +219,23 @@ bit-identical (the seam tests compare bits and stayed green):
   sculpting-heavy perf script. That is the honest number; the skip pays in
   quiet play, not there.
 
+**Again, 2026-09**, the same way — before/after on one machine, median of five
+600-tick runs, every mesh buffer fingerprinted after every update and
+identical over four map/seed combinations: **2.29 → 1.63 ms at 37.0
+chunks/tick** (this machine measured 2.29 where the figure above was 1.87; the
+session and the machine both drift, which is why each change is measured
+against its own baseline). Three changes, one commit each:
+
+- The skirt ring is a copy of the border vertex it duplicates, so the second
+  vertex pass stopped computing its 72 vertices per chunk. 2.29 → 2.14 ms.
+- The corner grid reads the dual grid from a per-chunk 21 x 21 tile instead of
+  averaging four cells of `smooth` for each of a warped corner's four samples;
+  the tiled and direct forms share one body so they cannot round differently
+  (`the_dual_tile_covers_every_sample_and_changes_no_bit`). 2.14 → 1.83 ms.
+- Fertility and the four material weights read summed-area tables instead of
+  sixteen cells per interior vertex
+  (`box_sums_write_the_bytes_the_blocks_did`). 1.83 → 1.63 ms.
+
 The client also calls `dio_mesh_update` once per **tick** now rather than per
 frame (`game.ts`): the update is the smoothing and 96 chunk hashes even when
 nothing changed, and at 60 Hz against a 30 Hz simulation every second call was
