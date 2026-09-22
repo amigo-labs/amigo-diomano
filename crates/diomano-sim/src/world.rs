@@ -1531,16 +1531,25 @@ pub enum FluxField {
 
 /// Walk `(dx, dy)` cells from `(face, cx, cy)`, following seams.
 ///
-/// Steps one axis then the other, which is well defined because each step goes
-/// through [`step`] and carries the rotated heading with it. Returns `None`
-/// only if the start cell is off-grid.
+/// Steps one axis then the other, each step through [`step`], which carries
+/// the rotated heading with it. Returns `None` only if the start cell is
+/// off-grid.
+///
+/// The y-leg starts turned by however much the x-leg's seams turned the
+/// heading. It used to start from `DIR_N` / `DIR_S` in the *destination*
+/// face's frame, which is a different direction on the far side of a rotating
+/// seam (the east and west edges of faces 2 and 3): the offsets beyond it
+/// folded back onto the face they came from, so a brush there raised one cell
+/// by up to three terraces in one command and left a sheared footprint.
+/// `a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners`.
 #[must_use]
 pub fn walk(face: usize, cx: i32, cy: i32, dx: i32, dy: i32) -> Option<(usize, usize, usize)> {
     if !(0..N as i32).contains(&cx) || !(0..N as i32).contains(&cy) || face >= 6 {
         return None;
     }
     let (mut f, mut x, mut y) = (face, cx, cy);
-    let mut d = if dx >= 0 { crate::seams::DIR_E } else { crate::seams::DIR_W };
+    let start = if dx >= 0 { crate::seams::DIR_E } else { crate::seams::DIR_W };
+    let mut d = start;
     for _ in 0..dx.abs() {
         let n = step(f, x, y, d);
         f = n.0;
@@ -1548,7 +1557,10 @@ pub fn walk(face: usize, cx: i32, cy: i32, dx: i32, dy: i32) -> Option<(usize, u
         y = n.2;
         d = n.3;
     }
-    let mut d = if dy >= 0 { crate::seams::DIR_N } else { crate::seams::DIR_S };
+    // Headings are quarter turns, `N E S W` = `0 1 2 3`, so the turn the x-leg
+    // picked up is the difference mod 4, and the y-leg's heading turns with it.
+    let turn = (d + 4 - start) % 4;
+    let mut d = (if dy >= 0 { crate::seams::DIR_N } else { crate::seams::DIR_S } + turn) % 4;
     for _ in 0..dy.abs() {
         let n = step(f, x, y, d);
         f = n.0;
@@ -1752,6 +1764,49 @@ const fn widen(h: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners() {
+        // `walk` steps the x-leg first; when that leg crosses a seam that
+        // rotates the heading (the east and west edges of faces 2 and 3), the
+        // y-leg has to turn with it, or the offsets beyond the seam fold back
+        // onto the face they came from and one cell takes several terraces.
+        // The eight cube corners are genuinely ambiguous (§3.5), so centres
+        // whose footprint reaches one are left out.
+        for radius in [1i32, 2, 5] {
+            for face in 0..6usize {
+                for cy in 0..N as i32 {
+                    for cx in 0..N as i32 {
+                        let last = N as i32 - 1;
+                        let near_corner = [(0, 0), (0, last), (last, 0), (last, last)]
+                            .iter()
+                            .any(|&(kx, ky)| (cx - kx).abs().max((cy - ky).abs()) <= radius + 1);
+                        if near_corner {
+                            continue;
+                        }
+                        let mut seen = alloc::vec::Vec::new();
+                        for dy in -radius..=radius {
+                            for dx in -radius..=radius {
+                                if dx * dx + dy * dy > radius * radius + radius {
+                                    continue;
+                                }
+                                let (f, x, y) = walk(face, cx, cy, dx, dy).expect("on the grid");
+                                seen.push(idx(f, x, y));
+                            }
+                        }
+                        let offsets = seen.len();
+                        seen.sort_unstable();
+                        seen.dedup();
+                        assert_eq!(
+                            seen.len(),
+                            offsets,
+                            "radius {radius} at face {face} ({cx}, {cy}) visits a cell twice"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn index_formula_matches_the_spec() {
