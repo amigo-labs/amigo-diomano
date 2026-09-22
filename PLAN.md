@@ -159,7 +159,7 @@ All run, all green:
 
 ```
 just check                              # clean, zero warnings
-cargo test --workspace                  # 221 tests
+cargo test --workspace                  # 222 tests
 cargo run -p diomano-cli -- perf        # per-pass ms breakdown
 cargo run -p diomano-cli -- replay fixtures/session.log --verify
 just build-web && just dev
@@ -834,8 +834,11 @@ one machine, and none moving a fixture hash (`just verify`, the corpus,
 ### 22. Bugs found by reading, and the mesher again ✅
 
 A pass for defects and measured speed, with the one rule that makes it safe:
-nothing here changes the simulation, and no fixture hash moved. Every fix
-landed with a check that failed on the old code first.
+no fixture hash moved. The renderer, input and mesher work leaves the
+simulation untouched; the two simulation fixes below (the brush across a
+rotating seam, lava at a full seam cell) do change its behaviour, but only in
+cases no recorded session reaches. Every fix landed with a check that failed on
+the old code first.
 
 - [x] **Settlements and walkers compiled their own shaders — or didn't.** three
       caches programs by `customProgramCacheKey()`, whose default is
@@ -869,7 +872,9 @@ landed with a check that failed on the old code first.
       `a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners`
 - [x] **Lava is conserved across seams.** A seam flux landing on a cell that had
       filled from its own face was clamped to a byte and the excess destroyed; it
-      now goes back to its sender. `lava_is_conserved_across_seams`
+      now goes back to its sender, which always has room, a cube corner included.
+      `lava_is_conserved_across_seams`,
+      `lava_is_conserved_where_a_corner_cell_receives_over_two_seams`
 - [x] Both change behaviour and move **no** fixture hash — the session and all
       ten corpus matches verify unchanged; no recorded match crosses either case
 - [x] **Meshing 2.29 → 1.63 ms/tick** at 37.0 chunks, one commit per change,

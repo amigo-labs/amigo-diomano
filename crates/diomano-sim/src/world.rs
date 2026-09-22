@@ -949,11 +949,24 @@ impl World {
     /// from its own face in the same half. What the cap turns away goes back to
     /// the live cell it left, in a second sweep once every seam has landed; it
     /// used to be clamped off and destroyed (`lava_is_conserved_across_seams`).
-    /// The sender has room for it: it gave at least that much, nothing on its
-    /// own face flows into it during its own half, and a seam flux into it was
-    /// limited by the room it had when the half began. The one exception is a
-    /// cell at a cube corner receiving over *two* seams in the same half, where
-    /// the `min` below can still turn a remainder away.
+    /// The sender always has room for it, so the second sweep never clamps:
+    ///
+    /// - it gave at least what comes back, and nothing on its own face flows
+    ///   into it during its own half — the checkerboard is consistent within
+    ///   a face;
+    /// - lava flows only down the *start-of-half* surface: a sender's live
+    ///   lava only falls, and the ghost it compares against is the start
+    ///   value. So two cells never send to each other in one half, and the
+    ///   highest cell of any group receives nothing over a seam at all;
+    /// - a non-corner edge cell has one ghost image, so what reaches it over a
+    ///   seam is at most the room it had when the half began.
+    ///
+    /// At a cube corner that ordering is what holds: the lowest of the three
+    /// cells can take from both others and overflow, but the highest took
+    /// nothing, and the middle took at most its starting room over its one
+    /// seam from the highest.
+    /// `lava_is_conserved_where_a_corner_cell_receives_over_two_seams`
+    /// builds that case at all 24 face corners.
     pub fn apply_seam_flux_i16(&mut self, field: FluxField) {
         let mut returned = false;
         for k in 0..GHOST_ENTRIES {
@@ -991,7 +1004,9 @@ impl World {
                 }
                 self.seam_flux[k] = 0;
                 let src = seam_entry_source(k);
-                self.lava[src] = (i32::from(self.lava[src]) + back).min(255) as u8;
+                let total = i32::from(self.lava[src]) + back;
+                debug_assert!(total <= 255, "a seam return overfilled its sender");
+                self.lava[src] = total.min(255) as u8;
             }
         }
     }
