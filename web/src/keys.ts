@@ -29,8 +29,9 @@
  *
  * Every key here is ignored when Ctrl, Cmd or Alt is down (those chords belong
  * to the browser and the window manager), auto-repeat is dropped in favour of
- * this module's own cadence, and `blur` releases everything: alt-tabbing away
- * with `R` held must not leave the hand digging in a tab nobody is looking at.
+ * the hand's own cadence (`HOLD_TICKS` in `hand.ts`, paced by the tick), and
+ * `blur` releases everything: alt-tabbing away with `R` held must not leave the
+ * hand digging in a tab nobody is looking at.
  */
 
 import { MOD } from "./verbs";
@@ -126,9 +127,16 @@ export function createKeys(): Keys {
   // key-up that lands on another window never reaches this page, so without
   // this a hand holding `R` at the moment of alt-tab digs until the player
   // comes back and presses it again.
-  addEventListener("blur", () => {
+  const forget = (): void => {
     down.clear();
     shift = false;
+  };
+  addEventListener("blur", forget);
+  // And the tab going hidden, which a browser can do without a `blur`: the
+  // `keyup` for a key held at that moment lands on whatever took the screen,
+  // and the key would read as down until it was pressed again.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) forget();
   });
 
   return {

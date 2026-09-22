@@ -9,7 +9,7 @@ Split from `docs/HANDOFF.md` §5 and §8 (Phase 0). Implemented by
 
 | Verb | Cost | Notes |
 |---|---|---|
-| Raise / lower land | free | Where ~90% of playtime goes. Direct drag, no menu entry. |
+| Raise / lower land | free | Where ~90% of playtime goes. `R` / `F` under the hand, no menu entry. |
 | Papal magnet | cheap | Place a flag; population walks toward it. The *only* command in the game. First walker to reach it becomes leader; if the leader dies the magnet drops there. |
 | Armageddon | very expensive | Immediately triggers the final tide wave at maximum strength. Stalemate breaker. Deliberately awkward to invoke. |
 
@@ -116,7 +116,10 @@ communicated diegetically:
 - **Mana** is the hand's glow.
 - **Brush footprint** is a ring on the ground, so you can see what a drag will
   touch before it touches it.
-- **Carried material** is the fill's colour: earth, water or lava.
+- **Carried material** is the fill's colour: earth, water or lava. While the
+  hand is empty the colour is a *preview* — what `F` would take from the cell
+  under the hand (`dio_material_under`), so the ring turns blue over the sea
+  before anything is pressed.
 
 ### Controls
 
@@ -129,7 +132,7 @@ communicated diegetically:
 | menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
 | shift | thrown |
 | `B` | cycle the brush: normal → increased → extreme |
-| `1` `2` `3` | switch the hand to earth / water / lava (empty hand only) |
+| `F` over water / lava | the empty hand takes what is under it: water or lava instead of earth |
 | `W A S D` / arrows, `Q` / `E` | orbit, zoom |
 | middle drag, wheel | orbit, zoom |
 

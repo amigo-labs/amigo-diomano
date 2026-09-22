@@ -108,6 +108,8 @@ interface RawExports {
   dio_hand_amount(player: number): number;
   dio_hand_material(player: number): number;
   dio_hand_capacity(): number;
+  /** What an empty hand lowered here would come up with: earth, water or lava. */
+  dio_material_under(face: number, x: number, y: number): number;
   dio_walker_count(player: number): number;
   dio_magnet_active(player: number): number;
   dio_magnet_face(player: number): number;

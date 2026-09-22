@@ -360,9 +360,10 @@ fn cmd_perf(o: &Opts) -> Result<(), String> {
         lap(0, &mut t, &mut total);
         w.apply_commands(buf.as_slice());
         lap(1, &mut t, &mut total);
+        let sea_before = w.sea_level;
         tide::step(&mut w);
         lap(2, &mut t, &mut total);
-        water::transfer_water(&mut w);
+        water::transfer_water(&mut w, sea_before);
         lap(3, &mut t, &mut total);
         water::transfer_lava(&mut w);
         lap(4, &mut t, &mut total);
@@ -1246,7 +1247,9 @@ fn demo_script(tick: u32, seed: u32, cataclysm: bool, two_sided: bool, buf: &mut
         }),
         // Cycle the hand through earth, water and lava so `sculpt`'s three branches
         // all get used. Weighted to earth: water and lava in the hand build water
-        // and lava, and a home plateau made of lava is not a home.
+        // and lava, and a home plateau made of lava is not a home. The client no
+        // longer sends `VERB_SET_HAND` (an empty hand takes what is under it); the
+        // corpus keeps sending it so the verb stays covered and a log stays a log.
         310 => buf.push(Command {
             tick,
             x: if cycle.is_multiple_of(8) { (cycle / 8 % 2 + 1) as u16 } else { 0 },

@@ -127,6 +127,9 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         }
         // Mixing is impossible: picking up a second material requires depositing
         // the first (§4.2). A full hand ignores the verb rather than swapping.
+        // The client does not send this any more — an empty hand takes what is
+        // under it, see `sculpt` — but replay logs and the §6.3 corpus do, and a
+        // recorded match must keep meaning what it meant.
         VERB_SET_HAND if w.hand[player].amount == 0 => {
             w.hand[player].material = (cmd.x as u8).min(HAND_LAVA);
             true
@@ -186,6 +189,17 @@ fn sculpt(
     radius: i32,
     raise: bool,
 ) -> bool {
+    // An empty hand takes whatever it is dipped into: lower it over the sea and
+    // it comes up with water, over a vent with lava, over ground with earth. The
+    // centre cell decides, here in the simulation, so a replay decides the same.
+    // A hand that already holds something keeps holding it — earth in the hand
+    // over the sea digs the seabed, which is how the sea is deepened, and water
+    // in the hand over dry ground moves nothing and says so through the return.
+    // `VERB_SET_HAND` still exists as an explicit override for logs; the client
+    // no longer sends it.
+    if !raise && w.hand[player].amount == 0 {
+        w.hand[player].material = w.material_under(idx(face, cx as usize, cy as usize));
+    }
     match w.hand[player].material {
         HAND_EARTH => w.deform(player, face, cx, cy, radius, raise) > 0,
         HAND_WATER => fluid(w, player, face, cx, cy, radius, raise, false),
@@ -286,9 +300,13 @@ fn earthquake(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
             let span = radius * radius + 1;
             let amount = (i32::from(TERRACE) * 3 * (span - d2) / span).max(1);
             let delta = sign * amount;
+            let was_sea = w.is_seabed(c);
             w.height[c] = (i32::from(w.height[c]) + delta)
                 .clamp(i32::from(HEIGHT_MIN), i32::from(HEIGHT_MAX))
                 as i16;
+            // Same settlement against the sea as `deform`: a dent below the line
+            // floods, a bump raised clear of it comes up dry.
+            w.refresh_cell_water(c, was_sea);
             if w.material[c] == crate::world::MAT_SOIL {
                 w.material[c] = MAT_ASH;
             }
@@ -842,8 +860,8 @@ pub fn replay(
 mod tests {
     use super::*;
     use crate::world::{
-        MAT_SOIL, MapConfig, POWER_CHAMPION, POWER_SWAMP, TERRAIN_PANGAEA, VERB_CHAMPION, VERB_NOP,
-        VERB_SET_HAND,
+        Hand, MAT_SOIL, MapConfig, POWER_CHAMPION, POWER_SWAMP, TERRAIN_PANGAEA, VERB_CHAMPION,
+        VERB_NOP, VERB_SET_HAND,
     };
 
     const MANIFEST: &str = r#"
@@ -1060,6 +1078,140 @@ enabled = true
         assert_eq!(w.height[c], h_before, "a water-carrying hand moved earth");
         assert!(w.water[c] > 0, "a water-carrying hand deposited nothing");
         assert!(w.hand[0].amount < 1000);
+    }
+
+    #[test]
+    fn an_empty_hand_takes_what_is_under_it() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        w.init(&cfg);
+        let lower =
+            |x, y| Command { tick: 0, x, y, player: 0, verb: VERB_LOWER, face: 4, modifier: 0 };
+
+        // Dipped into the sea, it comes up with water, and the seabed is intact.
+        let sea = idx(4, 10, 10);
+        w.height[sea] = w.sea_level - 200;
+        w.water[sea] = 200;
+        w.lava[sea] = 0;
+        let bed = w.height[sea];
+        apply(&mut w, 0, &lower(10, 10));
+        assert_eq!(w.hand[0].material, HAND_WATER, "lowered over the sea, the hand took earth");
+        assert!(w.hand[0].amount > 0, "the hand came up empty");
+        assert_eq!(w.height[sea], bed, "dipped into the sea, the hand dug the seabed");
+
+        // Over a vent, lava.
+        w.hand[0].amount = 0;
+        let vent = idx(4, 40, 40);
+        w.lava[vent] = 200;
+        w.water[vent] = 0;
+        apply(&mut w, 0, &lower(40, 40));
+        assert_eq!(
+            w.hand[0].material, HAND_LAVA,
+            "lowered over lava, the hand took something else"
+        );
+        assert!(w.lava[vent] < 200, "no lava was drawn");
+
+        // Over ground with a film thinner than a terrace: ground, not a sip.
+        w.hand[0].amount = 0;
+        let land = idx(4, 20, 20);
+        w.height[land] = w.sea_level + 400;
+        w.water[land] = TERRACE - 1;
+        w.lava[land] = 0;
+        let top = w.height[land];
+        apply(&mut w, 0, &lower(20, 20));
+        assert_eq!(w.hand[0].material, HAND_EARTH, "a puddle turned a dig into a sip");
+        assert!(w.height[land] < top, "the ground was not dug");
+    }
+
+    #[test]
+    fn a_carrying_hand_keeps_its_material() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        w.init(&cfg);
+        let lower =
+            |x, y| Command { tick: 0, x, y, player: 0, verb: VERB_LOWER, face: 4, modifier: 0 };
+
+        // Earth in the hand over the sea digs the seabed — that is how the sea
+        // is deepened — rather than switching to water.
+        let sea = idx(4, 10, 10);
+        w.height[sea] = w.sea_level - 200;
+        w.water[sea] = 200;
+        w.lava[sea] = 0;
+        w.hand[0] = Hand { material: HAND_EARTH, _pad: 0, amount: 100 };
+        let bed = w.height[sea];
+        apply(&mut w, 0, &lower(10, 10));
+        assert_eq!(w.hand[0].material, HAND_EARTH, "a hand holding earth switched material");
+        assert!(w.height[sea] < bed, "earth in the hand did not dig the seabed");
+
+        // Water in the hand over dry ground moves nothing, and is not announced.
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let c = idx(4, (20 + dx) as usize, (20 + dy) as usize);
+                w.height[c] = w.sea_level + 400;
+                w.water[c] = 0;
+                w.lava[c] = 0;
+            }
+        }
+        w.hand[0] = Hand { material: HAND_WATER, _pad: 0, amount: 100 };
+        let events = w.census.verb_events_written;
+        apply(&mut w, 0, &lower(20, 20));
+        assert_eq!(w.hand[0].material, HAND_WATER);
+        assert_eq!(w.hand[0].amount, 100, "a water hand drew something from dry ground");
+        assert_eq!(
+            w.census.verb_events_written, events,
+            "a lower that moved nothing was announced"
+        );
+    }
+
+    #[test]
+    fn carrying_water_draws_from_a_lake_and_pours_it_back() {
+        let mut w = World::boxed();
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        w.init(&cfg);
+        // A one-cell lake on a dry, flat shelf above the sea.
+        let level = w.sea_level.max(w.sea_base) + 300;
+        for dy in -2..=2i32 {
+            for dx in -2..=2i32 {
+                let c = idx(4, (30 + dx) as usize, (30 + dy) as usize);
+                w.height[c] = level;
+                w.water[c] = 0;
+                w.lava[c] = 0;
+            }
+        }
+        let lake = idx(4, 30, 30);
+        w.water[lake] = 500;
+        w.hand[0] = Hand { material: HAND_EARTH, _pad: 0, amount: 0 };
+        let footprint = |w: &World| -> i32 {
+            let mut t = 0i32;
+            for dy in -1..=1i32 {
+                for dx in -1..=1i32 {
+                    t += i32::from(w.water[idx(4, (30 + dx) as usize, (30 + dy) as usize)]);
+                }
+            }
+            t
+        };
+
+        apply(
+            &mut w,
+            0,
+            &Command { tick: 0, x: 30, y: 30, player: 0, verb: VERB_LOWER, face: 4, modifier: 0 },
+        );
+        assert_eq!(w.hand[0].material, HAND_WATER);
+        assert!(w.hand[0].amount > 0, "nothing was drawn from the lake");
+        assert_eq!(footprint(&w) + i32::from(w.hand[0].amount), 500, "water was not conserved");
+        assert_eq!(w.height[lake], level, "drawing water moved the lake bed");
+
+        apply(
+            &mut w,
+            0,
+            &Command { tick: 0, x: 30, y: 30, player: 0, verb: VERB_RAISE, face: 4, modifier: 0 },
+        );
+        assert_eq!(w.hand[0].amount, 0, "the hand did not pour everything back");
+        assert_eq!(footprint(&w), 500, "water was not conserved on the way back");
+        assert_eq!(w.height[lake], level, "pouring water moved the ground");
     }
 
     #[test]

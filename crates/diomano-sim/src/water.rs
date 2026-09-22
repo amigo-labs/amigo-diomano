@@ -38,7 +38,10 @@ const fn seam_entry(face: usize, x: usize, y: usize, dir: usize) -> Option<usize
 }
 
 /// Water transfer, checkerboard: even cells, then odd cells (§4.1 pass 3).
-pub fn transfer_water(w: &mut World) {
+///
+/// `sea_before` is the sea level the previous tick's pin used — see
+/// [`apply_sea_level`]. Callers that do not move the sea pass `w.sea_level`.
+pub fn transfer_water(w: &mut World, sea_before: i16) {
     w.erode.fill(0);
     for parity in 0..2usize {
         water_half(w, parity);
@@ -47,7 +50,7 @@ pub fn transfer_water(w: &mut World) {
         // values the even pass just produced, rather than a stale copy.
         w.ghost_copy_flow_fields();
     }
-    apply_sea_level(w);
+    apply_sea_level(w, sea_before);
 }
 
 fn water_half(w: &mut World, parity: usize) {
@@ -104,8 +107,19 @@ fn water_half(w: &mut World, parity: usize) {
 /// The ocean is a boundary condition, not a body of water that relaxes: pinning
 /// it here is what stops a planet-sized basin from sloshing forever and is the
 /// reason `settles_without_oscillation` converges rather than merely damping.
-pub fn apply_sea_level(w: &mut World) {
+///
+/// The boundary works both ways. When the sea falls — the tide's drawback, the
+/// second half of a wave — every cell it uncovers (`sea <= h < sea_before`) is
+/// released dry. It used to be released with whatever the last pin left on it,
+/// one to a few units, and on flat ground that film never drains: the flow rule
+/// moves nothing below a four-unit difference, so a flooded plateau came back
+/// from every wave wet, `buildable` and `habitable` both false, and the
+/// settlement on it decayed for want of a flat footprint. A receding sea takes
+/// its water with it; only water the sea did not bring — a lake, a poured
+/// puddle above the line — stays.
+pub fn apply_sea_level(w: &mut World, sea_before: i16) {
     let sea = i32::from(w.sea_level);
+    let before = i32::from(sea_before);
     for face in 0..6usize {
         for y in 0..N {
             for x in 0..N {
@@ -113,6 +127,8 @@ pub fn apply_sea_level(w: &mut World) {
                 let h = i32::from(w.height[c]);
                 if h < sea {
                     w.water[c] = (sea - h).min(i32::from(i16::MAX)) as i16;
+                } else if h < before {
+                    w.water[c] = 0;
                 }
             }
         }
@@ -222,9 +238,15 @@ mod tests {
     /// ticks"). Isolating it is the point: with vegetation, walkers and
     /// settlements running the hash would keep moving for reasons that have
     /// nothing to do with whether water is stable.
+    /// The water pass with the sea where it already is: no tide, no film band.
+    fn settle(w: &mut World) {
+        let sea = w.sea_level;
+        transfer_water(w, sea);
+    }
+
     fn water_only_tick(w: &mut World) {
         w.ghost_copy_all();
-        transfer_water(w);
+        settle(w);
     }
 
     fn pangaea() -> alloc::boxed::Box<World> {
@@ -308,7 +330,7 @@ mod tests {
 
         for _ in 0..400 {
             w.ghost_copy_all();
-            transfer_water(&mut w);
+            settle(&mut w);
         }
         let after = total_water(&w);
         assert_eq!(before, after, "water leaked at a face boundary");
@@ -359,7 +381,7 @@ mod tests {
             }
             for _ in 0..300 {
                 w.ghost_copy_all();
-                transfer_water(&mut w);
+                settle(&mut w);
             }
             // How much water reached the far side, inside the notch's column.
             let through: i64 = (28..36)
@@ -427,7 +449,7 @@ mod tests {
         }
         w.water[idx(4, 32, 32)] = 8000;
         w.ghost_copy_all();
-        transfer_water(&mut w);
+        settle(&mut w);
 
         // After one full tick (two half-passes) nothing beyond two cells away can
         // have been reached.
@@ -470,7 +492,7 @@ mod tests {
         w.water[idx(4, 32, 32)] = 8000;
         for _ in 0..80 {
             w.ghost_copy_all();
-            transfer_water(&mut w);
+            settle(&mut w);
         }
         for d in 1..6usize {
             let e = i32::from(w.water[idx(4, 32 + d, 32)]);
@@ -506,6 +528,43 @@ mod tests {
         // enforces; this is a smoke test that the world is still coherent.
         let _ = (before, after);
         assert!(total_water(&w) >= 0);
+    }
+
+    #[test]
+    fn a_receding_sea_leaves_no_film() {
+        // A flat shelf a little above the calm sea, flooded by a wave and then
+        // uncovered one unit per tick — the tide's own cadence. Every cell the
+        // sea gives back has to come back dry: the flow rule cannot drain a film
+        // thinner than four units from flat ground, so a film left here would be
+        // there for the rest of the match.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    w.height[c] = 20;
+                    w.water[c] = 0;
+                    w.vegetation[c] = 0;
+                }
+            }
+        }
+        w.sea_base = 0;
+        w.sea_level = 48;
+        w.ghost_copy_all();
+        transfer_water(&mut w, 48);
+        assert_eq!(w.water[idx(4, 32, 32)], 28, "the wave did not flood the shelf");
+        while w.sea_level > 0 {
+            let before = w.sea_level;
+            w.sea_level -= 1;
+            w.ghost_copy_all();
+            transfer_water(&mut w, before);
+        }
+        let wet = (0..6usize)
+            .flat_map(|f| (0..N).flat_map(move |y| (0..N).map(move |x| idx(f, x, y))))
+            .filter(|&c| w.water[c] != 0)
+            .count();
+        assert_eq!(wet, 0, "{wet} cells kept a film after the sea receded");
     }
 
     #[test]
