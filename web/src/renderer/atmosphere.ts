@@ -46,6 +46,7 @@
  */
 
 import * as THREE from "three";
+import type { QualityTier } from "../main";
 import { BASE_RADIUS } from "./scale";
 import type { View } from "./view";
 
@@ -346,7 +347,7 @@ const FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
-export function createAtmosphere(view: View): Atmosphere {
+export function createAtmosphere(view: View, tier: QualityTier): Atmosphere {
   const group = new THREE.Group();
   const sunDirection = view.sunDirection.value;
 
@@ -473,6 +474,12 @@ export function createAtmosphere(view: View): Atmosphere {
   );
   // Terrain 0, water 1, clouds 2, atmosphere 3.
   clouds.renderOrder = 2;
+  clouds.name = "clouds";
+  // Tier 2 only, with the ground shadows that go with it (`uTier` in the
+  // terrain shader). Drawn at tier 1 it was clouds without their shadows, and a
+  // full transparent sphere of sky shader on exactly the machines the tier
+  // exists to spare.
+  clouds.visible = tier >= 2;
   group.add(clouds);
 
   // Space behind the planet. A pure black background makes the limb read as a

@@ -943,7 +943,32 @@ impl World {
     /// A flow pass writing into a ghost cell would lose that matter, because
     /// ghosts are overwritten on the next copy. Instead each such transfer is
     /// recorded against the seam entry it crossed and applied here.
+    ///
+    /// Lava is capped at a byte, and the room its flow was limited by is the
+    /// ghost copy's, taken before the half began — while the real cell can fill
+    /// from its own face in the same half. What the cap turns away goes back to
+    /// the live cell it left, in a second sweep once every seam has landed; it
+    /// used to be clamped off and destroyed (`lava_is_conserved_across_seams`).
+    /// The sender always has room for it, so the second sweep never clamps:
+    ///
+    /// - it gave at least what comes back, and nothing on its own face flows
+    ///   into it during its own half — the checkerboard is consistent within
+    ///   a face;
+    /// - lava flows only down the *start-of-half* surface: a sender's live
+    ///   lava only falls, and the ghost it compares against is the start
+    ///   value. So two cells never send to each other in one half, and the
+    ///   highest cell of any group receives nothing over a seam at all;
+    /// - a non-corner edge cell has one ghost image, so what reaches it over a
+    ///   seam is at most the room it had when the half began.
+    ///
+    /// At a cube corner that ordering is what holds: the lowest of the three
+    /// cells can take from both others and overflow, but the highest took
+    /// nothing, and the middle took at most its starting room over its one
+    /// seam from the highest.
+    /// `lava_is_conserved_where_a_corner_cell_receives_over_two_seams`
+    /// builds that case at all 24 face corners.
     pub fn apply_seam_flux_i16(&mut self, field: FluxField) {
+        let mut returned = false;
         for k in 0..GHOST_ENTRIES {
             let f = self.seam_flux[k];
             if f == 0 {
@@ -957,13 +982,31 @@ impl World {
                         (i32::from(self.water[dst]) + f).clamp(0, i32::from(i16::MAX)) as i16;
                 }
                 FluxField::Lava => {
-                    self.lava[dst] = (i32::from(self.lava[dst]) + f).clamp(0, 255) as u8;
+                    let total = i32::from(self.lava[dst]) + f;
+                    self.lava[dst] = total.clamp(0, 255) as u8;
+                    if total > 255 {
+                        self.seam_flux[k] = total - 255;
+                        returned = true;
+                    }
                 }
                 FluxField::Height => {
                     self.height[dst] = (i32::from(self.height[dst]) + f)
                         .clamp(i32::from(HEIGHT_MIN), i32::from(HEIGHT_MAX))
                         as i16;
                 }
+            }
+        }
+        if returned {
+            for k in 0..GHOST_ENTRIES {
+                let back = self.seam_flux[k];
+                if back == 0 {
+                    continue;
+                }
+                self.seam_flux[k] = 0;
+                let src = seam_entry_source(k);
+                let total = i32::from(self.lava[src]) + back;
+                debug_assert!(total <= 255, "a seam return overfilled its sender");
+                self.lava[src] = total.min(255) as u8;
             }
         }
     }
@@ -1521,6 +1564,21 @@ impl World {
     }
 }
 
+/// The live cell a seam entry's flux leaves from: entry
+/// `(face * 4 + dir) * N + t` is cell `t` along `face`'s `dir` edge — the
+/// numbering `seam_entry` in `water.rs` and `materials.rs` writes.
+const fn seam_entry_source(k: usize) -> usize {
+    let t = k % N;
+    let dir = (k / N) % 4;
+    let face = k / (4 * N);
+    match dir {
+        crate::seams::DIR_N => idx(face, t, N - 1),
+        crate::seams::DIR_E => idx(face, N - 1, t),
+        crate::seams::DIR_S => idx(face, t, 0),
+        _ => idx(face, 0, t),
+    }
+}
+
 /// Which field a pending seam flux belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FluxField {
@@ -1531,16 +1589,25 @@ pub enum FluxField {
 
 /// Walk `(dx, dy)` cells from `(face, cx, cy)`, following seams.
 ///
-/// Steps one axis then the other, which is well defined because each step goes
-/// through [`step`] and carries the rotated heading with it. Returns `None`
-/// only if the start cell is off-grid.
+/// Steps one axis then the other, each step through [`step`], which carries
+/// the rotated heading with it. Returns `None` only if the start cell is
+/// off-grid.
+///
+/// The y-leg starts turned by however much the x-leg's seams turned the
+/// heading. It used to start from `DIR_N` / `DIR_S` in the *destination*
+/// face's frame, which is a different direction on the far side of a rotating
+/// seam (the east and west edges of faces 2 and 3): the offsets beyond it
+/// folded back onto the face they came from, so a brush there raised one cell
+/// by up to three terraces in one command and left a sheared footprint.
+/// `a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners`.
 #[must_use]
 pub fn walk(face: usize, cx: i32, cy: i32, dx: i32, dy: i32) -> Option<(usize, usize, usize)> {
     if !(0..N as i32).contains(&cx) || !(0..N as i32).contains(&cy) || face >= 6 {
         return None;
     }
     let (mut f, mut x, mut y) = (face, cx, cy);
-    let mut d = if dx >= 0 { crate::seams::DIR_E } else { crate::seams::DIR_W };
+    let start = if dx >= 0 { crate::seams::DIR_E } else { crate::seams::DIR_W };
+    let mut d = start;
     for _ in 0..dx.abs() {
         let n = step(f, x, y, d);
         f = n.0;
@@ -1548,7 +1615,10 @@ pub fn walk(face: usize, cx: i32, cy: i32, dx: i32, dy: i32) -> Option<(usize, u
         y = n.2;
         d = n.3;
     }
-    let mut d = if dy >= 0 { crate::seams::DIR_N } else { crate::seams::DIR_S };
+    // Headings are quarter turns, `N E S W` = `0 1 2 3`, so the turn the x-leg
+    // picked up is the difference mod 4, and the y-leg's heading turns with it.
+    let turn = (d + 4 - start) % 4;
+    let mut d = (if dy >= 0 { crate::seams::DIR_N } else { crate::seams::DIR_S } + turn) % 4;
     for _ in 0..dy.abs() {
         let n = step(f, x, y, d);
         f = n.0;
@@ -1752,6 +1822,49 @@ const fn widen(h: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners() {
+        // `walk` steps the x-leg first; when that leg crosses a seam that
+        // rotates the heading (the east and west edges of faces 2 and 3), the
+        // y-leg has to turn with it, or the offsets beyond the seam fold back
+        // onto the face they came from and one cell takes several terraces.
+        // The eight cube corners are genuinely ambiguous (§3.5), so centres
+        // whose footprint reaches one are left out.
+        for radius in [1i32, 2, 5] {
+            for face in 0..6usize {
+                for cy in 0..N as i32 {
+                    for cx in 0..N as i32 {
+                        let last = N as i32 - 1;
+                        let near_corner = [(0, 0), (0, last), (last, 0), (last, last)]
+                            .iter()
+                            .any(|&(kx, ky)| (cx - kx).abs().max((cy - ky).abs()) <= radius + 1);
+                        if near_corner {
+                            continue;
+                        }
+                        let mut seen = alloc::vec::Vec::new();
+                        for dy in -radius..=radius {
+                            for dx in -radius..=radius {
+                                if dx * dx + dy * dy > radius * radius + radius {
+                                    continue;
+                                }
+                                let (f, x, y) = walk(face, cx, cy, dx, dy).expect("on the grid");
+                                seen.push(idx(f, x, y));
+                            }
+                        }
+                        let offsets = seen.len();
+                        seen.sort_unstable();
+                        seen.dedup();
+                        assert_eq!(
+                            seen.len(),
+                            offsets,
+                            "radius {radius} at face {face} ({cx}, {cy}) visits a cell twice"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn index_formula_matches_the_spec() {

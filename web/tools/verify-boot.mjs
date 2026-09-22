@@ -21,6 +21,10 @@
  * gameplay and exists to be looked at. This one asks one question in a few
  * seconds and answers it with an exit code.
  *
+ * It also asks one thing only a running client can answer: whether every
+ * material that patches three's shaders is drawn with the program its patch
+ * produced, rather than with one three cached for another material.
+ *
  * Usage:  node tools/verify-boot.mjs
  * Exits 0 when the game handle appears with a clean console, 1 otherwise.
  */
@@ -101,6 +105,68 @@ function serve() {
   });
 }
 
+/**
+ * Materials that three.js resolved to one compiled program while their
+ * `onBeforeCompile` hooks write different GLSL, as `"a / b"` name pairs — and,
+ * while the page is up, whether the tier-2 cloud shell is visible.
+ *
+ * Asked of the running client after `renderer.compile`, so every material in
+ * the scene has a program. The hooks are then replayed against one stub shader
+ * carrying every marker the client injects at: two materials sharing a program
+ * must produce the same text from it, or one of them is not drawn with its own.
+ */
+async function sharedPrograms(browser, port, tier) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  try {
+    await page.goto(`http://127.0.0.1:${port}/?seed=5eed&tier=${tier}`, { waitUntil: "load" });
+    await page.waitForFunction(() => window.diomano !== undefined, null, { timeout: BOOT_BUDGET });
+    return await page.evaluate(() => {
+      const { renderer, scene, camera } = window.diomano;
+      renderer.compile(scene, camera.camera);
+      const markers = [
+        "#include <common>",
+        "#include <beginnormal_vertex>",
+        "#include <begin_vertex>",
+        "#include <project_vertex>",
+        "#include <opaque_fragment>",
+      ].join("\n");
+      const patched = (material) => {
+        const shader = { uniforms: {}, vertexShader: markers, fragmentShader: markers };
+        material.onBeforeCompile(shader, renderer);
+        return `${shader.vertexShader}\n----\n${shader.fragmentShader}`;
+      };
+      const byProgram = new Map();
+      scene.traverse((object) => {
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials) {
+          if (!material || material.onBeforeCompile.toString() === "function () {}") continue;
+          const program = renderer.properties.get(material).currentProgram;
+          if (!program) continue;
+          const group = byProgram.get(program) ?? new Map();
+          group.set(material, object.name || object.type);
+          byProgram.set(program, group);
+        }
+      });
+      const clashes = [];
+      for (const group of byProgram.values()) {
+        const [first, ...rest] = [...group.entries()];
+        if (!first) continue;
+        const source = patched(first[0]);
+        for (const [material, name] of rest) {
+          if (patched(material) !== source) clashes.push(`${first[1]} / ${name}`);
+        }
+      }
+      let clouds = null;
+      scene.traverse((object) => {
+        if (object.name === "clouds") clouds = object.visible;
+      });
+      return { clashes, clouds };
+    });
+  } finally {
+    await page.close();
+  }
+}
+
 async function main() {
   if (!existsSync(join(DIST, "index.html"))) fail("no build; run `just build-web` first");
   if (!existsSync(join(DIST, "diomano.wasm"))) {
@@ -172,6 +238,241 @@ async function main() {
       process.exit(1);
     }
 
+    // And: does a full re-upload stay full? `restart` resets the world in place
+    // and asks the terrain and the sea for a whole-buffer upload; when a tick
+    // lands before the next frame renders, that frame's `sync` sees dirty
+    // chunks, and adding their ranges would narrow the upload to them — every
+    // other chunk would keep drawing the dead world.
+    const narrowed = await page.evaluate(() => {
+      const g = window.diomano;
+      const buffers = (object) => {
+        const out = [];
+        object.traverse((o) => {
+          if (o.geometry) {
+            for (const [name, a] of Object.entries(o.geometry.attributes)) out.push([name, a]);
+          }
+        });
+        return out;
+      };
+      g.planet.refreshAll();
+      g.water.refreshAll();
+      // One chunk, as a single tick would leave it.
+      g.sim.meshDirty.fill(0);
+      g.sim.meshDirty[0] = 1;
+      g.planet.sync(g.sim.e.dio_sea_level());
+      g.water.sync();
+      const problems = [];
+      for (const [layer, root] of [
+        ["terrain", g.planet.group],
+        ["water", g.water.mesh],
+      ]) {
+        for (const [name, a] of buffers(root)) {
+          if (a.updateRanges.length > 0) {
+            problems.push(`${layer} ${name}: ${a.updateRanges.length} ranges after refreshAll`);
+          }
+        }
+      }
+      g.sim.meshDirty.fill(0);
+      return problems;
+    });
+    if (narrowed.length > 0) {
+      console.error(`
+FULL UPLOAD NARROWED — a refresh after a world reset uploads only the dirty chunks.
+
+  \`refreshAll\` asks for the whole buffer; a \`sync\` before the frame that
+  uploads it added per-chunk update ranges, and three then uploads only those.
+`);
+      for (const n of narrowed) console.error(`  ${n}`);
+      process.exit(1);
+    }
+
+    // Also: does every patched material get the shader it patched? Asked of
+    // both tiers, because each one puts a different set of materials together.
+    // The booted page is closed first: two clients rasterising on SwiftShader
+    // at once starve each other past the boot budget.
+    await page.close();
+    for (const tier of [1, 2]) {
+      const { clashes: shared, clouds } = await sharedPrograms(browser, port, tier);
+      // §7.3 puts the cloud shell in tier 2, with the ground shadows the terrain
+      // shader draws only there.
+      if (clouds !== tier >= 2) {
+        console.error(
+          `\nTIERS — the cloud shell is ${clouds === null ? "missing (no mesh named clouds)" : clouds ? "drawn" : "not drawn"} at tier ${tier}.\n`,
+        );
+        process.exit(1);
+      }
+      if (shared.length > 0) {
+        console.error(`
+SHADER PROGRAMS — materials with different shaders share one program (tier ${tier}).
+
+  three.js caches a compiled program by \`customProgramCacheKey()\`, which
+  defaults to \`onBeforeCompile.toString()\`. Two materials built by the same
+  function with different injected GLSL therefore have the same key, and the
+  second is drawn with the first one's program — its own patch never compiles.
+  Give the material a key that names what it injects.
+`);
+        for (const s of shared) console.error(`  ${s}`);
+        process.exit(1);
+      }
+    }
+
+    // The hand picks the ground the player sees. Zoomed in, the camera tilts
+    // toward the horizon and the upper half of the frame meets the ground at a
+    // glancing angle, where a pick that is not the ray's *first* contact with
+    // the terrain lands behind the hill the pointer is on. Each pick is checked
+    // against an independent march along the same ray at a fiftieth of a cell.
+    const picking = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    try {
+      await picking.goto(`http://127.0.0.1:${port}/?seed=5eed&tier=1`, { waitUntil: "load" });
+      await picking.waitForFunction(() => window.diomano !== undefined, null, {
+        timeout: BOOT_BUDGET,
+      });
+      await picking.evaluate(() => {
+        const canvas = document.querySelector("canvas");
+        for (let i = 0; i < 8; i++) {
+          canvas.dispatchEvent(
+            new WheelEvent("wheel", {
+              deltaY: -400,
+              clientX: innerWidth / 2,
+              clientY: innerHeight / 2,
+            }),
+          );
+        }
+      });
+      await picking.waitForFunction(
+        () => window.diomano.camera.camera.position.length() < 1.37,
+        null,
+        {
+          timeout: BOOT_BUDGET,
+        },
+      );
+      const misses = await picking.evaluate(() => {
+        const { sim, camera, planet, hand } = window.diomano;
+        const cam = camera.camera;
+        const canvas = document.querySelector("canvas");
+        const surface = (cell) => {
+          const c = sim.idx(cell.face, cell.x, cell.y);
+          return 1 + ((sim.height[c] ?? 0) + Math.max(sim.water[c] ?? 0, 0)) * 0.00008;
+        };
+        // The hand's own step, `PICK_STEP_CELLS` in `hand.ts`, in radii.
+        const handStep = (0.125 * Math.PI) / 2 / sim.N;
+        const stride = 0.0005;
+        /** First contact along the ray, and how long the ray stays underground there. */
+        const truth = (x, y) => {
+          const origin = cam.position.clone();
+          const dir = cam.position
+            .clone()
+            .set((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1, 0.5)
+            .unproject(cam)
+            .sub(origin)
+            .normalize();
+          const p = origin.clone();
+          const under = (t) => {
+            p.copy(origin).addScaledVector(dir, t);
+            const r = p.length();
+            if (r > 1.7) return null;
+            const cell = planet.pick(p);
+            return r <= surface(cell) ? cell : null;
+          };
+          for (let t = 0; t < 6; t += stride) {
+            const cell = under(t);
+            if (!cell) continue;
+            let out = t;
+            while (out < t + 2 * handStep && under(out)) out += stride;
+            return { cell, span: out - t };
+          }
+          return null;
+        };
+        const out = [];
+        for (let j = 0; j < 4; j++) {
+          for (let i = 0; i < 5; i++) {
+            const x = innerWidth * (0.1 + 0.2 * i);
+            const y = innerHeight * (0.08 + 0.12 * j);
+            canvas.dispatchEvent(
+              new PointerEvent("pointermove", {
+                clientX: x,
+                clientY: y,
+                pointerType: "mouse",
+                bubbles: true,
+              }),
+            );
+            const got = hand.target();
+            const contact = truth(x, y);
+            const want = contact?.cell ?? null;
+            // A ray that clips a peak for less than the hand's step may find
+            // nothing; that is the stated resolution, not a wrong pick.
+            const grazed = got === null && contact !== null && contact.span < handStep;
+            const ok =
+              grazed ||
+              (want === null
+                ? got === null
+                : got !== null &&
+                  got.face === want.face &&
+                  Math.abs(got.x - want.x) <= 1 &&
+                  Math.abs(got.y - want.y) <= 1);
+            const show = (c) => (c ? `${c.face}:${c.x},${c.y}` : "none");
+            if (!ok) out.push(`(${x | 0}, ${y | 0}): hand ${show(got)}, ray ${show(want)}`);
+          }
+        }
+        return out;
+      });
+      if (misses.length > 0) {
+        console.error(`
+PICKING — the hand is not on the ground the pointer is over (${misses.length} of 20).
+
+  The pick has to be the ray's first contact with the drawn surface. Relief
+  reaches several cells' worth of radius, and at a glancing angle a pick that
+  refines from the mean sphere converges behind the hill in front of it.
+`);
+        for (const m of misses) console.error(`  ${m}`);
+        process.exit(1);
+      }
+    } finally {
+      await picking.close();
+    }
+
+    // A crash after the boot: a throw inside a frame must stop the loop and say
+    // so, rather than escape the rAF callback and throw again every frame
+    // behind a picture that has silently stopped. Injected into the render
+    // half, which is the half that used to have no handler.
+    const crashing = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const crashErrors = [];
+    crashing.on("pageerror", (err) => crashErrors.push(err.message));
+    try {
+      await crashing.goto(`http://127.0.0.1:${port}/?seed=5eed`, { waitUntil: "load" });
+      await crashing.waitForFunction(() => window.diomano !== undefined, null, {
+        timeout: BOOT_BUDGET,
+      });
+      await crashing.evaluate(() => {
+        window.diomano.radial.sync = () => {
+          throw new Error("injected render fault");
+        };
+      });
+      let reported = true;
+      try {
+        await crashing.waitForFunction(
+          () => (document.querySelector("#fallback")?.textContent ?? "").includes("injected"),
+          null,
+          { timeout: BOOT_BUDGET },
+        );
+      } catch {
+        reported = false;
+      }
+      if (!reported || crashErrors.length > 0) {
+        console.error(`
+RENDER FAULT — a throw inside a frame is not reported.
+
+  The loop calls \`render\` from requestAnimationFrame. A throw there must reach
+  \`halt\`, which stops the loop and writes the epitaph; otherwise it escapes the
+  callback, the next frame throws again, and the page shows a frozen picture.
+  epitaph shown: ${reported}; uncaught errors: ${crashErrors.length}
+`);
+        process.exit(1);
+      }
+    } finally {
+      await crashing.close();
+    }
+
     // Second question: when the boot *does* fail, does the front door say so
     // legibly? The epitaph is written into `#fallback`, which sits above the
     // title card rather than replacing it, so a real failure once shipped as a
@@ -202,7 +503,10 @@ FRONT DOOR — the epitaph is printed over the title card.
     }
 
     console.log(`verify-boot: OK — the built client reaches a running game with a clean
-            console, and a failed boot reports itself on a cleared page.`);
+            console, every patched material compiles its own shader at both
+            tiers, a full re-upload stays full, a fault inside a frame stops
+            the loop and says so, and a failed boot reports itself on a
+            cleared page.`);
   } finally {
     await browser.close();
     server.close();

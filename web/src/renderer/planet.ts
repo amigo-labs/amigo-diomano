@@ -749,6 +749,11 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
   // planet costs nothing and never culls geometry that should be drawn.
   geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), BASE_RADIUS * 3);
   group.add(new THREE.Mesh(geometry, material));
+  /** Set by `refreshAll` until three has uploaded the whole buffer. */
+  let fullUploadPending = false;
+  position.onUpload(() => {
+    fullUploadPending = false;
+  });
 
   return {
     group,
@@ -757,6 +762,13 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
       // Only chunks Rust rebuilt are re-uploaded (§7.1 "only dirty chunks
       // re-meshed"). Uploading all 96 every frame would make the dirty tracking
       // pointless, so each rebuilt chunk contributes its own update range.
+      material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
+      // A pending `refreshAll` is a whole-buffer upload, and ranges would narrow
+      // it to this tick's chunks — see `refreshAll`.
+      if (fullUploadPending) {
+        for (const a of [position, normal, attrib, attrib2, attrib3]) a.needsUpdate = true;
+        return;
+      }
       position.clearUpdateRanges();
       normal.clearUpdateRanges();
       attrib.clearUpdateRanges();
@@ -780,7 +792,6 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
         attrib2.needsUpdate = true;
         attrib3.needsUpdate = true;
       }
-      material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
     },
 
     refreshAll(): void {
@@ -788,6 +799,11 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
         a.clearUpdateRanges();
         a.needsUpdate = true;
       }
+      // Held until three has uploaded it. A tick between the reset and the
+      // frame that renders it leaves dirty chunks, and `sync` used to add their
+      // ranges — three then uploaded only those, and every other chunk kept
+      // drawing the world from before the reset.
+      fullUploadPending = true;
     },
 
     pick(dir: THREE.Vector3): { face: number; x: number; y: number } {

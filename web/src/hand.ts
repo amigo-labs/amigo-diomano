@@ -375,43 +375,99 @@ export function createHand(
   };
 
   /**
-   * Which cell the pointer is over.
+   * The radii of the highest and the lowest surface on the planet, as of the
+   * tick `shellTick`: the shell every ray's contact with the ground lies in.
+   */
+  let shellTick = -1;
+  let shellOuter = BASE_RADIUS;
+  let shellInner = BASE_RADIUS;
+  const refreshShell = (): void => {
+    const tick = sim.e.dio_tick_count();
+    if (tick === shellTick) return;
+    shellTick = tick;
+    let hi = 0;
+    let lo = 0;
+    for (let c = 0; c < sim.height.length; c++) {
+      const top = (sim.height[c] ?? 0) + Math.max(sim.water[c] ?? 0, 0);
+      if (top > hi) hi = top;
+      if (top < lo) lo = top;
+    }
+    shellOuter = BASE_RADIUS + hi * HEIGHT_TO_RADIUS;
+    shellInner = BASE_RADIUS + lo * HEIGHT_TO_RADIUS;
+  };
+  const marchPoint = new THREE.Vector3();
+  /** Whether a point on the ray is at or under the surface of its cell. */
+  const underground = (t: number): boolean => {
+    marchPoint.copy(raycaster.ray.origin).addScaledVector(raycaster.ray.direction, t);
+    const cell = pickCell(marchPoint, sim.N);
+    const c = sim.idx(cell.face, cell.x, cell.y);
+    const top = (sim.height[c] ?? 0) + Math.max(sim.water[c] ?? 0, 0);
+    return marchPoint.length() <= BASE_RADIUS + top * HEIGHT_TO_RADIUS;
+  };
+
+  /**
+   * Which cell the pointer is over: the ray's **first** contact with the
+   * ground.
    *
-   * The ray is intersected with the mean sphere first and then re-intersected
-   * against the surface radius at whatever cell that found, twice. One
-   * intersection against the mean sphere is only correct where the ground is at
-   * sea level: relief reaches ~6% of the radius, and the error is
-   * `height * tan(incidence)`, so on a mountain seen at a glancing angle the
-   * mean-sphere pick lands several cells away from the ground the player is
-   * looking at. Two refinement steps put it on the visible surface.
+   * It used to intersect the mean sphere and then re-intersect twice against
+   * the surface radius of whatever cell that found. That fixed point is the
+   * right answer only while the slope under it is small against the ray's
+   * descent, and zoomed in — where the camera tilts toward the horizon and the
+   * upper half of the frame meets the ground at a glancing angle — it is not:
+   * relief reaches several cells' worth of radius, the pick converged onto
+   * ground *behind* the hill the pointer was on, and a ray that grazed a peak
+   * above the mean sphere found nothing at all. `verify-boot` caught both.
    *
-   * The original reason for using the mean radius — that raising ground would
-   * otherwise drag the cursor with it — survives the change: one terrace is
-   * 16 height units, which is 0.05 of a cell, so the per-step feedback is far
-   * below a cell. Where the pick does move over a long dig, it moves because the
-   * surface really did.
+   * So the ray is marched, an eighth of a cell at a time (`PICK_STEP_CELLS`),
+   * through the shell between the highest and the lowest surface, and the
+   * first step that lands underground is bisected down to the cell. A few
+   * hundred cell lookups at worst, which is nothing next to a raycast against
+   * 96 chunks of moving vertex data. A ray that clips a peak for less than a
+   * step at the silhouette passes over it.
+   *
+   * The original reason for picking against cells rather than the drawn mesh —
+   * that raising ground would otherwise drag the cursor with it — still holds:
+   * one terrace is 16 height units, 0.05 of a cell.
    */
   const updateTarget = (): void => {
     raycaster.setFromCamera(pointer, camera.camera);
-    let hit = intersectSphere(raycaster.ray, BASE_RADIUS);
-    if (!hit) {
+    refreshShell();
+    const ray = raycaster.ray;
+    const outer = sphereSpan(ray, shellOuter);
+    if (!outer) {
       current = null;
       return;
     }
-    let cell = pickCell(hit, sim.N);
-    for (let step = 0; step < 2; step++) {
-      const c = sim.idx(cell.face, cell.x, cell.y);
-      const height = sim.height[c] ?? 0;
-      const water = sim.water[c] ?? 0;
-      const surface = BASE_RADIUS + (height + Math.max(water, 0)) * HEIGHT_TO_RADIUS;
-      const refined = intersectSphere(raycaster.ray, surface);
-      // A ray that misses the raised surface still hit the mean sphere; keep
-      // the coarser answer rather than dropping the target entirely.
-      if (!refined) break;
-      hit = refined;
-      cell = pickCell(hit, sim.N);
+    // A ray that reaches the lowest surface is underground there by
+    // definition, so the march never needs to go further. Taken a hair inside
+    // it: the intersection lands on the sphere to within rounding, and a cell
+    // whose surface *is* that sphere read as just above ground there, so the
+    // march stopped one ulp short and picked nothing.
+    const inner = sphereSpan(ray, shellInner - 1e-4);
+    const end = inner ? inner[0] : outer[1];
+    const step = PICK_STEP_CELLS * (Math.PI / 2 / sim.N) * BASE_RADIUS;
+    let before = outer[0];
+    let hit = -1;
+    for (let t = outer[0]; ; t = Math.min(t + step, end)) {
+      if (underground(t)) {
+        hit = t;
+        break;
+      }
+      before = t;
+      if (t >= end) break;
     }
-    current = cell;
+    if (hit < 0) {
+      current = null;
+      return;
+    }
+    let above = before;
+    for (let k = 0; k < 10 && hit > above; k++) {
+      const mid = (above + hit) / 2;
+      if (underground(mid)) hit = mid;
+      else above = mid;
+    }
+    marchPoint.copy(ray.origin).addScaledVector(ray.direction, hit);
+    current = pickCell(marchPoint, sim.N);
   };
 
   canvas.addEventListener("pointermove", (ev) => {
@@ -765,21 +821,25 @@ export function createHand(
 }
 
 /**
- * Nearest intersection of a ray with a sphere centred on the origin.
- *
- * `THREE.Raycaster` against the terrain meshes would work and would cost a
- * traversal of 96 chunks with constantly-changing vertex data every pointer
- * move. The planet is a sphere to within a few percent, and picking wants
- * stability more than it wants millimetres.
+ * The hand's ray-march step, in cells. `verify-boot` marches the same ray at a
+ * fiftieth of a cell and accepts "nothing under the pointer" only where a march
+ * at this step also finds nothing.
  */
-function intersectSphere(ray: THREE.Ray, radius: number): THREE.Vector3 | null {
+export const PICK_STEP_CELLS = 0.125;
+
+/**
+ * Where a ray is inside a sphere about the origin, as `[enter, exit]` distances
+ * along it, clamped to start at the ray's origin; `null` if it never is.
+ */
+function sphereSpan(ray: THREE.Ray, radius: number): [number, number] | null {
   const o = ray.origin;
   const d = ray.direction;
   const b = 2 * o.dot(d);
   const c = o.dot(o) - radius * radius;
   const disc = b * b - 4 * c;
   if (disc < 0) return null;
-  const t = (-b - Math.sqrt(disc)) / 2;
-  if (t < 0) return null;
-  return o.clone().addScaledVector(d, t);
+  const root = Math.sqrt(disc);
+  const exit = (-b + root) / 2;
+  if (exit < 0) return null;
+  return [Math.max((-b - root) / 2, 0), exit];
 }

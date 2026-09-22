@@ -357,12 +357,22 @@ export function createWater(sim: Sim, view: View): Water {
   // before the clouds and the atmosphere.
   mesh.renderOrder = 1;
   group.add(mesh);
+  /** Set by `refreshAll` until three has uploaded the whole buffer. */
+  let fullUploadPending = false;
+  position.onUpload(() => {
+    fullUploadPending = false;
+  });
 
   return {
     mesh: group,
     material,
     sync(): void {
       rebuildIndices();
+      // Same reason as the terrain: ranges would narrow a pending full upload.
+      if (fullUploadPending) {
+        for (const a of [position, attrib]) a.needsUpdate = true;
+        return;
+      }
       position.clearUpdateRanges();
       attrib.clearUpdateRanges();
       let dirty = 0;
@@ -391,6 +401,8 @@ export function createWater(sim: Sim, view: View): Water {
         a.clearUpdateRanges();
         a.needsUpdate = true;
       }
+      // See `Planet.refreshAll`.
+      fullUploadPending = true;
     },
   };
 }

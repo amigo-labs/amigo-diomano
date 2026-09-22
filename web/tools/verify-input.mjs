@@ -617,6 +617,130 @@ async function main() {
       `hand ${atBlur} -> ${afterBlur} across the blur`,
     );
 
+    // --- 13. the wheel zooms toward the pointer, past the pole too ---------
+    //
+    // Screen-right is the camera's own `east` at every pitch, so zooming in with
+    // the pointer right of centre must carry the eye that way — and past the
+    // pole, where `cos(pitch)` turns negative, yaw moves the eye the other way
+    // round, which is what `yawSign` is for.
+    const cameraRight = () =>
+      read(() => {
+        const c = window.diomano.camera.camera;
+        const m = c.matrixWorld.elements;
+        return { right: [m[0], m[1], m[2]], p0: [c.position.x, c.position.y, c.position.z] };
+      });
+    const wheelToward = async () => {
+      // Out first, from the centre — no sideways component — so the zoom in
+      // below cannot start at the near limit and move nothing.
+      await page.mouse.move(CENTRE.x, CENTRE.y);
+      for (let i = 0; i < 3; i++) await page.mouse.wheel(0, 300);
+      await ticks(10);
+      await page.mouse.move(CENTRE.x + 300, CENTRE.y);
+      await ticks(1);
+      const before = await cameraRight();
+      await page.mouse.wheel(0, -200);
+      await ticks(8);
+      const after = await cam();
+      const d = [after.x - before.p0[0], after.y - before.p0[1], after.z - before.p0[2]];
+      return d[0] * before.right[0] + d[1] * before.right[1] + d[2] * before.right[2];
+    };
+    const upY = () => read(() => window.diomano.camera.camera.up.y);
+    // `aimAt` may have left the camera on either spherical branch, so measure
+    // on whichever side it is and then carry it over the pole to the other.
+    const startUp = await upY();
+    const sidewaysHere = await wheelToward();
+    const side = Math.sign(startUp) || 1;
+    await page.keyboard.down("w");
+    guard = 0;
+    while ((await upY()) * side > -0.3 && guard++ < 60) await ticks(2);
+    await page.keyboard.up("w");
+    await ticks(10);
+    const endUp = await upY();
+    const crossed = endUp * side < 0;
+    const sidewaysThere = await wheelToward();
+    check(
+      "the wheel zooms toward the pointer, over the pole too",
+      sidewaysHere > 0 && crossed && sidewaysThere > 0,
+      `up.y ${startUp.toFixed(2)}: eye moved ${sidewaysHere.toFixed(4)} toward the pointer; ` +
+        `up.y ${endUp.toFixed(2)}: ${sidewaysThere.toFixed(4)}${crossed ? "" : " (never crossed the pole)"}`,
+    );
+    // Back over the top, so the checks below see the planet as they did.
+    await page.keyboard.down("s");
+    guard = 0;
+    while ((await upY()) * side < 0.3 && guard++ < 60) await ticks(2);
+    await page.keyboard.up("s");
+    await ticks(4);
+
+    // --- 14. an orbit whose release was never seen does not carry on -------
+    //
+    // The right button can come up where the page cannot see it — focus taken
+    // mid-drag, capture lost to the OS. The next move then arrives with no
+    // orbit button held, and the orbit must end there rather than follow the
+    // bare pointer until the next right click.
+    await page.mouse.move(CENTRE.x, CENTRE.y);
+    await page.mouse.down({ button: "right" });
+    await page.mouse.move(CENTRE.x + 40, CENTRE.y, { steps: 4 });
+    const orbiting = await read(() => window.diomano.camera.panning);
+    const released = await read(
+      (at) => {
+        const canvas = document.querySelector("canvas");
+        canvas.dispatchEvent(
+          new PointerEvent("pointermove", {
+            clientX: at.x,
+            clientY: at.y,
+            pointerId: 1,
+            pointerType: "mouse",
+            buttons: 0,
+            bubbles: true,
+          }),
+        );
+        return !window.diomano.camera.panning;
+      },
+      { x: CENTRE.x + 60, y: CENTRE.y },
+    );
+    await page.mouse.up({ button: "right" });
+    await ensureMenuClosed();
+    check(
+      "a move with no orbit button held ends the orbit",
+      orbiting && released,
+      orbiting ? (released ? "" : "the camera kept orbiting") : "the right drag never orbited",
+    );
+
+    // --- 15. holding F1 toggles the control list once -----------------------
+    const controlsShown = () =>
+      read(() => document.querySelector(".hud-controls")?.classList.contains("shown") ?? null);
+    const shownBefore = await controlsShown();
+    await page.keyboard.down("F1");
+    // Further `down`s on a held key arrive with `repeat` set, as the OS's
+    // auto-repeat would send them.
+    for (let i = 0; i < 5; i++) await page.keyboard.down("F1");
+    await page.keyboard.up("F1");
+    await ticks(1);
+    const shownAfter = await controlsShown();
+    check(
+      "holding F1 toggles the control list once",
+      shownBefore !== null && shownAfter === !shownBefore,
+      `shown ${shownBefore} -> ${shownAfter} after one press and five repeats`,
+    );
+    if (shownAfter) await page.keyboard.press("F1");
+
+    // --- 16. a command-key chord does not leave a sculpt key held -----------
+    //
+    // macOS sends no keyup for a key released while Command is down, so
+    // Command releases the keys the game was holding rather than leave `R`
+    // down with no way for the page to hear it come up.
+    await page.keyboard.down("r");
+    await ticks(2);
+    await page.keyboard.down("Meta");
+    await page.keyboard.up("Meta");
+    const heldAfterMeta = await read(() => window.diomano.keys.inspect());
+    await page.keyboard.up("r");
+    check(
+      "Command releases the keys the game holds",
+      !heldAfterMeta.includes("KeyR"),
+      `held after Command: ${JSON.stringify(heldAfterMeta)}`,
+    );
+
     // --- 12. the intro tour does not take the camera back ------------------
     const idleBefore = await cam();
     await ticks(30);

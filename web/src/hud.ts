@@ -193,6 +193,9 @@ export function createHud(sim: Sim, player: number): Hud {
   addEventListener("keydown", (ev) => {
     if (ev.key !== "F1" && ev.key !== "?") return;
     ev.preventDefault();
+    // A held key auto-repeats at the typing rate, and every repeat flipped the
+    // card: it flickered and came to rest wherever the release happened to fall.
+    if (ev.repeat) return;
     controlsShown = !controlsShown;
     remember(KEY.controls, controlsShown ? "1" : "0");
     applyControls();

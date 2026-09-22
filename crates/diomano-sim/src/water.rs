@@ -341,6 +341,94 @@ mod tests {
     }
 
     #[test]
+    fn lava_is_conserved_across_seams() {
+        // Lava across a seam is staged in `seam_flux` against the room the
+        // ghost copy showed at the start of the half, and the real cell can
+        // fill from its own face in the same half. Deep, uneven lava along
+        // every face edge over rough ground makes that happen everywhere at
+        // once; nothing but the transfer runs, so any change in the total is
+        // the seams.
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let mut rng = 0x2545_f491_u32;
+        for face in 0..6usize {
+            for y in 0..N {
+                for x in 0..N {
+                    let c = idx(face, x, y);
+                    w.water[c] = 0;
+                    let edge = x.min(y).min(N - 1 - x).min(N - 1 - y);
+                    rng ^= rng << 13;
+                    rng ^= rng >> 17;
+                    rng ^= rng << 5;
+                    w.height[c] = 2000 + (rng & 511) as i16;
+                    w.lava[c] = if edge < 3 { (rng >> 24) as u8 } else { 0 };
+                }
+            }
+        }
+        let before = total_lava(&w);
+        for _ in 0..20 {
+            w.ghost_copy_all();
+            transfer_lava(&mut w);
+        }
+        assert_eq!(total_lava(&w), before, "lava leaked at a face boundary");
+    }
+
+    #[test]
+    fn lava_is_conserved_where_a_corner_cell_receives_over_two_seams() {
+        // The one place a seam destination can take lava over two seams in
+        // the same half: the three cells meeting at a cube corner. Each face
+        // corner in turn is a low, part-filled sink between its two seam
+        // neighbours, both high and full, with everything else walled off.
+        // Both give against the room the stale ghost showed, the sink cannot
+        // take both, and the remainder has to go back to the senders intact.
+        use crate::seams::{DIR_W, GHOST_SRC};
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let mut double_inflows = 0;
+        for face in 0..6usize {
+            for (x, y, dx, dy) in [
+                (0, 0, DIR_W, DIR_S),
+                (N - 1, 0, DIR_E, DIR_S),
+                (0, N - 1, DIR_W, DIR_N),
+                (N - 1, N - 1, DIR_E, DIR_N),
+            ] {
+                for c in 0..w.lava.len() {
+                    w.lava[c] = 0;
+                    w.water[c] = 0;
+                    w.height[c] = 3000;
+                }
+                let sink = idx(face, x, y);
+                w.height[sink] = 1000;
+                w.lava[sink] = 200;
+                for dir in [dx, dy] {
+                    let k = World::seam_entry_of_ghost(neighbour_flat(sink, dir)).unwrap();
+                    let src = GHOST_SRC[k] as usize;
+                    w.height[src] = 2000;
+                    w.lava[src] = 255;
+                }
+                let before = total_lava(&w);
+                w.ghost_copy_all();
+                for parity in 0..2usize {
+                    lava_half(&mut w, parity);
+                    let inbound: i32 = w.seam_flux.iter().sum();
+                    if inbound > 255 - i32::from(w.lava[sink]) {
+                        double_inflows += 1;
+                    }
+                    w.apply_seam_flux_i16(FluxField::Lava);
+                    w.ghost_copy_flow_fields();
+                }
+                assert_eq!(
+                    total_lava(&w),
+                    before,
+                    "lava lost at the corner of face {face} ({x}, {y})"
+                );
+                assert_eq!(w.lava[sink], 255, "the sink did not fill");
+            }
+        }
+        assert!(double_inflows > 0, "no corner took two seams at once; test is vacuous");
+    }
+
+    #[test]
     fn vegetation_damping_channels_flow_through_a_gap() {
         // HANDOFF §4.3: an open gap in a forest channels and amplifies a strong
         // current. This must fall out of the damping term with no special case

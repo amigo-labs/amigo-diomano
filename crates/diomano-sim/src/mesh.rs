@@ -57,6 +57,20 @@ pub const TOTAL_VERTS: usize = CHUNKS * VERTS_PER_CHUNK;
 /// the same 1944 indices would be 96 times the memory for no reason.
 pub const INDICES_PER_CHUNK: usize = (VERTS_PER_EDGE - 1) * (VERTS_PER_EDGE - 1) * 6;
 /// Dual-grid corners per planet: `0..=N` along both axes of each face.
+/// Side of [`Mesh::scratch_dual`]: the corner grid's `CHUNK + 3` slots plus one
+/// on each side for the warp, which moves a sample under a cell
+/// (`WARP_CELLS`), so its bilinear footprint reaches one corner further out.
+const DUAL_TILE: usize = CHUNK + 5;
+/// Where the tile starts, relative to the chunk's first corner.
+const DUAL_TILE_ORIGIN: i32 = -2;
+
+/// Side of each [`Mesh::scratch_box`] table: a leading zero row and column, then
+/// cells `cgx - 2 ..= cgx + CHUNK + 1` — the 4 x 4 blocks of corners
+/// `cgx ..= cgx + CHUNK`.
+const BOX_SIDE: usize = CHUNK + 5;
+/// Fertility, and one count per material `corner_material_weights` emits.
+const BOX_TABLES: usize = 5;
+
 pub const CORNER_SLOTS: usize = 6 * (N + 1) * (N + 1);
 
 /// Index into a per-corner table for `(face, gx, gy)`, `gx, gy` in `0..=N`.
@@ -210,6 +224,27 @@ pub struct Mesh {
     /// ring reads the border slot it duplicates, exactly as it does for the
     /// height, so the water surface sits on the same ray as the ground.
     scratch_dirs: [f32; VERTS_PER_CHUNK * 3],
+    /// The dual grid ([`Mesh::dual_height`]) over one chunk's corners and the
+    /// cell of warp reach around them, filled once per chunk rebuilt.
+    ///
+    /// A warped corner samples four dual heights and each of those averages four
+    /// cells, so the corner grid was reading `smooth` sixteen times per slot —
+    /// for values its neighbours had just read. The tile holds each dual height
+    /// once, from the same integer expression, so every sample is the same `f32`
+    /// it was. Entries outside `0 ..= N` are never written or read; a coordinate
+    /// outside the tile falls back to the direct computation.
+    scratch_dual: [f32; DUAL_TILE * DUAL_TILE],
+    /// Summed-area tables over one chunk's cells and the two-cell apron its 4 x 4
+    /// blocks reach: fertility, then the count of each of the four weighted
+    /// materials, [`BOX_SIDE`] squared entries each, filled once per chunk.
+    ///
+    /// [`corner_fertility`] and [`corner_material_weights`] each read sixteen
+    /// cells per interior vertex, and adjacent vertices share twelve of them. A
+    /// box sum is four reads, and the integer total is the same number, so the
+    /// bytes written are too. Cells outside the face are stored as zero; only
+    /// corners two or more cells inside the face read the table, and their
+    /// blocks never reach that far.
+    scratch_box: [i32; BOX_TABLES * BOX_SIDE * BOX_SIDE],
     /// Content hash per chunk; a chunk is re-meshed only when this changes.
     chunk_hash: [u64; CHUNKS],
     /// The domain warp of [`Mesh::corner_height`], tabulated: the warped dual-grid
@@ -271,6 +306,8 @@ impl Mesh {
             scratch_corners: [0.0; VERTS_PER_CHUNK * 3],
             scratch_heights: [0.0; VERTS_PER_CHUNK],
             scratch_dirs: [0.0; VERTS_PER_CHUNK * 3],
+            scratch_dual: [0.0; DUAL_TILE * DUAL_TILE],
+            scratch_box: [0; BOX_TABLES * BOX_SIDE * BOX_SIDE],
             chunk_hash: [0; CHUNKS],
             warp_xy: [0.0; CORNER_SLOTS * 2],
             smooth_input_hash: 0,
@@ -477,6 +514,7 @@ impl Mesh {
         // This costs no extra `corner_height` work: `positions` is filled from
         // this grid, and the skirt ring is a copy of the border rather than a
         // fresh evaluation.
+        self.fill_dual_tile(face, cgx, cgy);
         for gj in 0..VERTS_PER_EDGE {
             for gi in 0..VERTS_PER_EDGE {
                 // Clamped to the corners the one-deep ghost ring can support:
@@ -487,7 +525,7 @@ impl Mesh {
                 // real neighbour.
                 let gx = (cgx as i32 + gi as i32 - 1).clamp(0, N as i32);
                 let gy = (cgy as i32 + gj as i32 - 1).clamp(0, N as i32);
-                let terrain = self.corner_height(face, gx, gy);
+                let terrain = self.corner_height_tiled(face, gx, gy, cgx, cgy);
                 let dir = corner_direction(face, gx, gy);
                 let r = BASE_RADIUS + terrain * HEIGHT_TO_RADIUS;
                 let slot = gj * VERTS_PER_EDGE + gi;
@@ -502,30 +540,43 @@ impl Mesh {
             }
         }
 
-        for gj in 0..VERTS_PER_EDGE {
-            for gi in 0..VERTS_PER_EDGE {
-                // The skirt ring clamps onto the border corner and drops.
-                let i = (gi as i32 - 1).clamp(0, CHUNK as i32);
-                let j = (gj as i32 - 1).clamp(0, CHUNK as i32);
+        self.fill_box_tables(w, face, cgx, cgy);
+        // The chunk's own corners. The skirt ring is filled afterwards, by copy.
+        for gj in 1..VERTS_PER_EDGE - 1 {
+            for gi in 1..VERTS_PER_EDGE - 1 {
+                let i = gi as i32 - 1;
+                let j = gj as i32 - 1;
 
                 let gx = cgx as i32 + i;
                 let gy = cgy as i32 + j;
 
                 // Read back from the corner grid rather than recomputed, so the two
                 // can never disagree *and* the dual-grid average runs once per
-                // vertex: the skirt ring reads the border slot it duplicates,
-                // exactly as the `i`/`j` clamp above says it should.
-                let slot = gj.clamp(1, VERTS_PER_EDGE - 2) * VERTS_PER_EDGE
-                    + gi.clamp(1, VERTS_PER_EDGE - 2);
+                // vertex.
+                let slot = gj * VERTS_PER_EDGE + gi;
                 let terrain = self.scratch_heights[slot];
                 let (surface, depth) = self.corner_water(w, face, gx, gy, terrain);
                 let (mat, veg, infl) = corner_attribs(w, face, gx, gy);
-                let (lava, fert, sed) = corner_attribs2(w, face, gx, gy);
-                let splat = corner_material_weights(w, face, gx, gy);
+                let (lava, fert, sed, splat) = if block_interior(gx, gy) {
+                    let (lava, sed) = corner_lava_sediment(w, face, gx, gy);
+                    // `(i, j)` is the block's first cell in table coordinates.
+                    let (i, j) = (i as usize, j as usize);
+                    let fert = (self.box_sum(0, i, j) / 16) as u8;
+                    let splat = [
+                        (255 * self.box_sum(1, i, j) / 16) as u8,
+                        (255 * self.box_sum(2, i, j) / 16) as u8,
+                        (255 * self.box_sum(3, i, j) / 16) as u8,
+                        (255 * self.box_sum(4, i, j) / 16) as u8,
+                    ];
+                    (lava, fert, sed, splat)
+                } else {
+                    let (lava, fert, sed) = corner_attribs2(w, face, gx, gy);
+                    (lava, fert, sed, corner_material_weights(w, face, gx, gy))
+                };
 
-                // The same slot's direction: `(cgx + i, cgy + j)` with `i, j`
-                // clamped to `0..=CHUNK` is exactly the corner the first pass
-                // projected there, its `clamp(0, N)` being a no-op inside a face.
+                // The same slot's direction: `(cgx + i, cgy + j)` with `i, j` in
+                // `0..=CHUNK` is exactly the corner the first pass projected
+                // there, its `clamp(0, N)` being a no-op inside a face.
                 let vi = vbase + gj * VERTS_PER_EDGE + gi;
                 let src = slot * 3;
                 let dir = [
@@ -571,6 +622,7 @@ impl Mesh {
                 self.water_attribs[vi * 4 + 3] = ((depth / 4.0) as i32 + 128).clamp(0, 255) as u8;
             }
         }
+        self.copy_skirt_ring(chunk);
 
         // Any water in the chunk or its one-cell apron: a waterline can cross a
         // border quad whose wet cell belongs to the neighbour.
@@ -590,6 +642,33 @@ impl Mesh {
         // the artefact the skirt exists to prevent.
         self.build_normals(chunk);
         self.sink_skirt(chunk);
+    }
+
+    /// Fill the skirt ring with a copy of the border vertex each slot duplicates.
+    ///
+    /// A ring vertex clamps onto its border corner — same `(gx, gy)`, same grid
+    /// slot — so every attribute it would compute is the border's, bit for bit.
+    /// It used to compute them anyway: 72 of the 361 vertices of every chunk,
+    /// each with its two 4 x 4 blocks, re-deriving a value already in the
+    /// buffer. Normals and the skirt drop are applied afterwards, as before.
+    fn copy_skirt_ring(&mut self, chunk: usize) {
+        let vbase = chunk * VERTS_PER_CHUNK;
+        let last = VERTS_PER_EDGE - 1;
+        for gj in 0..VERTS_PER_EDGE {
+            for gi in 0..VERTS_PER_EDGE {
+                if gi != 0 && gj != 0 && gi != last && gj != last {
+                    continue;
+                }
+                let dst = vbase + gj * VERTS_PER_EDGE + gi;
+                let src = vbase + gj.clamp(1, last - 1) * VERTS_PER_EDGE + gi.clamp(1, last - 1);
+                self.positions.copy_within(src * 3..src * 3 + 3, dst * 3);
+                self.water_positions.copy_within(src * 3..src * 3 + 3, dst * 3);
+                self.attribs.copy_within(src * 4..src * 4 + 4, dst * 4);
+                self.attribs2.copy_within(src * 4..src * 4 + 4, dst * 4);
+                self.attribs3.copy_within(src * 4..src * 4 + 4, dst * 4);
+                self.water_attribs.copy_within(src * 4..src * 4 + 4, dst * 4);
+            }
+        }
     }
 
     /// Push the outer ring inward, hiding cracks against a stale neighbour.
@@ -728,15 +807,93 @@ impl Mesh {
     /// the fade below has already reached zero there anyway.
     #[must_use]
     pub fn corner_height(&self, face: usize, gx: i32, gy: i32) -> f32 {
+        self.corner_height_with(face, gx, gy, |x, y| self.dual_height(face, x, y))
+    }
+
+    /// [`Mesh::corner_height`] reading the dual grid from the chunk's tile,
+    /// which [`Mesh::fill_dual_tile`] must have filled for `(cgx, cgy)`.
+    fn corner_height_tiled(&self, face: usize, gx: i32, gy: i32, cgx: usize, cgy: usize) -> f32 {
+        let (ox, oy) = (cgx as i32 + DUAL_TILE_ORIGIN, cgy as i32 + DUAL_TILE_ORIGIN);
+        self.corner_height_with(face, gx, gy, |x, y| {
+            let (tx, ty) = (x - ox, y - oy);
+            if (0..DUAL_TILE as i32).contains(&tx) && (0..DUAL_TILE as i32).contains(&ty) {
+                self.scratch_dual[ty as usize * DUAL_TILE + tx as usize]
+            } else {
+                self.dual_height(face, x, y)
+            }
+        })
+    }
+
+    /// The body of [`Mesh::corner_height`], with the dual-grid read supplied, so
+    /// the tiled and untiled forms are one sequence of `f32` operations and
+    /// cannot round differently.
+    #[inline]
+    fn corner_height_with(
+        &self,
+        face: usize,
+        gx: i32,
+        gy: i32,
+        dual: impl Fn(i32, i32) -> f32,
+    ) -> f32 {
         if let Some(cells) = cube_corner_cells(face, gx, gy) {
             let sum: i32 = cells.iter().map(|&c| self.smooth[c]).sum();
             return (sum / 3) as f32 / 256.0;
         }
         if warp_fade(gx, gy) <= 0.0 {
-            return self.dual_height(face, gx, gy);
+            return dual(gx, gy);
         }
         let k = corner_slot(face, gx, gy) * 2;
-        self.dual_height_at(face, self.warp_xy[k], self.warp_xy[k + 1])
+        bilinear_dual(self.warp_xy[k], self.warp_xy[k + 1], dual)
+    }
+
+    /// Fill [`Mesh::scratch_box`] for the chunk whose first corner is `(cgx, cgy)`.
+    fn fill_box_tables(&mut self, w: &World, face: usize, cgx: usize, cgy: usize) {
+        let table = BOX_SIDE * BOX_SIDE;
+        for ty in 1..BOX_SIDE {
+            let y = cgy as i32 - 3 + ty as i32;
+            let mut row = [0i32; BOX_TABLES];
+            for tx in 1..BOX_SIDE {
+                let x = cgx as i32 - 3 + tx as i32;
+                if (0..N as i32).contains(&x) && (0..N as i32).contains(&y) {
+                    let c = idx_i(face, x, y);
+                    row[0] += i32::from(w.fertility[c]);
+                    let m = w.material[c] as usize;
+                    if m < 4 {
+                        row[1 + m] += 1;
+                    }
+                }
+                let k = ty * BOX_SIDE + tx;
+                for (t, &r) in row.iter().enumerate() {
+                    self.scratch_box[t * table + k] =
+                        self.scratch_box[t * table + k - BOX_SIDE] + r;
+                }
+            }
+        }
+    }
+
+    /// The sum of table `t` over the 4 x 4 cells starting at table cell `(i, j)`.
+    fn box_sum(&self, t: usize, i: usize, j: usize) -> i32 {
+        let b = &self.scratch_box[t * BOX_SIDE * BOX_SIDE..];
+        let at = |x: usize, y: usize| b[y * BOX_SIDE + x];
+        at(i + 4, j + 4) - at(i, j + 4) - at(i + 4, j) + at(i, j)
+    }
+
+    /// Fill [`Mesh::scratch_dual`] for the chunk whose first corner is
+    /// `(cgx, cgy)`, over the corners `0 ..= N` the tile covers.
+    fn fill_dual_tile(&mut self, face: usize, cgx: usize, cgy: usize) {
+        let (ox, oy) = (cgx as i32 + DUAL_TILE_ORIGIN, cgy as i32 + DUAL_TILE_ORIGIN);
+        for ty in 0..DUAL_TILE {
+            let gy = oy + ty as i32;
+            if !(0..=N as i32).contains(&gy) {
+                continue;
+            }
+            for tx in 0..DUAL_TILE {
+                let gx = ox + tx as i32;
+                if (0..=N as i32).contains(&gx) {
+                    self.scratch_dual[ty * DUAL_TILE + tx] = self.dual_height(face, gx, gy);
+                }
+            }
+        }
     }
 
     /// The untabulated form of [`Mesh::corner_height`], kept so a test can pin
@@ -764,29 +921,10 @@ impl Mesh {
         ((a + b + c + d) / 4) as f32 / 256.0
     }
 
-    /// The dual grid sampled bilinearly at a continuous corner coordinate.
-    ///
-    /// Clamped to the corners `1 ..= N - 1`, whose four cells are all live. The
-    /// corners on the face edge (`0` and `N`) average a ghost cell, and at a
-    /// cube corner that is the diagonal ghost, which the ghost copy never writes
-    /// — reading it put a dent of height zero into the vertices nearest the
-    /// corner. `warp_fade` has brought the offset to zero well before the edge;
-    /// the clamp is the belt.
+    /// [`bilinear_dual`] over the untiled grid, for the tests that pin the table.
+    #[cfg(test)]
     fn dual_height_at(&self, face: usize, fx: f32, fy: f32) -> f32 {
-        let last = N as i32 - 1;
-        let cx = fx.clamp(1.0, last as f32);
-        let cy = fy.clamp(1.0, last as f32);
-        let x0 = (cx as i32).clamp(1, last - 1);
-        let y0 = (cy as i32).clamp(1, last - 1);
-        let tx = cx - x0 as f32;
-        let ty = cy - y0 as f32;
-        let h00 = self.dual_height(face, x0, y0);
-        let h10 = self.dual_height(face, x0 + 1, y0);
-        let h01 = self.dual_height(face, x0, y0 + 1);
-        let h11 = self.dual_height(face, x0 + 1, y0 + 1);
-        let top = h00 + (h10 - h00) * tx;
-        let bottom = h01 + (h11 - h01) * tx;
-        top + (bottom - top) * ty
+        bilinear_dual(fx, fy, |x, y| self.dual_height(face, x, y))
     }
 
     /// Water surface altitude and depth at a corner, on the same dual grid.
@@ -874,6 +1012,33 @@ const WARP_FADE_CELLS: f32 = 3.0;
 /// coast rather than as noise on it, and long enough to carry the amplitude
 /// above without folding.
 const WARP_PERIOD_CELLS: f32 = 8.0;
+
+/// The dual grid sampled bilinearly at a continuous corner coordinate, read
+/// through `dual`.
+///
+/// Clamped to the corners `1 ..= N - 1`, whose four cells are all live. The
+/// corners on the face edge (`0` and `N`) average a ghost cell, and at a
+/// cube corner that is the diagonal ghost, which the ghost copy never writes
+/// — reading it put a dent of height zero into the vertices nearest the
+/// corner. `warp_fade` has brought the offset to zero well before the edge;
+/// the clamp is the belt.
+#[inline]
+fn bilinear_dual(fx: f32, fy: f32, dual: impl Fn(i32, i32) -> f32) -> f32 {
+    let last = N as i32 - 1;
+    let cx = fx.clamp(1.0, last as f32);
+    let cy = fy.clamp(1.0, last as f32);
+    let x0 = (cx as i32).clamp(1, last - 1);
+    let y0 = (cy as i32).clamp(1, last - 1);
+    let tx = cx - x0 as f32;
+    let ty = cy - y0 as f32;
+    let h00 = dual(x0, y0);
+    let h10 = dual(x0 + 1, y0);
+    let h01 = dual(x0, y0 + 1);
+    let h11 = dual(x0 + 1, y0 + 1);
+    let top = h00 + (h10 - h00) * tx;
+    let bottom = h01 + (h11 - h01) * tx;
+    top + (bottom - top) * ty
+}
 
 /// Zero within `WARP_FADE_CELLS` of a face boundary, one in the interior.
 fn warp_fade(gx: i32, gy: i32) -> f32 {
@@ -984,13 +1149,27 @@ fn corner_attribs(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
 /// the same cell the material does, so all of the terrain shader's per-cell
 /// fields agree about which cell they came from.
 fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
+    let (lava, sed) = corner_lava_sediment(w, face, gx, gy);
+    (lava, corner_fertility(w, face, gx, gy), sed)
+}
+
+/// The two fields of [`corner_attribs2`] that are not a 4 x 4 block.
+fn corner_lava_sediment(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8) {
     let c = clamp_cell(face, gx, gy);
     let mut lava = 0u8;
     for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
         let n = clamp_cell(face, gx + dx, gy + dy);
         lava = lava.max(w.lava[n]);
     }
-    (lava, corner_fertility(w, face, gx, gy), w.sediment[c])
+    (lava, w.sediment[c])
+}
+
+/// Whether a corner is far enough inside its face for the 4 x 4 blocks of
+/// [`corner_fertility`] and [`corner_material_weights`], which reach two cells
+/// either side of it.
+const fn block_interior(gx: i32, gy: i32) -> bool {
+    let n = N as i32;
+    gx >= 2 && gy >= 2 && gx <= n - 2 && gy <= n - 2
 }
 
 /// Fertility at a corner, as the ground *reads*: the mean over the 4 x 4 cells
@@ -1008,7 +1187,7 @@ fn corner_attribs2(w: &World, face: usize, gx: i32, gy: i32) -> (u8, u8, u8) {
 /// therefore still averages the same four cells from either side.
 fn corner_fertility(w: &World, face: usize, gx: i32, gy: i32) -> u8 {
     let n = N as i32;
-    if gx < 2 || gy < 2 || gx > n - 2 || gy > n - 2 {
+    if !block_interior(gx, gy) {
         let mut sum = 0i32;
         for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
             let c = idx_i(face, (gx + dx).clamp(-1, n), (gy + dy).clamp(-1, n));
@@ -1053,8 +1232,7 @@ fn corner_material_weights(w: &World, face: usize, gx: i32, gy: i32) -> [u8; 4] 
     // integer results are identical and the compiler turns `/ 3`, `/ 4` and
     // `/ 16` into multiplies and shifts, where a variable divisor is four
     // hardware divisions per vertex.
-    let n = N as i32;
-    if gx >= 2 && gy >= 2 && gx <= n - 2 && gy <= n - 2 {
+    if block_interior(gx, gy) {
         // Well inside the face: the 4 x 4 block around the corner, for the same
         // reason `corner_fertility` widens — a material boundary that wanders
         // cell by cell is a fleck, and the ground has to come in regions to be
@@ -1913,6 +2091,74 @@ mod tests {
                         m.corner_height(face, gx, gy).to_bits(),
                         m.corner_height_direct(face, gx, gy).to_bits(),
                         "corner ({face}, {gx}, {gy}) differs through the table"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_dual_tile_covers_every_sample_and_changes_no_bit() {
+        // The tile is only a saving if the fallback never runs, and only
+        // correct if what it holds is what `dual_height` returns. Both, for
+        // every corner-grid slot of every chunk.
+        let (_w, mut m) = meshed();
+        for chunk in 0..CHUNKS {
+            let (face, cgx, cgy) = chunk_origin(chunk);
+            m.fill_dual_tile(face, cgx, cgy);
+            let (ox, oy) = (cgx as i32 + DUAL_TILE_ORIGIN, cgy as i32 + DUAL_TILE_ORIGIN);
+            for gj in 0..VERTS_PER_EDGE as i32 {
+                for gi in 0..VERTS_PER_EDGE as i32 {
+                    let gx = (cgx as i32 + gi - 1).clamp(0, N as i32);
+                    let gy = (cgy as i32 + gj - 1).clamp(0, N as i32);
+                    let tiled = m.corner_height_with(face, gx, gy, |x, y| {
+                        let (tx, ty) = (x - ox, y - oy);
+                        assert!(
+                            (0..DUAL_TILE as i32).contains(&tx)
+                                && (0..DUAL_TILE as i32).contains(&ty),
+                            "chunk {chunk} corner ({gx}, {gy}) samples ({x}, {y}) outside its tile"
+                        );
+                        m.scratch_dual[ty as usize * DUAL_TILE + tx as usize]
+                    });
+                    assert_eq!(tiled.to_bits(), m.corner_height(face, gx, gy).to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn box_sums_write_the_bytes_the_blocks_did() {
+        // Fertility and the four material weights through the summed-area
+        // tables, against the sixteen-cell loops they replace, on every interior
+        // corner of every chunk. Scrambled first, so every material occurs
+        // next to every other and a count cannot pass by being all one kind.
+        let (mut w, mut m) = meshed();
+        for c in 0..CELLS {
+            let h = (c as u32).wrapping_mul(0x9e37_79b9) >> 7;
+            w.material[c] = (h % 6) as u8;
+            w.fertility[c] = (h >> 3) as u8;
+        }
+        for chunk in 0..CHUNKS {
+            let (face, cgx, cgy) = chunk_origin(chunk);
+            m.fill_box_tables(&w, face, cgx, cgy);
+            for j in 0..=CHUNK {
+                for i in 0..=CHUNK {
+                    let (gx, gy) = ((cgx + i) as i32, (cgy + j) as i32);
+                    if !block_interior(gx, gy) {
+                        continue;
+                    }
+                    let fert = (m.box_sum(0, i, j) / 16) as u8;
+                    assert_eq!(
+                        fert,
+                        corner_fertility(&w, face, gx, gy),
+                        "fertility at {chunk} ({i}, {j})"
+                    );
+                    let splat: [u8; 4] =
+                        core::array::from_fn(|t| (255 * m.box_sum(t + 1, i, j) / 16) as u8);
+                    assert_eq!(
+                        splat,
+                        corner_material_weights(&w, face, gx, gy),
+                        "weights at {chunk} ({i}, {j})"
                     );
                 }
             }

@@ -178,6 +178,11 @@ export function createCamera(canvas: HTMLCanvasElement, keys: Keys): OrbitCamera
   const onPointerMove = (ev: PointerEvent): void => {
     zoomAnchorX = (ev.clientX / innerWidth) * 2 - 1;
     zoomAnchorY = -(ev.clientY / innerHeight) * 2 + 1;
+    // No orbit button held means the orbit is over, whether or not its
+    // `pointerup` ever arrived: a release while focus was elsewhere, or after
+    // the OS took the capture, is never delivered, and the planet used to
+    // follow the bare pointer until the next right click.
+    if (panning && (ev.buttons & 6) === 0) panning = false;
     if (!panning) return;
     // Sensitivity tracks distance, so a pixel of drag moves about the same
     // amount of ground at every zoom level.
@@ -240,7 +245,11 @@ export function createCamera(canvas: HTMLCanvasElement, keys: Keys): OrbitCamera
       const halfHeight = Math.tan((camera.fov * Math.PI) / 360);
       const halfWidth = halfHeight * camera.aspect;
       const gain = closer * 0.6;
-      targetYaw += zoomAnchorX * halfWidth * gain;
+      // Screen-right is `east` at every pitch, and yaw moves the eye along
+      // `east * cos(pitch)` — so past the pole the sign flips here exactly as
+      // it does for the drag and the keys, or the zoom slid away from the
+      // pointer instead of toward it.
+      targetYaw += zoomAnchorX * halfWidth * gain * yawSign();
       targetPitch += zoomAnchorY * halfHeight * gain;
     }
   };
@@ -249,6 +258,13 @@ export function createCamera(canvas: HTMLCanvasElement, keys: Keys): OrbitCamera
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointercancel", onPointerUp);
+  // Losing the capture or the window ends an orbit too; see `onPointerMove`.
+  canvas.addEventListener("lostpointercapture", () => {
+    panning = false;
+  });
+  addEventListener("blur", () => {
+    panning = false;
+  });
   canvas.addEventListener("wheel", onWheel, { passive: false });
   // The right button orbits (drag) and opens the power menu (click), so the
   // browser menu is in the way either way.
