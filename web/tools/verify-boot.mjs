@@ -354,6 +354,10 @@ SHADER PROGRAMS — materials with different shaders share one program (tier ${t
           const c = sim.idx(cell.face, cell.x, cell.y);
           return 1 + ((sim.height[c] ?? 0) + Math.max(sim.water[c] ?? 0, 0)) * 0.00008;
         };
+        // The hand's own step, `PICK_STEP_CELLS` in `hand.ts`, in radii.
+        const handStep = (0.125 * Math.PI) / 2 / sim.N;
+        const stride = 0.0005;
+        /** First contact along the ray, and how long the ray stays underground there. */
         const truth = (x, y) => {
           const origin = cam.position.clone();
           const dir = cam.position
@@ -363,12 +367,19 @@ SHADER PROGRAMS — materials with different shaders share one program (tier ${t
             .sub(origin)
             .normalize();
           const p = origin.clone();
-          for (let t = 0; t < 6; t += 0.0005) {
+          const under = (t) => {
             p.copy(origin).addScaledVector(dir, t);
             const r = p.length();
-            if (r > 1.7) continue;
+            if (r > 1.7) return null;
             const cell = planet.pick(p);
-            if (r <= surface(cell)) return cell;
+            return r <= surface(cell) ? cell : null;
+          };
+          for (let t = 0; t < 6; t += stride) {
+            const cell = under(t);
+            if (!cell) continue;
+            let out = t;
+            while (out < t + 2 * handStep && under(out)) out += stride;
+            return { cell, span: out - t };
           }
           return null;
         };
@@ -386,14 +397,19 @@ SHADER PROGRAMS — materials with different shaders share one program (tier ${t
               }),
             );
             const got = hand.target();
-            const want = truth(x, y);
+            const contact = truth(x, y);
+            const want = contact?.cell ?? null;
+            // A ray that clips a peak for less than the hand's step may find
+            // nothing; that is the stated resolution, not a wrong pick.
+            const grazed = got === null && contact !== null && contact.span < handStep;
             const ok =
-              want === null
+              grazed ||
+              (want === null
                 ? got === null
                 : got !== null &&
                   got.face === want.face &&
                   Math.abs(got.x - want.x) <= 1 &&
-                  Math.abs(got.y - want.y) <= 1;
+                  Math.abs(got.y - want.y) <= 1);
             const show = (c) => (c ? `${c.face}:${c.x},${c.y}` : "none");
             if (!ok) out.push(`(${x | 0}, ${y | 0}): hand ${show(got)}, ray ${show(want)}`);
           }

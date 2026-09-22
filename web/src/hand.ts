@@ -418,10 +418,12 @@ export function createHand(
    * ground *behind* the hill the pointer was on, and a ray that grazed a peak
    * above the mean sphere found nothing at all. `verify-boot` caught both.
    *
-   * So the ray is marched, half a cell at a time, through the shell between the
-   * highest and the lowest surface, and the first step that lands underground
-   * is bisected down to the cell. A hundred-odd cell lookups at worst, which is
-   * nothing next to a raycast against 96 chunks of moving vertex data.
+   * So the ray is marched, an eighth of a cell at a time (`PICK_STEP_CELLS`),
+   * through the shell between the highest and the lowest surface, and the
+   * first step that lands underground is bisected down to the cell. A few
+   * hundred cell lookups at worst, which is nothing next to a raycast against
+   * 96 chunks of moving vertex data. A ray that clips a peak for less than a
+   * step at the silhouette passes over it.
    *
    * The original reason for picking against cells rather than the drawn mesh —
    * that raising ground would otherwise drag the cursor with it — still holds:
@@ -437,10 +439,13 @@ export function createHand(
       return;
     }
     // A ray that reaches the lowest surface is underground there by
-    // definition, so the march never needs to go further.
-    const inner = sphereSpan(ray, shellInner);
+    // definition, so the march never needs to go further. Taken a hair inside
+    // it: the intersection lands on the sphere to within rounding, and a cell
+    // whose surface *is* that sphere read as just above ground there, so the
+    // march stopped one ulp short and picked nothing.
+    const inner = sphereSpan(ray, shellInner - 1e-4);
     const end = inner ? inner[0] : outer[1];
-    const step = (Math.PI / 2 / sim.N) * BASE_RADIUS * 0.5;
+    const step = PICK_STEP_CELLS * (Math.PI / 2 / sim.N) * BASE_RADIUS;
     let before = outer[0];
     let hit = -1;
     for (let t = outer[0]; ; t = Math.min(t + step, end)) {
@@ -814,6 +819,13 @@ export function createHand(
     },
   };
 }
+
+/**
+ * The hand's ray-march step, in cells. `verify-boot` marches the same ray at a
+ * fiftieth of a cell and accepts "nothing under the pointer" only where a march
+ * at this step also finds nothing.
+ */
+export const PICK_STEP_CELLS = 0.125;
 
 /**
  * Where a ray is inside a sphere about the origin, as `[enter, exit]` distances
