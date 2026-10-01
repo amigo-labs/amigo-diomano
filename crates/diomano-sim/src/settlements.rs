@@ -304,6 +304,12 @@ fn spawn_population(w: &mut World) {
 /// opponent script read the same cells instead of keeping copies.
 pub const STARTS: [(usize, usize, usize); PLAYERS] = [(4, N / 2, N / 2), (5, N / 2, N / 2)];
 
+/// Whether `c` is either player's home core — the `STARTS` cell itself.
+#[must_use]
+pub fn is_home_core(c: usize) -> bool {
+    STARTS.iter().any(|&(face, x, y)| crate::world::idx(face, x, y) == c)
+}
+
 /// Causeway crest band: every dry carved cell lands in
 /// `[CAUSEWAY_CREST_MIN - 2, CAUSEWAY_CREST_MAX]` = `[34, 45]`.
 ///

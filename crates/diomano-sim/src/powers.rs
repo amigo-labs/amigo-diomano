@@ -292,6 +292,11 @@ fn earthquake(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
             }
             let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
             let c = idx(f, x, y);
+            // The home cores stand through any quake: sudden death is "my land
+            // drowned", never "my last cell was shaken" (docs/specs/pacing.md).
+            if crate::settlements::is_home_core(c) {
+                continue;
+            }
             // Alternating dent so the result is broken ground, not a smooth bowl:
             // a plateau is what settlements need, and this destroys plateaus.
             let sign = if (x + y) % 2 == 0 { -1 } else { 1 };
@@ -1443,5 +1448,21 @@ enabled = true
             earned >= price,
             "armageddon ({price}) is out of reach: two late-game tide cycles earn only {earned}"
         );
+    }
+
+    #[test]
+    fn an_earthquake_leaves_the_home_core_alone() {
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        let (face, x, y) = crate::settlements::STARTS[0];
+        let core = idx(face, x, y);
+        let (h, m) = (w.height[core], w.material[core]);
+        let next = idx(face, x + 1, y);
+        let h_next = w.height[next];
+        earthquake(&mut w, face, x as i32, y as i32, 3);
+        assert_eq!((w.height[core], w.material[core]), (h, m), "the quake moved the home core");
+        assert_ne!(w.height[next], h_next, "the quake did nothing around the core either");
     }
 }
