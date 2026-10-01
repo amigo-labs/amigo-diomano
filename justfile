@@ -195,6 +195,15 @@ record ticks="2400" seed="0x5EED":
 perf ticks="600":
     cargo run --release -p diomano-cli -- perf --ticks {{ticks}}
 
+# Not in `check`: a full match is a minute of simulation, and the default sweep
+# is forty-eight of them across every core. `cap` stops undecided matches early.
+#
+# Match length over seeds × terrains × player behaviours, against the pacing
+# floor of `docs/specs/pacing.md`: no match decided before the first wave peak,
+# no idle player beaten before the second, a mean of at least ten minutes.
+sweep seeds="8" profile="all" cap="":
+    cargo run --release -p diomano-cli -- sweep --seeds {{seeds}} --profile {{profile}} {{ if cap == "" { "" } else { "--cap " + cap } }}
+
 # Per-tick state hashes, for diffing two runs by hand.
 hash ticks="1000" seed="0x5EED":
     cargo run --release -p diomano-cli -- hash --ticks {{ticks}} --seed {{seed}}
