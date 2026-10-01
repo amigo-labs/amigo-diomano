@@ -564,6 +564,30 @@ async function main() {
     // is how one stuck control once cost three lines of this report.
     await ensureMenuClosed();
 
+    // --- 8b. the aim follows the pointer across the open menu --------------
+    // The backdrop covers the canvas, and the hand used to keep the cell the
+    // menu opened over until the pointer next moved on the canvas itself.
+    await page.mouse.move(CENTRE.x, CENTRE.y);
+    await ticks(2);
+    const aimBefore = await read(() => window.diomano.hand.target());
+    await page.keyboard.press("Space");
+    await becomes((want) => window.diomano.radial.open === want, true);
+    await page.mouse.move(CENTRE.x + 90, CENTRE.y + 70, { steps: 4 });
+    await page.keyboard.press("Escape");
+    await becomes((want) => window.diomano.radial.open === want, false);
+    await ticks(2);
+    const aimAfter = await read(() => window.diomano.hand.target());
+    await page.mouse.move(CENTRE.x + 91, CENTRE.y + 70);
+    await ticks(2);
+    const aimFresh = await read(() => window.diomano.hand.target());
+    const sameCell = (a, b) => a && b && a.face === b.face && a.x === b.x && a.y === b.y;
+    check(
+      "the hand aims where the pointer went while the menu was open",
+      !!aimBefore && !!aimFresh && !sameCell(aimBefore, aimFresh) && sameCell(aimAfter, aimFresh),
+      `opened over ${JSON.stringify(aimBefore)}, closed over ${JSON.stringify(aimAfter)}, pointer over ${JSON.stringify(aimFresh)}`,
+    );
+    await ensureMenuClosed();
+
     // --- 9. B cycles the brush, and the ring grows with it -----------------
     const ringScale = () =>
       read(() => {
