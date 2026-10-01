@@ -344,6 +344,19 @@ pub extern "C" fn dio_ticks_to_impact() -> u32 {
     tide::ticks_to_impact(world())
 }
 
+/// Consecutive ticks `player` has held no influence at all, while sudden death
+/// is armed. The client shows its own player's countdown; zero hides it.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_doom_ticks(player: u32) -> u32 {
+    world().doom[(player as usize) % PLAYERS]
+}
+
+/// The length of the sudden-death grace window, in ticks.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_grace_ticks() -> u32 {
+    tide::GRACE_TICKS
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_mana(player: u32) -> i32 {
     world().mana_units((player as usize) % PLAYERS)

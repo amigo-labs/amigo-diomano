@@ -168,10 +168,32 @@ fn score_wave(w: &mut World) {
     }
 }
 
-/// Sudden death: influence reaching 0 is an immediate loss, whatever the score
-/// (§5.5).
+/// Ticks a player may stand with no influence at all before sudden death
+/// decides: 90 seconds, long enough to found a settlement from a bare core.
+pub const GRACE_TICKS: u32 = 90 * crate::TICK_HZ;
+
+/// Sudden death is only armed once the first wave has scored. Before that
+/// there is no standing to cut short — and a match that ends during the
+/// opening is a dissolved spawn, never a lost war.
+#[must_use]
+pub fn sudden_death_armed(w: &World) -> bool {
+    w.tide.wave >= 1
+        || w.tide.scored != 0
+        || w.tide.phase == TIDE_RECOVERY
+        || w.tide.phase == TIDE_DONE
+}
+
+/// Sudden death: no influence at all starts a countdown, and the countdown
+/// running out loses the match, whatever the score (§5.5,
+/// `docs/specs/pacing.md` §3–4). One cell won back resets it.
 fn check_sudden_death(w: &mut World) {
     if w.outcome != 0 {
+        return;
+    }
+    // Not accumulated before it is armed, rather than accumulated unwatched —
+    // which would fire one second after arming.
+    if !sudden_death_armed(w) {
+        w.doom = [0; PLAYERS];
         return;
     }
     let mut held = [0u32; PLAYERS];
@@ -187,11 +209,14 @@ fn check_sudden_death(w: &mut World) {
             }
         }
     }
-    match (held[0], held[1]) {
-        (0, 0) => w.outcome = 3,
-        (0, _) => w.outcome = 2,
-        (_, 0) => w.outcome = 1,
-        _ => {}
+    for p in 0..PLAYERS {
+        w.doom[p] = if held[p] > 0 { 0 } else { w.doom[p].saturating_add(1) };
+    }
+    match (w.doom[0] >= GRACE_TICKS, w.doom[1] >= GRACE_TICKS) {
+        (true, true) => w.outcome = 3,
+        (true, false) => w.outcome = 2,
+        (false, true) => w.outcome = 1,
+        (false, false) => {}
     }
 }
 
@@ -389,21 +414,79 @@ mod tests {
         );
     }
 
-    #[test]
-    fn losing_all_influence_ends_the_match_immediately() {
+    /// Player 0 holds every cell, player 1 none, and the first wave has
+    /// already scored so sudden death is armed.
+    fn one_sided_world() -> alloc::boxed::Box<World> {
         let mut w = tidal_world();
-        for c in 0..w.influence.len() {
-            w.influence[c] = 0;
+        // The fast tide would end the match inside the window; hold it in the
+        // recovery after the first wave instead.
+        w.cfg.recovery_ticks = 100_000;
+        while !sudden_death_armed(&w) {
+            step(&mut w);
         }
-        for face in 0..6usize {
-            for y in 0..N {
-                for x in 0..N {
-                    w.influence[idx(face, x, y)] = 40; // player 0 holds everything
-                }
-            }
-        }
+        assert_eq!(w.outcome, 0, "the match ended before sudden death was armed");
+        w.influence.fill(40);
+        w
+    }
+
+    #[test]
+    fn losing_all_influence_starts_a_countdown_and_not_a_defeat() {
+        let mut w = one_sided_world();
         step(&mut w);
-        assert_eq!(w.outcome, 1, "a wipe-out did not end the match");
+        assert_eq!(w.outcome, 0, "a wipe-out ended the match on the spot");
+        assert_eq!(w.doom, [0, 1], "the countdown did not start for the player with nothing");
+    }
+
+    #[test]
+    fn the_countdown_resets_when_ground_is_won_back() {
+        let mut w = one_sided_world();
+        for _ in 0..GRACE_TICKS - 1 {
+            step(&mut w);
+        }
+        assert_eq!(w.outcome, 0);
+        w.influence[idx(5, 1, 1)] = -1;
+        step(&mut w);
+        assert_eq!(w.doom[1], 0, "one cell won back did not reset the countdown");
+        assert_eq!(w.outcome, 0);
+    }
+
+    #[test]
+    fn the_countdown_ends_the_match_when_it_runs_out() {
+        let mut w = one_sided_world();
+        let mut ticks = 0;
+        while w.outcome == 0 && ticks < GRACE_TICKS * 2 {
+            step(&mut w);
+            ticks += 1;
+        }
+        assert_eq!(w.outcome, 1, "the countdown never decided the match");
+        assert_eq!(ticks, GRACE_TICKS, "sudden death took {ticks} ticks, not the grace window");
+    }
+
+    #[test]
+    fn sudden_death_is_not_armed_before_the_first_wave() {
+        let mut w = tidal_world();
+        w.influence.fill(40);
+        let mut ticks = 0;
+        loop {
+            step(&mut w);
+            ticks += 1;
+            if sudden_death_armed(&w) {
+                break;
+            }
+            assert_eq!(w.doom, [0, 0], "the countdown ran before the first wave, at tick {ticks}");
+        }
+        assert_eq!(w.outcome, 0);
+        assert!(ticks > w.cfg.lull_ticks, "armed at tick {ticks}, inside the opening lull");
+    }
+
+    #[test]
+    fn the_default_map_cannot_be_lost_before_the_grace_window_after_the_first_wave() {
+        // The earliest possible defeat on the shipped manifest, by arithmetic:
+        // the first peak, plus the whole window.
+        let cfg = MapConfig::DEFAULT;
+        let first_peak = cfg.lull_ticks + cfg.telegraph_ticks + cfg.impact_ticks / 2;
+        let earliest = first_peak + GRACE_TICKS;
+        assert!(earliest >= 6_000, "a match can be lost at tick {earliest}");
     }
 
     #[test]

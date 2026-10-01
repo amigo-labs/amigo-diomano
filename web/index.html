@@ -297,6 +297,20 @@
         color: #ff9d5e;
       }
       /*
+        Your people have no land left and sudden death is counting. Only ever
+        present while it counts: an emergency, not a resting readout.
+      */
+      .hud-doom {
+        display: none;
+        color: #ff6b5e;
+        font-weight: 600;
+        margin-top: 4px;
+        font-variant-numeric: tabular-nums;
+      }
+      .hud-doom.shown {
+        display: block;
+      }
+      /*
         Territory. The track is the opponent's colour and the fill is yours, so
         the bar is the whole standing rather than a fraction of an abstract
         maximum — the same warm/cool pair the terrain shader blends by influence
