@@ -1240,9 +1240,9 @@ mod tests {
     /// under 80 seconds with no player mistake anywhere. Now the ash rests on
     /// the shelf and the shelf satellites keep influence alive, so 3,000
     /// ticks covers several strikes and the army's arrival. (A player who
-    /// *never* acts still loses to the marching army around tick ~4,200 —
-    /// that is the opponent legitimately winning a war nobody contested,
-    /// §5.5, not this bug.)
+    /// never acts used to lose anyway, around tick 4,200, to one earthquake
+    /// every 17 seconds; `an_idle_player_survives_the_first_two_waves_against_the_scripted_opponent`
+    /// is the regression for that, and docs/specs/pacing.md the reason.)
     #[test]
     fn the_default_match_survives_the_opening_war() {
         let mut w = World::boxed();
@@ -1254,6 +1254,24 @@ mod tests {
         let held = influence_held(&w);
         assert!(held[0] > 0, "player 0 lost all influence by tick 3,000");
         assert!(held[1] > 0, "player 1 lost all influence by tick 3,000");
+    }
+
+    /// The pacing regression (docs/specs/pacing.md): a player who opens the
+    /// game and never touches it is not beaten before the second wave has
+    /// scored — about seventeen minutes on the shipped map. The opponent may
+    /// win after that; a match nobody plays has to be losable.
+    #[test]
+    fn an_idle_player_survives_the_first_two_waves_against_the_scripted_opponent() {
+        let mut w = World::boxed();
+        w.init(&MapConfig { ai_enabled: 1, ..MapConfig::DEFAULT });
+        let mut ticks = 0u32;
+        while crate::tide::waves_landed(&w) < 2 && ticks < 40_000 {
+            w.tick(&[]);
+            ticks += 1;
+            assert_eq!(w.outcome, 0, "an idle player's match was decided at tick {ticks}");
+        }
+        assert_eq!(crate::tide::waves_landed(&w), 2, "the second wave never landed");
+        assert!(ticks >= 30_000, "two waves landed by tick {ticks}");
     }
 
     /// With no opponent and no input at all, the world alone must not dissolve

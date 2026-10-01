@@ -177,10 +177,17 @@ pub const GRACE_TICKS: u32 = 90 * crate::TICK_HZ;
 /// opening is a dissolved spawn, never a lost war.
 #[must_use]
 pub fn sudden_death_armed(w: &World) -> bool {
-    w.tide.wave >= 1
-        || w.tide.scored != 0
-        || w.tide.phase == TIDE_RECOVERY
-        || w.tide.phase == TIDE_DONE
+    waves_landed(w) >= 1
+}
+
+/// How many waves have scored so far: the match clock as the sea keeps it.
+///
+/// The current wave counts from its peak on — `scored` is set there — and
+/// stays counted through its recovery and after the tide is done.
+#[must_use]
+pub fn waves_landed(w: &World) -> u8 {
+    let current = w.tide.scored != 0 || w.tide.phase == TIDE_RECOVERY || w.tide.phase == TIDE_DONE;
+    w.tide.wave.saturating_add(u8::from(current))
 }
 
 /// Sudden death: no influence at all starts a countdown, and the countdown

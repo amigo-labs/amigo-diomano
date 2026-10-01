@@ -64,6 +64,9 @@ struct Lesson {
     needs_reserve: bool,
     /// Emit only during a tide telegraph — the defensive-wall gate.
     telegraph_only: bool,
+    /// Emit only once this many waves have landed (`tide::waves_landed`) —
+    /// the escalation gate. The war is paced by the sea, not by the script.
+    min_wave: u8,
 }
 
 const fn lesson(verb: u8, hold: u32, pause: u32, dx: i8, dy: i8, modifier: u8) -> Lesson {
@@ -77,6 +80,7 @@ const fn lesson(verb: u8, hold: u32, pause: u32, dx: i8, dy: i8, modifier: u8) -
         aim: Aim::Home,
         needs_reserve: false,
         telegraph_only: false,
+        min_wave: 0,
     }
 }
 
@@ -92,8 +96,29 @@ const fn war_move(
     needs_reserve: bool,
     telegraph_only: bool,
 ) -> Lesson {
-    Lesson { verb, hold, pause, dx, dy, modifier, aim, needs_reserve, telegraph_only }
+    Lesson { verb, hold, pause, dx, dy, modifier, aim, needs_reserve, telegraph_only, min_wave: 0 }
 }
+
+impl Lesson {
+    /// The same move, held back until `waves` waves have landed.
+    const fn after_waves(self, waves: u8) -> Self {
+        Self { min_wave: waves, ..self }
+    }
+}
+
+/// Waves that must have landed before the opponent leaves school for war.
+///
+/// The first wave peaks at 2:10 on the shipped map. Until then the
+/// curriculum repeats — the part that teaches the verbs — and `reanchor` keeps
+/// it beside whatever the opponent has built. One pass used to be enough
+/// (~21 s), and a player who looked around for two minutes had lost.
+pub const WAR_AFTER_WAVES: u8 = 1;
+
+/// Waves that must have landed before the opponent strikes at the enemy.
+///
+/// The first recovery is economy and marching; strikes come with the second
+/// wave. At the shipped fifteen-minute cadence that is 17:10.
+pub const STRIKE_AFTER_WAVES: u8 = 2;
 
 /// The curriculum, in order. Each pass through it is one visible "turn".
 ///
@@ -141,7 +166,8 @@ const WAR_SCRIPT: &[Lesson] = &[
     // magnet cell impassable, the flow field falls back, and the army walks
     // home from its own siege — traced, both armies parked for a whole match.
     // Broken ground starves the settlement (§5.2) and blocks nobody.
-    war_move(VERB_EARTHQUAKE, 1, 90, 1, -1, 0, Aim::EnemyBase, true, false),
+    war_move(VERB_EARTHQUAKE, 1, 90, 1, -1, 0, Aim::EnemyBase, true, false)
+        .after_waves(STRIKE_AFTER_WAVES),
     // The sea is coming: a wall across home's seaward approach.
     war_move(VERB_RAISE, 30, 30, -2, -7, MOD_THROWN, Aim::Home, false, true),
 ];
@@ -171,7 +197,10 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
         w.ai.script_pc = 0;
         w.ai.timer = 0;
         w.ai.repeat = w.ai.repeat.wrapping_add(1);
-        if w.ai.phase != PHASE_WAR && w.ai.repeat >= 1 {
+        if w.ai.phase != PHASE_WAR
+            && w.ai.repeat >= 1
+            && crate::tide::waves_landed(w) >= WAR_AFTER_WAVES
+        {
             w.ai.phase = PHASE_WAR;
             w.ai.repeat = 0;
         }
@@ -193,9 +222,12 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
         return; // the pause: stand back and let the world respond
     }
 
-    // A wall is only worth raising while the sea telegraphs; on a calm tick
-    // the whole move is skipped rather than half-held.
-    if l.telegraph_only && w.tide.phase != TIDE_TELEGRAPH {
+    // A wall is only worth raising while the sea telegraphs, and a strike only
+    // once the sea has escalated the war; otherwise the whole move is skipped
+    // rather than half-held.
+    if (l.telegraph_only && w.tide.phase != TIDE_TELEGRAPH)
+        || crate::tide::waves_landed(w) < l.min_wave
+    {
         if t == 0 {
             w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
             w.ai.timer = 0;
@@ -494,9 +526,55 @@ mod tests {
         script_ticks() + SCRIPT.len() as u32 + 1
     }
 
+    /// The sea's clock moved on to `waves` waves landed, nothing else touched.
+    fn after_waves(w: &mut World, waves: u8) {
+        w.tide.wave = waves;
+        w.tide.scored = 0;
+        assert_eq!(crate::tide::waves_landed(w), waves);
+    }
+
+    #[test]
+    fn the_opponent_stays_in_school_until_the_first_wave_has_landed() {
+        let mut w = ai_world();
+        let mut buf = CommandBuf::new();
+        for _ in 0..one_pass_steps() * 4 {
+            buf.clear();
+            step(&mut w, &mut buf);
+        }
+        assert_ne!(w.ai.phase, PHASE_WAR, "the opponent went to war before the sea had spoken");
+        assert!(!buf.as_slice().is_empty() || w.ai.repeat > 0, "the curriculum stopped repeating");
+    }
+
+    #[test]
+    fn the_strike_waits_for_the_second_wave() {
+        let mut w = ai_world();
+        after_waves(&mut w, 1);
+        let mut buf = CommandBuf::new();
+        for _ in 0..one_pass_steps() {
+            buf.clear();
+            step(&mut w, &mut buf);
+        }
+        assert_eq!(w.ai.phase, PHASE_WAR);
+        let strikes = |w: &mut World| {
+            let mut buf = CommandBuf::new();
+            let mut n = 0;
+            for _ in 0..2_000 {
+                w.mana[1] = 9_999 << 16;
+                buf.clear();
+                step(w, &mut buf);
+                n += buf.as_slice().iter().filter(|c| c.verb == VERB_EARTHQUAKE).count();
+            }
+            n
+        };
+        assert_eq!(strikes(&mut w), 0, "a rich opponent struck in the first recovery");
+        after_waves(&mut w, 2);
+        assert!(strikes(&mut w) > 0, "the opponent never strikes once the second wave has landed");
+    }
+
     #[test]
     fn after_one_curriculum_pass_the_opponent_goes_to_war() {
         let mut w = ai_world();
+        after_waves(&mut w, 1);
         let mut buf = CommandBuf::new();
         for _ in 0..one_pass_steps() {
             buf.clear();
@@ -511,6 +589,7 @@ mod tests {
         // (pass 2b → apply_commands) to move the magnet. The enemy is player
         // 0, whose settlements live around STARTS[0].
         let mut w = ai_world();
+        after_waves(&mut w, 1);
         let mut marched = false;
         for _ in 0..script_ticks() + 1200 {
             w.tick(&[]);
@@ -553,6 +632,7 @@ mod tests {
         // Drive `step` directly with mana pinned at zero: past the tutorial,
         // no strike may be emitted at all — the reserve gate holds.
         let mut w = ai_world();
+        after_waves(&mut w, STRIKE_AFTER_WAVES);
         let mut buf = CommandBuf::new();
         for _ in 0..one_pass_steps() {
             buf.clear();
