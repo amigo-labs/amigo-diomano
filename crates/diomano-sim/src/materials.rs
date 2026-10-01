@@ -511,6 +511,12 @@ pub fn vegetation(w: &mut World) {
 /// Sand and ash move to a lower neighbour when the height difference exceeds the
 /// angle of repose. Rock and soil do not move.
 pub fn granular(w: &mut World) {
+    // The ring was last copied at the top of the tick, before commands, the
+    // tide and the material interactions moved anything. Without a fresh copy
+    // the first half compared a seam cell against its neighbour's surface of
+    // the tick before: a raise or lava cooling to rock on the far side was
+    // invisible, and sand slid uphill across a face edge (PLAN decision 8).
+    w.ghost_copy_flow_fields();
     for parity in 0..2usize {
         granular_half(w, parity);
         w.apply_seam_flux_i16(crate::world::FluxField::Height);
@@ -972,5 +978,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sand_at_a_seam_sees_the_far_side_as_it_is_now() {
+        // A slope across a face edge, flattened on the far side *after* the
+        // tick's ghost copy — the order a raise there actually happens in.
+        // `granular` must slide against the current surface, so the result
+        // cannot depend on whether the ring was refreshed first.
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        cfg.seed = 31;
+        let mut a = World::boxed();
+        let mut b = World::boxed();
+        a.init(&cfg);
+        b.init(&cfg);
+        // Odd row, odd column: the first checkerboard half, the one that reads
+        // the ring copied at the top of the tick.
+        let (face, x, y) = (4usize, N - 1, N / 2 + 1);
+        let (ff, fx, fy) = crate::world::walk(face, x as i32, y as i32, 1, 0).expect("a neighbour");
+        assert_ne!(ff, face, "the probe has to straddle a seam");
+        for w in [&mut a, &mut b] {
+            // A rock plateau on this side, so the seam is the only way down.
+            for dy in -2i32..=2 {
+                for dx in -2i32..=0 {
+                    let c = idx(face, (x as i32 + dx) as usize, (y as i32 + dy) as usize);
+                    w.material[c] = MAT_ROCK;
+                    w.height[c] = 900;
+                    w.water[c] = 0;
+                }
+            }
+            let sand = idx(face, x, y);
+            w.material[sand] = MAT_SAND;
+            w.height[idx(ff, fx, fy)] = 300;
+            w.ghost_copy_all();
+            // The far side is raised level with the sand: nothing should slide.
+            w.height[idx(ff, fx, fy)] = 900;
+        }
+        b.ghost_copy_all();
+        granular(&mut a);
+        granular(&mut b);
+        assert!(a.height.iter().eq(b.height.iter()), "sand slid against a stale copy of the seam");
     }
 }

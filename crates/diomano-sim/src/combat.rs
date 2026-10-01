@@ -270,10 +270,23 @@ fn besiege(w: &mut World) {
         if !w.settlements[slot].alive() || w.settlements[slot].owner == w.walkers[id].owner {
             continue;
         }
+        // Clamped at hut level, and never lifting a settlement the terrain has
+        // already pushed below it: a siege subdues, and only broken ground razes
+        // (`settlements::advance_settlements`). Taking ground for good is
+        // terraforming work — see `docs/specs/pacing.md` §1.
         let damage = i32::from(w.walkers[id].strength);
-        w.settlements[slot].progress -= damage;
+        let floor = SIEGE_FLOOR.min(w.settlements[slot].progress);
+        w.settlements[slot].progress = (w.settlements[slot].progress - damage).max(floor);
     }
 }
+
+/// A siege subdues; only broken ground razes.
+///
+/// Walkers push a besieged settlement down to hut level and no further. Before
+/// this, `besiege` had no floor, a razed settlement projected no influence, and
+/// sudden death turned that into an outcome in the same tick: a player who
+/// looked around for two minutes had lost a war they never saw start.
+pub const SIEGE_FLOOR: i32 = crate::world::TIER_THRESHOLD[1];
 
 /// Remove the dead, in id order.
 fn reap(w: &mut World) {
@@ -284,23 +297,23 @@ fn reap(w: &mut World) {
     }
 }
 
-/// Ticks a settlement of the given tier survives a single attacker of `strength`.
+/// Ticks until a settlement of the given tier is subdued to hut level by
+/// attackers of combined `attackers_strength`.
 ///
 /// Exposed so the reaction-window property can be asserted rather than eyeballed.
 #[must_use]
-pub fn ticks_to_raze(tier: u8, attackers_strength: i32) -> i32 {
+pub fn ticks_to_subdue(tier: u8, attackers_strength: i32) -> i32 {
     if attackers_strength <= 0 {
         return i32::MAX;
     }
     let progress = crate::world::TIER_THRESHOLD[tier as usize];
     // The settlement also rebuilds while under attack.
     let net = attackers_strength - crate::settlements::BUILD_RATE;
-    if net <= 0 {
+    if net <= 0 || progress <= SIEGE_FLOOR {
         return i32::MAX;
     }
-    // Razed when `progress` drops below zero (`settlements::update`), not when it
-    // falls under the first tier's threshold: the whole build has to be undone.
-    progress / net + 1
+    // Subdued when `progress` reaches the floor, which a siege cannot push past.
+    (progress - SIEGE_FLOOR + net - 1) / net
 }
 
 #[cfg(test)]
@@ -809,11 +822,9 @@ mod tests {
         assert_ne!(w.state_hash(), before, "the stress harness is not actually fighting");
     }
 
-    #[test]
-    fn a_besieged_settlement_falls_slowly_enough_to_save() {
-        // §4.7 DoD: "a settlement under attack takes long enough to fall that a
-        // terrain response can save it". Put a number on "long enough": the god
-        // needs seconds, not frames (pillar 2).
+    /// A fortress on a flat 7x7 plateau with three strength-4 attackers standing
+    /// in its footprint.
+    fn besieged_fortress() -> alloc::boxed::Box<World> {
         let mut w = arena(6);
         w.settlements[0] = Settlement {
             progress: TIER_THRESHOLD[3],
@@ -833,24 +844,55 @@ mod tests {
                 w.height[c] = 400;
             }
         }
-        // Three attackers standing in the footprint.
         for i in 0..3usize {
             place(&mut w, i * 2 + 1, 1, 4, 31 + i, 32, 4, 64);
         }
+        w
+    }
 
+    #[test]
+    fn a_besieged_settlement_is_pushed_to_hut_level_and_no_further() {
+        // §4.7 DoD: "a settlement under attack takes long enough to fall that a
+        // terrain response can save it" — the window is kept, bounded at both
+        // ends. What changed is where it ends: at hut level, not at nothing.
+        let mut w = besieged_fortress();
         let mut ticks = 0;
-        while w.settlements[0].alive() && ticks < 10_000 {
+        while w.settlements[0].tier > 1 && ticks < 10_000 {
             resolve(&mut w);
             crate::settlements::update(&mut w);
             ticks += 1;
         }
-        assert!(!w.settlements[0].alive(), "the settlement never fell");
+        assert_eq!(w.settlements[0].tier, 1, "the siege never brought the fortress down");
         assert!(
             ticks >= 30,
             "a fortress fell in {ticks} ticks ({} s) — there is no reaction window",
             ticks / 30
         );
         assert!(ticks <= 3000, "a fortress took {ticks} ticks to fall; sieges never end");
+        // And then nothing more: a long siege holds it at the floor.
+        for _ in 0..3_000 {
+            resolve(&mut w);
+            crate::settlements::update(&mut w);
+        }
+        assert!(w.settlements[0].alive(), "a siege razed a settlement on intact ground");
+        assert!(w.settlements[0].progress >= SIEGE_FLOOR - 4, "the siege dug under the floor");
+        assert_eq!(w.settlements[0].tier, 1);
+    }
+
+    #[test]
+    fn broken_ground_still_razes_what_a_siege_cannot() {
+        let mut w = besieged_fortress();
+        // Knock the plateau out of true, as an earthquake or a dig would.
+        let c = idx(4, 33, 33);
+        w.height[c] = 300;
+        let mut ticks = 0;
+        while w.settlements[0].alive() && ticks < 10_000 {
+            resolve(&mut w);
+            crate::settlements::update(&mut w);
+            ticks += 1;
+        }
+        assert!(!w.settlements[0].alive(), "broken ground no longer razes anything");
+        assert!(ticks >= 30, "broken ground razed a fortress in {ticks} ticks");
     }
 
     #[test]
@@ -892,10 +934,14 @@ mod tests {
     }
 
     #[test]
-    fn ticks_to_raze_is_monotonic_in_tier_and_strength() {
-        assert!(ticks_to_raze(4, 6) > ticks_to_raze(2, 6), "a citadel is no tougher than a house");
-        assert!(ticks_to_raze(3, 12) < ticks_to_raze(3, 6), "more attackers is not faster");
-        assert_eq!(ticks_to_raze(3, 1), i32::MAX, "a lone weak attacker out-builds nothing");
+    fn ticks_to_subdue_is_monotonic_in_tier_and_strength() {
+        assert!(
+            ticks_to_subdue(4, 6) > ticks_to_subdue(2, 6),
+            "a citadel is no tougher than a house"
+        );
+        assert!(ticks_to_subdue(3, 12) < ticks_to_subdue(3, 6), "more attackers is not faster");
+        assert_eq!(ticks_to_subdue(3, 1), i32::MAX, "a lone weak attacker out-builds nothing");
+        assert_eq!(ticks_to_subdue(1, 99), i32::MAX, "a hut is already as low as a siege goes");
     }
 
     #[test]

@@ -33,6 +33,7 @@ USAGE:
   diomano-cli record  [--out fixtures/session.log] [--seed N] [--ticks N]
   diomano-cli corpus  [--dir fixtures] [--matches N] [--ticks N] [--check-only]\n  diomano-cli trace   [--seed N] [--ticks N] [--every N]
   diomano-cli census  <file>
+  diomano-cli sweep   [--seeds N] [--seed N] [--profile idle|scripted|all] [--cap N]
 
 TERRAIN: archipelago | pangaea | volcano
 ";
@@ -115,6 +116,7 @@ fn main() -> ExitCode {
         "corpus" => cmd_corpus(&opts),
         "census" => cmd_census(&opts),
         "trace" => cmd_trace(&opts),
+        "sweep" => cmd_sweep(&opts),
         "help" | "--help" | "-h" => {
             print!("{USAGE}");
             Ok(())
@@ -156,6 +158,13 @@ struct Opts {
     cataclysm: bool,
     /// `corpus`: verify what is on disk instead of regenerating it.
     check_only: bool,
+    /// `sweep`: seeds per terrain.
+    seeds: u32,
+    /// `sweep`: which player-0 behaviours to run.
+    profiles: Vec<Profile>,
+    /// `sweep`: stop a match that has not been decided after this many ticks.
+    /// `None` runs it to the tick a full tide cycle ends, plus a margin.
+    cap: Option<u32>,
 }
 
 impl Opts {
@@ -178,6 +187,9 @@ impl Opts {
             ai: false,
             cataclysm: true,
             check_only: false,
+            seeds: 8,
+            profiles: vec![Profile::Idle, Profile::Scripted],
+            cap: None,
         };
         let mut i = 0;
         while i < args.len() {
@@ -212,6 +224,17 @@ impl Opts {
                 "--ai" => o.ai = true,
                 "--no-cataclysm" => o.cataclysm = false,
                 "--check-only" => o.check_only = true,
+                "--seeds" => o.seeds = parse_u32(a, &value()?)?.max(1),
+                "--cap" => o.cap = Some(parse_u32(a, &value()?)?.max(1)),
+                "--profile" => {
+                    let name = value()?;
+                    o.profiles = match name.as_str() {
+                        "idle" => vec![Profile::Idle],
+                        "scripted" => vec![Profile::Scripted],
+                        "all" => vec![Profile::Idle, Profile::Scripted],
+                        _ => return Err(format!("unknown profile `{name}`\n\n{USAGE}")),
+                    };
+                }
                 // An unknown option is a typo, not a file name: `--tick 600` used
                 // to become a positional argument and run with the defaults.
                 other if other.starts_with("--") => {
@@ -846,6 +869,275 @@ fn cmd_trace(o: &Opts) -> Result<(), String> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// sweep
+// ---------------------------------------------------------------------------
+
+/// The average match the pacing target asks for: ten minutes (`docs/specs/pacing.md`).
+///
+/// A floor on the *mean*, not on every match. A war the defender genuinely
+/// loses may end sooner; what may not happen is that the typical match is over
+/// before the tide — the thing the score is built on — has had its say.
+const MIN_MEAN_MATCH_TICKS: u32 = 10 * 60 * TICK_HZ;
+
+/// What player 0 does in a sweep match. Player 1 is always the scripted
+/// opponent, exactly as the client starts a match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Profile {
+    /// No commands at all: the player who opens the game and looks around.
+    Idle,
+    /// `demo_script`, one-sided and without the world-ending verbs: a player
+    /// who digs, builds a plateau and moves the magnet, without playing well.
+    Scripted,
+}
+
+impl Profile {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Scripted => "scripted",
+        }
+    }
+}
+
+/// One sweep match, reduced to what the pacing question needs.
+struct SweepMatch {
+    seed: u32,
+    terrain: u8,
+    profile: Profile,
+    /// The tick the outcome was decided at; `None` if the cap came first.
+    end: Option<u32>,
+    outcome: u8,
+    /// The wave score decided it (the tide ran out), rather than sudden death.
+    by_waves: bool,
+    /// (tick, score p0, score p1) at every wave peak that was reached.
+    peaks: Vec<(u32, u16, u16)>,
+    /// Live settlements per player at the end, and their summed tiers.
+    settlements: [u32; 2],
+    tiers: [u32; 2],
+}
+
+/// The tick a full tide cycle ends at on `cfg`, plus a lull of margin: the
+/// latest a match on this manifest can be decided without the cap.
+fn full_match_ticks(cfg: &MapConfig) -> u32 {
+    let per_wave = cfg.telegraph_ticks + cfg.impact_ticks;
+    let waves = u32::from(cfg.waves.max(1));
+    cfg.lull_ticks * 3 + per_wave * waves + cfg.recovery_ticks * (waves - 1)
+}
+
+fn sweep_one(seed: u32, terrain: u8, profile: Profile, cap: Option<u32>) -> SweepMatch {
+    // Exactly what `dio_init` builds for a match in the client.
+    let mut cfg = MapConfig::DEFAULT;
+    cfg.seed = seed;
+    cfg.terrain = terrain;
+    cfg.ai_enabled = 1;
+    let cap = cap.unwrap_or_else(|| full_match_ticks(&cfg));
+    let mut w = World::boxed();
+    w.init(&cfg);
+    let mut peaks = Vec::new();
+    let mut scored = w.tide.scored;
+    let mut end = None;
+    for tick in 0..cap {
+        let mut buf = CommandBuf::new();
+        if profile == Profile::Scripted {
+            demo_script(tick, seed, false, false, &mut buf);
+        }
+        w.tick(buf.as_slice());
+        if w.tide.scored != 0 && scored == 0 {
+            let wave = (w.tide.wave as usize).min(diomano_sim::world::MAX_WAVES - 1);
+            peaks.push((tick, w.score[0][wave], w.score[1][wave]));
+        }
+        scored = w.tide.scored;
+        if w.outcome != 0 {
+            end = Some(tick);
+            break;
+        }
+    }
+    let mut settlements = [0u32; 2];
+    let mut tiers = [0u32; 2];
+    for s in &w.settlements {
+        if s.alive() {
+            let p = (s.owner as usize) % 2;
+            settlements[p] += 1;
+            tiers[p] += u32::from(s.tier);
+        }
+    }
+    SweepMatch {
+        seed,
+        terrain,
+        profile,
+        end,
+        outcome: w.outcome,
+        by_waves: w.tide.phase == diomano_sim::world::TIDE_DONE,
+        peaks,
+        settlements,
+        tiers,
+    }
+}
+
+fn mmss(ticks: u32) -> String {
+    let s = ticks / TICK_HZ;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Batch matches over seeds × terrains × player behaviours, one line each,
+/// and say whether the pacing holds.
+///
+/// The instrument `docs/specs/pacing.md` asks for: "idling does not lose
+/// instantly" as a command rather than an opinion. Matches run on every core;
+/// each one is independent and deterministic, so the order they finish in
+/// changes nothing but the order they are printed in, which is sorted.
+fn cmd_sweep(o: &Opts) -> Result<(), String> {
+    let mut jobs = Vec::new();
+    for &profile in &o.profiles {
+        for terrain in [TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, TERRAIN_VOLCANO] {
+            for i in 0..o.seeds {
+                jobs.push((o.seed.wrapping_add(i.wrapping_mul(0x9E37_79B9)), terrain, profile));
+            }
+        }
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results = std::sync::Mutex::new(Vec::with_capacity(jobs.len()));
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).min(jobs.len());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(seed, terrain, profile)) = jobs.get(i) else { break };
+                    let m = sweep_one(seed, terrain, profile, o.cap);
+                    if let Ok(mut r) = results.lock() {
+                        r.push((i, m));
+                    }
+                }
+            });
+        }
+    });
+    let mut results = results.into_inner().map_err(|_| "a sweep thread panicked".to_string())?;
+    results.sort_by_key(|(i, _)| *i);
+    let terrain_name = |t: u8| match t {
+        TERRAIN_PANGAEA => "pangaea",
+        TERRAIN_VOLCANO => "volcano",
+        _ => "archipelago",
+    };
+
+    println!(
+        "profile   terrain      seed        end       mm:ss  cause    winner  settle  tiers   peaks (p0/p1 habitable cells held)"
+    );
+    let mut failures = Vec::new();
+    for (_, m) in &results {
+        let cause = match (m.end, m.by_waves) {
+            (None, _) => "capped",
+            (Some(_), true) => "waves",
+            (Some(_), false) => "sudden",
+        };
+        let winner = match m.outcome {
+            1 => "p0",
+            2 => "p1",
+            3 => "draw",
+            _ => "-",
+        };
+        let end = m.end.map_or_else(|| "-".to_string(), |t| t.to_string());
+        let peaks: Vec<String> =
+            m.peaks.iter().map(|(t, a, b)| format!("{}@{a}/{b}", mmss(*t))).collect();
+        println!(
+            "{:<9} {:<12} {:#010x}  {:<9} {:<6} {:<8} {:<7} {}/{:<5} {}/{:<5} {}",
+            m.profile.name(),
+            terrain_name(m.terrain),
+            m.seed,
+            end,
+            m.end.map_or_else(|| "-".to_string(), mmss),
+            cause,
+            winner,
+            m.settlements[0],
+            m.settlements[1],
+            m.tiers[0],
+            m.tiers[1],
+            peaks.join(" ")
+        );
+        if m.end.is_some() && m.peaks.is_empty() {
+            failures.push(format!(
+                "{} {} {:#010x}: decided at tick {} before the first wave peak",
+                m.profile.name(),
+                terrain_name(m.terrain),
+                m.seed,
+                m.end.unwrap_or(0)
+            ));
+        }
+        if m.profile == Profile::Idle && m.outcome == 2 && m.peaks.len() < 2 {
+            failures.push(format!(
+                "idle {} {:#010x}: an idle player lost at tick {} before the second wave",
+                terrain_name(m.terrain),
+                m.seed,
+                m.end.unwrap_or(0)
+            ));
+        }
+    }
+
+    println!();
+    println!(
+        "profile   n    mean          median  p10     p90     min     max     sudden  waves  capped  p0/p1/draw"
+    );
+    for &profile in &o.profiles {
+        let ms: Vec<&SweepMatch> =
+            results.iter().map(|(_, m)| m).filter(|m| m.profile == profile).collect();
+        // A capped match counts at its cap: the mean is then a lower bound,
+        // which is the honest direction for a floor.
+        let cap_of = |m: &SweepMatch| {
+            m.end.unwrap_or_else(|| {
+                o.cap.unwrap_or_else(|| {
+                    let mut cfg = MapConfig::DEFAULT;
+                    cfg.terrain = m.terrain;
+                    full_match_ticks(&cfg)
+                })
+            })
+        };
+        let mut ends: Vec<u32> = ms.iter().map(|m| cap_of(m)).collect();
+        ends.sort_unstable();
+        let n = ends.len();
+        let mean = (ends.iter().map(|&t| u64::from(t)).sum::<u64>() / n.max(1) as u64) as u32;
+        let pick = |q: usize| ends[(q * (n - 1)) / 100];
+        let count = |f: &dyn Fn(&SweepMatch) -> bool| ms.iter().filter(|m| f(m)).count();
+        let sudden = count(&|m| m.end.is_some() && !m.by_waves);
+        let waves = count(&|m| m.end.is_some() && m.by_waves);
+        let capped = count(&|m| m.end.is_none());
+        let wins =
+            [count(&|m| m.outcome == 1), count(&|m| m.outcome == 2), count(&|m| m.outcome == 3)];
+        println!(
+            "{:<9} {:<4} {:<6} {:<6} {:<7} {:<7} {:<7} {:<7} {:<7} {:<7} {:<6} {:<7} {}/{}/{}",
+            profile.name(),
+            n,
+            mean,
+            mmss(mean),
+            mmss(pick(50)),
+            mmss(pick(10)),
+            mmss(pick(90)),
+            mmss(ends[0]),
+            mmss(ends[n - 1]),
+            sudden,
+            waves,
+            capped,
+            wins[0],
+            wins[1],
+            wins[2]
+        );
+        if mean < MIN_MEAN_MATCH_TICKS {
+            failures.push(format!(
+                "{}: the mean match is {} ({mean} ticks), under the {} floor",
+                profile.name(),
+                mmss(mean),
+                mmss(MIN_MEAN_MATCH_TICKS)
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("pacing does not hold:\n  {}", failures.join("\n  ")))
+    }
+}
+
 /// What did this log actually exercise? Replays it and prints the census.
 fn cmd_census(o: &Opts) -> Result<(), String> {
     let path = o.positional.first().ok_or("census needs a log file")?;
@@ -1439,6 +1731,37 @@ mod tests {
                 assert_eq!(c.player, 0, "one-sided script moved player 1 at tick {tick}");
             }
         }
+    }
+
+    #[test]
+    fn a_sweep_match_is_long_enough_to_end_on_the_tide() {
+        // The cap is the tick a full tide cycle ends at, plus margin: an
+        // undecided match at the cap would mean the tide itself never ended.
+        let cfg = MapConfig::DEFAULT;
+        let last_peak = cfg.lull_ticks
+            + cfg.telegraph_ticks
+            + cfg.impact_ticks / 2
+            + (u32::from(cfg.waves) - 1)
+                * (cfg.impact_ticks + cfg.recovery_ticks + cfg.telegraph_ticks);
+        let done = last_peak + cfg.impact_ticks / 2 + cfg.lull_ticks;
+        assert!(
+            full_match_ticks(&cfg) > done,
+            "the cap {} is inside the match",
+            full_match_ticks(&cfg)
+        );
+    }
+
+    #[test]
+    fn opts_parse_the_sweep_options() {
+        let args: Vec<String> = ["--seeds", "3", "--profile", "idle", "--cap", "900"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let o = Opts::parse(&args).expect("valid options");
+        assert_eq!((o.seeds, o.cap), (3, Some(900)));
+        assert_eq!(o.profiles, vec![Profile::Idle]);
+        let bad: Vec<String> = ["--profile", "lazy"].iter().map(|s| (*s).to_string()).collect();
+        assert!(Opts::parse(&bad).is_err(), "an unknown profile was accepted");
     }
 
     #[test]

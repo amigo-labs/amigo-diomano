@@ -125,6 +125,7 @@ export function createHud(sim: Sim, player: number): Hud {
     <div class="hud-panel">
       <div class="hud-mana"><b>0</b> Mana</div>
       <div class="hud-tide">Welle 1 · Ruhig</div>
+      <div class="hud-doom"></div>
       <div class="hud-bar"><i></i></div>
     </div>
     <div class="hud-banner"></div>
@@ -148,6 +149,7 @@ export function createHud(sim: Sim, player: number): Hud {
 
   const manaValue = root.querySelector<HTMLElement>(".hud-mana b")!;
   const tideLine = root.querySelector<HTMLElement>(".hud-tide")!;
+  const doomLine = root.querySelector<HTMLElement>(".hud-doom")!;
   const bar = root.querySelector<HTMLElement>(".hud-bar i")!;
   const bannerEl = root.querySelector<HTMLElement>(".hud-banner")!;
   const hintEl = root.querySelector<HTMLElement>(".hud-hint")!;
@@ -172,6 +174,7 @@ export function createHud(sim: Sim, player: number): Hud {
   let shownTide = "";
   let shownShare = -1;
   let shownHint = -1;
+  let shownDoom = -1;
   applyControls();
 
   let bannerUntil = 0;
@@ -275,6 +278,20 @@ export function createHud(sim: Sim, player: number): Hud {
         lastPhase = phase;
       }
 
+      // Sudden death's grace window, your own only (docs/specs/pacing.md):
+      // a rescue nobody can see is only a delay. The opponent's would be a
+      // victory readout, and §8 is spent sparingly. Whole seconds left, so the
+      // DOM is touched once a second and not once a frame.
+      const doom = sim.e.dio_doom_ticks(player);
+      const left =
+        doom > 0 ? Math.ceil((sim.e.dio_grace_ticks() - doom) / sim.e.dio_tick_hz()) : -1;
+      if (left !== shownDoom) {
+        if (shownDoom < 0 && left >= 0) showBanner("Dein Volk verliert den Boden");
+        shownDoom = left;
+        doomLine.textContent = left >= 0 ? `Dein Volk hat kein Land mehr — ${left} s` : "";
+        doomLine.classList.toggle("shown", left >= 0);
+      }
+
       const tick = sim.e.dio_tick_count();
       if (tick - lastTerritoryTick >= TERRITORY_EVERY) {
         lastTerritoryTick = tick;
@@ -328,6 +345,9 @@ export function createHud(sim: Sim, player: number): Hud {
       shownMana = -1;
       shownTide = "";
       shownShare = -1;
+      shownDoom = -1;
+      doomLine.textContent = "";
+      doomLine.classList.remove("shown");
       lastPhase = -1;
       armedAt = 0;
       // The tick is about to go back to zero. A sample stamp from the old match

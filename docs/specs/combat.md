@@ -72,27 +72,37 @@ identical across **100 runs from one seed**. It then separately asserts that a
 fighting scenario changes the hash at all — a hash that matches because nothing
 happened would prove nothing.
 
-## Settlements fall gradually, never instantly
+## Settlements fall gradually, never instantly — and a siege only subdues
 
 Enemy walkers inside a settlement footprint reduce its build progress by
 `1 * strength` per tick. When progress drops below the current tier's threshold
-the tier drops; when it runs out entirely the settlement is razed.
+the tier drops — down to hut level, `SIEGE_FLOOR = TIER_THRESHOLD[1]`, and no
+further. A siege never lifts a settlement the terrain already pushed below the
+floor, and it never razes one (`docs/specs/pacing.md` §1).
+
+What still razes is broken ground: a footprint that is no longer flat loses
+`BUILD_RATE * 2` per tick and is razed below zero (`settlements.rs`,
+`advance_settlements`). Earthquake, flood, digging the ground out from under it.
+Taking ground for good is terraforming work, which is the verb the game is
+about. Champions besiege through the same path and subdue the same way.
 
 Gradual decay is required, not cosmetic: it creates the reaction window in which
 the god can intervene with terrain — swamp the approach, reroute water, cut the
 path, raise a wall. Instant destruction would hollow out pillar 3, because there
 would be nothing to respond to.
 
-`a_besieged_settlement_falls_slowly_enough_to_save` puts three strength-4
-attackers inside a fortress and asserts it survives at least 30 ticks (one
-second) and falls within 3,000 (100 seconds) — a window, bounded at both ends,
-because a siege that never ends is as broken as one that ends instantly.
-`ticks_to_raze` exposes the arithmetic so the property can be asserted rather
+`a_besieged_settlement_is_pushed_to_hut_level_and_no_further` puts three
+strength-4 attackers inside a fortress and asserts it reaches hut level no
+sooner than 30 ticks (one second) and no later than 3,000 (100 seconds) — a
+window, bounded at both ends — and that a further 3,000 ticks of siege leave it
+standing at the floor. `broken_ground_still_razes_what_a_siege_cannot` knocks
+one footprint cell out of true under the same siege and asserts it falls.
+`ticks_to_subdue` exposes the arithmetic so the property can be asserted rather
 than eyeballed.
 
 ## Champion
 
-The leader becomes an autonomous warrior who seeks enemy settlements and razes
+The leader becomes an autonomous warrior who seeks enemy settlements and subdues
 them until killed. The magnet transfers to the champion, so the player has no
 leader until a walker touches the magnet again. Any number can be created while
 mana allows.

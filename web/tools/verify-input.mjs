@@ -564,6 +564,30 @@ async function main() {
     // is how one stuck control once cost three lines of this report.
     await ensureMenuClosed();
 
+    // --- 8b. the aim follows the pointer across the open menu --------------
+    // The backdrop covers the canvas, and the hand used to keep the cell the
+    // menu opened over until the pointer next moved on the canvas itself.
+    await page.mouse.move(CENTRE.x, CENTRE.y);
+    await ticks(2);
+    const aimBefore = await read(() => window.diomano.hand.target());
+    await page.keyboard.press("Space");
+    await becomes((want) => window.diomano.radial.open === want, true);
+    await page.mouse.move(CENTRE.x + 90, CENTRE.y + 70, { steps: 4 });
+    await page.keyboard.press("Escape");
+    await becomes((want) => window.diomano.radial.open === want, false);
+    await ticks(2);
+    const aimAfter = await read(() => window.diomano.hand.target());
+    await page.mouse.move(CENTRE.x + 91, CENTRE.y + 70);
+    await ticks(2);
+    const aimFresh = await read(() => window.diomano.hand.target());
+    const sameCell = (a, b) => a && b && a.face === b.face && a.x === b.x && a.y === b.y;
+    check(
+      "the hand aims where the pointer went while the menu was open",
+      !!aimBefore && !!aimFresh && !sameCell(aimBefore, aimFresh) && sameCell(aimAfter, aimFresh),
+      `opened over ${JSON.stringify(aimBefore)}, closed over ${JSON.stringify(aimAfter)}, pointer over ${JSON.stringify(aimFresh)}`,
+    );
+    await ensureMenuClosed();
+
     // --- 9. B cycles the brush, and the ring grows with it -----------------
     const ringScale = () =>
       read(() => {
@@ -650,10 +674,16 @@ async function main() {
     const startUp = await upY();
     const sidewaysHere = await wheelToward();
     const side = Math.sign(startUp) || 1;
-    await page.keyboard.down("w");
+    // W always pitches `up.y` down and S up, so which key carries the camera
+    // over the pole depends on the branch it is on. Always pressing W only
+    // ever worked from the positive branch: from the negative one it pitched
+    // away from the pole until the guard ran out.
+    const over = side > 0 ? "w" : "s";
+    const back = side > 0 ? "s" : "w";
+    await page.keyboard.down(over);
     guard = 0;
     while ((await upY()) * side > -0.3 && guard++ < 60) await ticks(2);
-    await page.keyboard.up("w");
+    await page.keyboard.up(over);
     await ticks(10);
     const endUp = await upY();
     const crossed = endUp * side < 0;
@@ -665,10 +695,10 @@ async function main() {
         `up.y ${endUp.toFixed(2)}: ${sidewaysThere.toFixed(4)}${crossed ? "" : " (never crossed the pole)"}`,
     );
     // Back over the top, so the checks below see the planet as they did.
-    await page.keyboard.down("s");
+    await page.keyboard.down(back);
     guard = 0;
     while ((await upY()) * side < 0.3 && guard++ < 60) await ticks(2);
-    await page.keyboard.up("s");
+    await page.keyboard.up(back);
     await ticks(4);
 
     // --- 14. an orbit whose release was never seen does not carry on -------

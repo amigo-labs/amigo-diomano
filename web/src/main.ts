@@ -104,6 +104,10 @@ interface RawExports {
   dio_tide_offset(): number;
   dio_tide_strength(): number;
   dio_ticks_to_impact(): number;
+  /** Consecutive ticks with no influence while sudden death is armed; 0 = safe. */
+  dio_doom_ticks(player: number): number;
+  /** The sudden-death grace window, in ticks. */
+  dio_grace_ticks(): number;
   dio_mana(player: number): number;
   dio_hand_amount(player: number): number;
   dio_hand_material(player: number): number;

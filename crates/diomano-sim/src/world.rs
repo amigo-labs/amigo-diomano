@@ -746,6 +746,9 @@ pub struct World {
     pub walker_count: [u16; PLAYERS],
     pub settlement_count: u16,
     pub score: [[u16; MAX_WAVES]; PLAYERS],
+    /// Consecutive ticks with no influence at all, per player. Sudden death
+    /// decides at `tide::GRACE_TICKS`; one cell won back resets it.
+    pub doom: [u32; PLAYERS],
     pub tick: u32,
     /// Baseline sea level, moved only by the flood power (§4.3).
     pub sea_base: i16,
@@ -841,6 +844,7 @@ impl World {
             walker_count: [0; PLAYERS],
             settlement_count: 0,
             score: [[0; MAX_WAVES]; PLAYERS],
+            doom: [0; PLAYERS],
             tick: 0,
             sea_base: 0,
             sea_level: 0,
@@ -1415,6 +1419,11 @@ impl World {
         h.write_u8(self.ai.anchor_x);
         h.write_u8(self.ai.anchor_y);
         h.write_u8(self.ai.phase);
+        // A countdown that diverged outside the hash would be invisible until
+        // it landed as an outcome — the desync class determinism.md rules out.
+        for &d in &self.doom {
+            h.write_u32(d);
+        }
         h.write_u8(self.outcome);
         h.write_u64(self.rng.state);
         h.finish()
@@ -2195,6 +2204,10 @@ mod tests {
         w.tide.scored ^= 1;
         assert_ne!(w.state_hash(), base, "tide.scored is not hashed");
         w.tide.scored ^= 1;
+
+        w.doom[1] = w.doom[1].wrapping_add(1);
+        assert_ne!(w.state_hash(), base, "the sudden-death countdown is not hashed");
+        w.doom[1] = w.doom[1].wrapping_sub(1);
 
         w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
         assert_ne!(w.state_hash(), base, "the scripted opponent's state is not hashed");

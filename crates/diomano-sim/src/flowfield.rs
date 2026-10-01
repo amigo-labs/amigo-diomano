@@ -155,6 +155,43 @@ fn best_plateau(w: &World, player: usize) -> Option<usize> {
 /// Maximum contribution a single settlement can project (§4.5).
 pub const MAX_CONTRIBUTION: i32 = 7 * INFLUENCE_REACH;
 
+/// The home core: the spawn cell projects influence for as long as it stands
+/// above the water. A thread, not a foundation — enough that sudden death means
+/// "my land drowned" instead of "my huts fell", too little to live on.
+///
+/// Symmetric on purpose: the opponent has the same core. A one-sided floor
+/// would let the player rush the opponent out of the match, and the fix would
+/// have produced an easier game rather than a different one.
+///
+/// It starts at hut strength and grows by one for every wave landed, up to
+/// [`SANCTUARY_MAX`]: a people that has weathered the sea holds its ground
+/// harder. Clocked by the tide and the same for both sides, so it cannot feed
+/// back into itself the way influence bought with territory would (HANDOFF
+/// §11, risk 2).
+pub const SANCTUARY_STRENGTH: i32 = 1;
+
+/// The home core's strength after the last growth: between a house (2) and a
+/// town (4), so a core never out-projects a settlement anyone built.
+pub const SANCTUARY_MAX: i32 = 3;
+
+/// The home core's strength right now.
+#[must_use]
+pub fn home_core_strength(w: &World) -> i32 {
+    (SANCTUARY_STRENGTH + i32::from(crate::tide::waves_landed(w))).min(SANCTUARY_MAX)
+}
+
+/// Whether `player`'s home core stands: above the sea, under neither water nor
+/// lava. Not `habitable`, deliberately — the material is ignored. Measured: the
+/// core's soil dried to sand by tick 12,540 of an idle match, long before any
+/// strike, and a core that rots away was never the "my land is gone" sudden
+/// death is meant to be.
+#[must_use]
+pub fn home_core_stands(w: &World, player: usize) -> bool {
+    let (face, x, y) = crate::settlements::STARTS[player];
+    let c = idx(face, x, y);
+    w.height[c] > w.sea_level && w.water[c] == 0 && w.lava[c] == 0
+}
+
 /// Project influence outward from settlements over the BFS graph.
 ///
 /// Runs on the same 15-tick boundary as the flow field, and for the same reason.
@@ -201,6 +238,18 @@ fn project_for(w: &mut World, player: usize) {
             }
             let c = idx(s.face as usize, s.x as usize, s.y as usize);
             if i32::from(w.infl_acc[player][c]) < v {
+                w.infl_acc[player][c] = v as i16;
+                w.queue[hi] = c as u32;
+                hi += 1;
+            }
+        }
+        // The home core, seeded after the settlements at its level so the
+        // order stays a fixed function of state. An ordinary contribution
+        // through the ordinary zero-sum combine below.
+        if v == home_core_strength(w) * INFLUENCE_REACH {
+            let (face, x, y) = crate::settlements::STARTS[player];
+            let c = idx(face, x, y);
+            if home_core_stands(w, player) && i32::from(w.infl_acc[player][c]) < v {
                 w.infl_acc[player][c] = v as i16;
                 w.queue[hi] = c as u32;
                 hi += 1;
@@ -589,5 +638,67 @@ mod tests {
             guard += 1;
             assert!(guard < 4 * N * 6, "walk from the settlement did not reach the magnet");
         }
+    }
+
+    #[test]
+    fn the_home_core_keeps_influence_alive_when_every_settlement_is_gone() {
+        // `island` has cleared every settlement: what is left is the two cores.
+        let mut w = island();
+        project(&mut w);
+        for (player, sign) in [(0usize, 1i8), (1, -1)] {
+            let (face, x, y) = crate::settlements::STARTS[player];
+            let held = (0..crate::world::CELLS)
+                .filter(|&c| w.influence[c] != 0 && w.influence[c].signum() == sign)
+                .count();
+            assert!(held > 0, "player {player} holds nothing with an intact home core");
+            assert_eq!(
+                i32::from(w.influence[idx(face, x, y)]) * i32::from(sign),
+                SANCTUARY_STRENGTH * INFLUENCE_REACH,
+                "player {player}'s core does not project at hut strength"
+            );
+            // A thread, not a foundation: a hut's reach and no more.
+            let reach = (SANCTUARY_STRENGTH * INFLUENCE_REACH) as usize;
+            assert!(held <= 2 * reach * reach, "player {player}'s core projects {held} cells");
+        }
+    }
+
+    #[test]
+    fn a_drowned_home_core_projects_nothing() {
+        let mut w = island();
+        let (face, x, y) = crate::settlements::STARTS[0];
+        w.water[idx(face, x, y)] = 40;
+        project(&mut w);
+        assert!(
+            (0..crate::world::CELLS).all(|c| w.influence[c] <= 0),
+            "a drowned core still projects influence"
+        );
+    }
+
+    #[test]
+    fn the_home_core_grows_with_every_wave_landed() {
+        let mut w = island();
+        let (face, x, y) = crate::settlements::STARTS[0];
+        let core = idx(face, x, y);
+        let mut last = 0;
+        for waves in 0..5u8 {
+            w.tide.wave = waves;
+            project(&mut w);
+            let now = i32::from(w.influence[core]);
+            let want = (SANCTUARY_STRENGTH + i32::from(waves)).min(SANCTUARY_MAX) * INFLUENCE_REACH;
+            assert_eq!(now, want, "after {waves} waves the core projects {now}, not {want}");
+            assert!(now >= last, "the core shrank after wave {waves}");
+            last = now;
+        }
+        assert!(SANCTUARY_MAX < i32::from(TIER_STRENGTH[3]), "a core out-projects a town");
+    }
+
+    #[test]
+    fn a_home_core_on_rotten_ground_still_projects() {
+        // Soil dries to sand on its own; that is not the land being gone.
+        let mut w = island();
+        let (face, x, y) = crate::settlements::STARTS[0];
+        w.material[idx(face, x, y)] = crate::world::MAT_SAND;
+        project(&mut w);
+        assert!(w.influence[idx(face, x, y)] > 0, "a core on sand stopped projecting");
     }
 }
