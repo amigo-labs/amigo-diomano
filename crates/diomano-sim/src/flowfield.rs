@@ -155,6 +155,15 @@ fn best_plateau(w: &World, player: usize) -> Option<usize> {
 /// Maximum contribution a single settlement can project (§4.5).
 pub const MAX_CONTRIBUTION: i32 = 7 * INFLUENCE_REACH;
 
+/// The home core: the spawn pedestal projects influence like a hut for as long
+/// as it is habitable. A thread, not a foundation — enough that sudden death
+/// means "my land drowned" instead of "my huts fell", too little to live on.
+///
+/// Symmetric on purpose: the opponent gets the same core. A one-sided floor
+/// would let the player rush the opponent out of the match, and the fix would
+/// have produced an easier game rather than a different one.
+pub const SANCTUARY_STRENGTH: i32 = 1;
+
 /// Project influence outward from settlements over the BFS graph.
 ///
 /// Runs on the same 15-tick boundary as the flow field, and for the same reason.
@@ -201,6 +210,18 @@ fn project_for(w: &mut World, player: usize) {
             }
             let c = idx(s.face as usize, s.x as usize, s.y as usize);
             if i32::from(w.infl_acc[player][c]) < v {
+                w.infl_acc[player][c] = v as i16;
+                w.queue[hi] = c as u32;
+                hi += 1;
+            }
+        }
+        // The home core, seeded after the settlements at its level so the
+        // order stays a fixed function of state. An ordinary contribution
+        // through the ordinary zero-sum combine below.
+        if v == SANCTUARY_STRENGTH * INFLUENCE_REACH {
+            let (face, x, y) = crate::settlements::STARTS[player];
+            let c = idx(face, x, y);
+            if w.habitable(c) && i32::from(w.infl_acc[player][c]) < v {
                 w.infl_acc[player][c] = v as i16;
                 w.queue[hi] = c as u32;
                 hi += 1;
@@ -589,5 +610,39 @@ mod tests {
             guard += 1;
             assert!(guard < 4 * N * 6, "walk from the settlement did not reach the magnet");
         }
+    }
+
+    #[test]
+    fn the_home_core_keeps_influence_alive_when_every_settlement_is_gone() {
+        // `island` has cleared every settlement: what is left is the two cores.
+        let mut w = island();
+        project(&mut w);
+        for (player, sign) in [(0usize, 1i8), (1, -1)] {
+            let (face, x, y) = crate::settlements::STARTS[player];
+            let held = (0..crate::world::CELLS)
+                .filter(|&c| w.influence[c] != 0 && w.influence[c].signum() == sign)
+                .count();
+            assert!(held > 0, "player {player} holds nothing with an intact home core");
+            assert_eq!(
+                i32::from(w.influence[idx(face, x, y)]) * i32::from(sign),
+                SANCTUARY_STRENGTH * INFLUENCE_REACH,
+                "player {player}'s core does not project at hut strength"
+            );
+            // A thread, not a foundation: a hut's reach and no more.
+            let reach = (SANCTUARY_STRENGTH * INFLUENCE_REACH) as usize;
+            assert!(held <= 2 * reach * reach, "player {player}'s core projects {held} cells");
+        }
+    }
+
+    #[test]
+    fn a_drowned_home_core_projects_nothing() {
+        let mut w = island();
+        let (face, x, y) = crate::settlements::STARTS[0];
+        w.water[idx(face, x, y)] = 40;
+        project(&mut w);
+        assert!(
+            (0..crate::world::CELLS).all(|c| w.influence[c] <= 0),
+            "a drowned core still projects influence"
+        );
     }
 }
