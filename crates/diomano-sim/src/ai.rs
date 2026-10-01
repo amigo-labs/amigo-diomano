@@ -26,8 +26,8 @@
 //! and marching, which is the only war this game has.
 
 use crate::world::{
-    Command, CommandBuf, MOD_THROWN, PLAYERS, TIDE_TELEGRAPH, VERB_EARTHQUAKE, VERB_LOWER,
-    VERB_MAGNET, VERB_RAISE, VERB_VOLCANO, World, idx, verb_power,
+    Command, CommandBuf, MOD_THROWN, NO_SETTLEMENT, PLAYERS, TIDE_TELEGRAPH, VERB_EARTHQUAKE,
+    VERB_LOWER, VERB_MAGNET, VERB_RAISE, VERB_VOLCANO, World, idx, verb_power,
 };
 
 /// `AiState::phase` value once the curriculum has been shown once.
@@ -215,7 +215,8 @@ pub fn step(w: &mut World, out: &mut CommandBuf) {
     }
 
     // `target` has nothing only for an anchor that is itself off its face, which
-    // `reanchor` never produces; skipping the beat is the honest fallback.
+    // `reanchor` never produces, or for a move at home with nowhere to land that
+    // spares the opponent's own towns; skipping the beat is the honest fallback.
     let Some((face, x, y)) = target(w, player, l) else {
         return;
     };
@@ -235,7 +236,68 @@ fn current_script(w: &World) -> &'static [Lesson] {
 }
 
 fn target(w: &World, player: usize, l: Lesson) -> Option<(u8, u16, u16)> {
-    let (face, ax, ay) = match l.aim {
+    if l.aim == Aim::EnemyBase || !reshapes_ground(l.verb) {
+        return aim_at(w, player, l.dx, l.dy, l.aim);
+    }
+    // At home, a move that reshapes ground must not land on the opponent's own
+    // towns. A settlement is only as good as the flat plateau under it, and the
+    // offsets in the tables are relative to the *strongest* settlement, not to
+    // the satellites that found themselves around it — so the thrown raise six
+    // cells west of the anchor came down on a satellite's footprint, and every
+    // "flatten ground beside home" levelled a town instead. Traced on seed
+    // 0x9E37D8A6: the curriculum's first raise razed four of seven settlements
+    // and the anchor itself, and the opponent lost to an idle player by sudden
+    // death at tick 691. Two in three sweep seeds ended that way.
+    //
+    // The offset turns a quarter at a time, then reaches twice as far, and the
+    // first spot whose brush (plus the one-cell margin a slope needs) is clear
+    // of every own footprint wins. Fixed order, so a function of state only.
+    let radius = World::brush_radius(l.modifier) + 1;
+    let (dx, dy) = (l.dx, l.dy);
+    for reach in [1i8, 2] {
+        for (rx, ry) in [(dx, dy), (-dy, dx), (-dx, -dy), (dy, -dx)] {
+            let Some(spot) =
+                aim_at(w, player, rx.saturating_mul(reach), ry.saturating_mul(reach), l.aim)
+            else {
+                continue;
+            };
+            if spares_own_towns(w, player, spot, radius) {
+                return Some(spot);
+            }
+        }
+    }
+    None
+}
+
+/// The verbs that change the height or the surface under them.
+const fn reshapes_ground(verb: u8) -> bool {
+    matches!(verb, VERB_RAISE | VERB_LOWER | VERB_VOLCANO)
+}
+
+/// No cell within `radius` of `spot` belongs to one of `player`'s settlements.
+fn spares_own_towns(w: &World, player: usize, spot: (u8, u16, u16), radius: i32) -> bool {
+    let (face, x, y) = spot;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let Some((f, cx, cy)) =
+                crate::world::walk(face as usize, i32::from(x), i32::from(y), dx, dy)
+            else {
+                continue;
+            };
+            let slot = w.settle_of[idx(f, cx, cy)];
+            if slot != NO_SETTLEMENT
+                && w.settlements[slot as usize].alive()
+                && w.settlements[slot as usize].owner as usize == player
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn aim_at(w: &World, player: usize, dx: i8, dy: i8, aim: Aim) -> Option<(u8, u16, u16)> {
+    let (face, ax, ay) = match aim {
         Aim::Home => (w.ai.anchor_face, w.ai.anchor_x, w.ai.anchor_y),
         Aim::EnemyBase => {
             let enemy = (player + 1) % PLAYERS;
@@ -253,8 +315,8 @@ fn target(w: &World, player: usize, l: Lesson) -> Option<(u8, u16, u16)> {
         face as usize,
         i32::from(ax),
         i32::from(ay),
-        i32::from(l.dx),
-        i32::from(l.dy),
+        i32::from(dx),
+        i32::from(dy),
     )?;
     Some((f as u8, x as u16, y as u16))
 }
@@ -520,5 +582,62 @@ mod tests {
             }
         }
         assert!(struck, "a rich opponent never strikes");
+    }
+
+    #[test]
+    fn the_opponent_never_reshapes_ground_under_its_own_towns() {
+        // Every raise, dig and vent it emits at home lands clear of its own
+        // footprints, margin included — through both tables, on the shipped map.
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.ai_enabled = 1;
+        cfg.seed = 0x9E37_D8A6;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        let mut checked = 0;
+        for _ in 0..script_ticks() * 3 {
+            let mut buf = CommandBuf::new();
+            // What this tick's step emits, without advancing the script: the
+            // real tick below runs the same step again.
+            let saved = w.ai;
+            step(&mut w, &mut buf);
+            w.ai = saved;
+            // Every ground-shaping move in both tables is aimed at home; the
+            // strike is an earthquake, which is not one of them.
+            for c in buf.as_slice().iter().filter(|c| reshapes_ground(c.verb)) {
+                let radius = World::brush_radius(c.modifier) + 1;
+                assert!(
+                    spares_own_towns(&w, 1, (c.face, c.x, c.y), radius),
+                    "tick {}: verb {} at f{} {},{} lands on the opponent's own town",
+                    w.tick,
+                    c.verb,
+                    c.face,
+                    c.x,
+                    c.y
+                );
+                checked += 1;
+            }
+            w.tick(&[]);
+        }
+        assert!(checked > 20, "only {checked} moves at home were checked");
+    }
+
+    #[test]
+    fn the_opponent_does_not_level_its_own_economy_in_the_opening() {
+        // Seed 0x9E37D8A6, shipped map, nobody at the other controls: the
+        // curriculum's first thrown raise used to raze four of the opponent's
+        // seven settlements and its anchor, and an idle player won by sudden
+        // death at tick 691.
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.ai_enabled = 1;
+        cfg.seed = 0x9E37_D8A6;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        for _ in 0..1_500 {
+            w.tick(&[]);
+        }
+        assert_ne!(w.outcome, 1, "the opponent lost to an idle player by levelling its own towns");
+        let towns =
+            w.settlements.iter().filter(|s| s.alive() && s.owner == 1 && s.tier > 0).count();
+        assert!(towns >= 3, "the opponent has {towns} standing towns after its opening");
     }
 }
