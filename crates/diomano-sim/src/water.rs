@@ -43,6 +43,10 @@ const fn seam_entry(face: usize, x: usize, y: usize, dir: usize) -> Option<usize
 /// [`apply_sea_level`]. Callers that do not move the sea pass `w.sea_level`.
 pub fn transfer_water(w: &mut World, sea_before: i16) {
     w.erode.fill(0);
+    // Fresh ring for the first half too: the copy at the top of the tick is
+    // from before the commands and the tide, so a pour or a raise on the far
+    // side of a seam was invisible to the half that runs first (PLAN decision 8).
+    w.ghost_copy_flow_fields();
     for parity in 0..2usize {
         water_half(w, parity);
         w.apply_seam_flux_i16(FluxField::Water);
@@ -660,5 +664,42 @@ mod tests {
         // §3.6: height, water and lava are directly comparable.
         assert_eq!(TERRACE, 16);
         assert_eq!(S, N + 2);
+    }
+
+    #[test]
+    fn water_at_a_seam_sees_the_far_side_as_it_is_now() {
+        // As for sand: a pond poured across a face edge after the tick's ghost
+        // copy must flow against what is there now, not the copy.
+        let mut a = pangaea();
+        let mut b = pangaea();
+        // Odd row, odd column: the first checkerboard half, the one that reads
+        // the ring copied at the top of the tick.
+        let (face, x, y) = (4usize, N - 1, N / 2 + 1);
+        let (ff, fx, fy) = crate::world::walk(face, x as i32, y as i32, 1, 0).expect("a neighbour");
+        assert_ne!(ff, face, "the probe has to straddle a seam");
+        for w in [&mut a, &mut b] {
+            // Walls on this side, so the seam is the only way out.
+            for dy in -2i32..=2 {
+                for dx in -2i32..=0 {
+                    let c = idx(face, (x as i32 + dx) as usize, (y as i32 + dy) as usize);
+                    w.height[c] = 2_000;
+                    w.water[c] = 0;
+                }
+            }
+            let here = idx(face, x, y);
+            let there = idx(ff, fx, fy);
+            w.height[here] = 400;
+            w.height[there] = 400;
+            w.water[here] = 200;
+            w.water[there] = 0;
+            w.ghost_copy_all();
+            // The far side fills to the same surface before the water pass.
+            w.water[there] = 200;
+        }
+        b.ghost_copy_all();
+        let sea = a.sea_level;
+        transfer_water(&mut a, sea);
+        transfer_water(&mut b, sea);
+        assert!(a.water.iter().eq(b.water.iter()), "water flowed against a stale copy of the seam");
     }
 }
