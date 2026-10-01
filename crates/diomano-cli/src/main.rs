@@ -1734,6 +1734,37 @@ mod tests {
     }
 
     #[test]
+    fn a_sweep_match_is_long_enough_to_end_on_the_tide() {
+        // The cap is the tick a full tide cycle ends at, plus margin: an
+        // undecided match at the cap would mean the tide itself never ended.
+        let cfg = MapConfig::DEFAULT;
+        let last_peak = cfg.lull_ticks
+            + cfg.telegraph_ticks
+            + cfg.impact_ticks / 2
+            + (u32::from(cfg.waves) - 1)
+                * (cfg.impact_ticks + cfg.recovery_ticks + cfg.telegraph_ticks);
+        let done = last_peak + cfg.impact_ticks / 2 + cfg.lull_ticks;
+        assert!(
+            full_match_ticks(&cfg) > done,
+            "the cap {} is inside the match",
+            full_match_ticks(&cfg)
+        );
+    }
+
+    #[test]
+    fn opts_parse_the_sweep_options() {
+        let args: Vec<String> = ["--seeds", "3", "--profile", "idle", "--cap", "900"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let o = Opts::parse(&args).expect("valid options");
+        assert_eq!((o.seeds, o.cap), (3, Some(900)));
+        assert_eq!(o.profiles, vec![Profile::Idle]);
+        let bad: Vec<String> = ["--profile", "lazy"].iter().map(|s| (*s).to_string()).collect();
+        assert!(Opts::parse(&bad).is_err(), "an unknown profile was accepted");
+    }
+
+    #[test]
     fn hash_line_parsing_roundtrips() {
         let src = "# comment\n0 0x0123456789abcdef\n30 0xfedcba9876543210\n";
         let got = parse_hashes(src).expect("parse");
