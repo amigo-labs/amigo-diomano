@@ -350,7 +350,9 @@ export function createRadial(
         }
         openAt(pointerX, pointerY);
       });
-      canvas.addEventListener("pointermove", (ev) => {
+      // On the window, like the hand's aim: moves over the open backdrop count,
+      // so Space after Escape opens the ring where the pointer now is.
+      addEventListener("pointermove", (ev) => {
         pointerX = ev.clientX;
         pointerY = ev.clientY;
       });

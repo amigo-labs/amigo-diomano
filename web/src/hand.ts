@@ -470,10 +470,17 @@ export function createHand(
     current = pickCell(marchPoint, sim.N);
   };
 
-  canvas.addEventListener("pointermove", (ev) => {
+  // The aim follows the pointer wherever it is, not only over the canvas. The
+  // radial menu's backdrop covers the canvas while it is open, and the hand
+  // came back from the menu aimed at the cell where it had opened, until the
+  // pointer next crossed the canvas — so a key pressed right after closing it
+  // acted on ground the pointer had left.
+  addEventListener("pointermove", (ev) => {
     pointer.x = (ev.clientX / innerWidth) * 2 - 1;
     pointer.y = -(ev.clientY / innerHeight) * 2 + 1;
     updateTarget();
+  });
+  canvas.addEventListener("pointermove", (ev) => {
     if (pressing) {
       const dx = ev.clientX - downX;
       const dy = ev.clientY - downY;
