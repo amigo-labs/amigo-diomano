@@ -9,7 +9,7 @@
  * three.js example humanoid is a robot, and the packs that *are* CC0 — Kenney,
  * Quaternius — ship as zips behind pages rather than as fetchable files. A model
  * we author is CC0 by construction, has no provenance to keep checkable, and is
- * ~9 KB.
+ * a few tens of KB.
  *
  * It is a real glTF, deliberately, and not a runtime-procedural blob: the
  * loading path in `vegetation.ts` derives limbs from vertex *positions* rather
@@ -32,54 +32,109 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MODELS = join(ROOT, "web/public/models");
 
 /**
- * The figure, as boxes. One unit tall, standing on y = 0, facing -Z. This is
- * the **tier-1** figure — `villager-low.glb` — drawn when a thousand of them
- * may be on screen on integrated graphics (§7.6). The tier-2 figure is
+ * The figure, as boxes. About one unit tall, standing on y = 0, facing -Z.
+ * This is the **tier-1** figure — `villager-low.glb` — drawn when a thousand
+ * of them may be on screen on integrated graphics (§7.6). The tier-2 figure is
  * `DETAILED_PARTS` below.
  *
  * The joint heights matter beyond the silhouette: `vegetation.ts` reads limbs
  * back out of the geometry by comparing vertex height against HIP and SHOULDER,
  * and vertex x-sign against the torso's half width. Move a limb across one of
  * those lines here and it will swing as the wrong limb there.
+ *
+ * # Proportions
+ *
+ * A little chibi: the head is a quarter larger than a person's would be. At
+ * play distance a walker is a dozen pixels tall, and the head is what makes
+ * those pixels a person rather than a peg. Everything that grew is *above* the
+ * shoulder line, so the joints — and the constants mirrored in `vegetation.ts`
+ * — did not move; the figure is simply a little taller, to about 1.07.
  */
 const HIP = 0.46;
 const SHOULDER = 0.70;
 const TORSO_HALF_WIDTH = 0.115;
 
-/** [centre x, y, z], [size x, y, z] — and a taper on the top face, 0..1. */
+/**
+ * Colours, as sRGB hex the way `models.ts` writes them; converted to linear
+ * when written, because glTF's `COLOR_0` is linear and so is three's working
+ * space.
+ *
+ * The tabard is white, and the *team mask* is what colours it: `_TEAM` is 1 on
+ * it and 0 everywhere else, so the walker shader puts the owner's colour on
+ * the tunic and leaves the face, the hair and the boots their own colour. The
+ * pleats are a shade darker so they still read as stripes once tinted.
+ */
+const SKIN = 0xe8b48c;
+const HAIR = 0x5b3a22;
+const TABARD = 0xffffff;
+const PLEAT = 0xc8c0b4;
+const BELT = 0x6b4a2a;
+const SLEEVE = 0xd8ccb2;
+const TROUSERS = 0x6a5e4c;
+const BOOTS = 0x4a3424;
+
+/**
+ * Parts of one colour. `team` is the mask: 1 takes the owner's colour, 0 keeps
+ * `colour`. A part is `[centre, size, taper]` — a box, centre `[x, y, z]`, size
+ * `[x, y, z]`, the top face tapered by 0..1 — or `{ prism: [centre, radius,
+ * height, sides, taper] }` for the round ones.
+ */
+const paint = (colour, team, ...shapes) => shapes.map((shape) => ({ shape, colour, team }));
+
 const PARTS = [
-  // head and neck
-  [[0, 0.905, 0.005], [0.2, 0.2, 0.21], 0.82],
-  [[0, 0.79, 0], [0.09, 0.07, 0.09], 1],
-  // chest and belly: two boxes, so the torso has a waist
-  [[0, 0.665, 0], [0.29, 0.19, 0.18], 0.88],
-  [[0, 0.525, 0], [0.24, 0.13, 0.16], 1.1],
+  // head, a cap of hair, neck
+  ...paint(SKIN, 0, [[0, 0.93, 0.005], [0.25, 0.24, 0.25], 0.82]),
+  ...paint(HAIR, 0, [[0, 1.04, 0.01], [0.25, 0.06, 0.25], 0.75]),
+  ...paint(SKIN, 0, [[0, 0.79, 0], [0.09, 0.07, 0.09], 1]),
+  // chest and belly: two boxes, so the torso has a waist — the tabard
+  ...paint(
+    TABARD,
+    1,
+    [[0, 0.665, 0], [0.29, 0.19, 0.18], 0.88],
+    [[0, 0.525, 0], [0.24, 0.13, 0.16], 1.1],
+  ),
   // hips
-  [[0, 0.435, 0], [0.26, 0.09, 0.17], 1],
+  ...paint(TROUSERS, 0, [[0, 0.435, 0], [0.26, 0.09, 0.17], 1]),
   // arms: upper, fore, hand — hung outside TORSO_HALF_WIDTH so the limb test
   // below cannot mistake them for chest
-  [[-0.185, 0.645, 0], [0.085, 0.2, 0.095], 0.9],
-  [[0.185, 0.645, 0], [0.085, 0.2, 0.095], 0.9],
-  [[-0.185, 0.475, 0], [0.07, 0.17, 0.08], 0.95],
-  [[0.185, 0.475, 0], [0.07, 0.17, 0.08], 0.95],
-  [[-0.185, 0.365, 0], [0.075, 0.075, 0.085], 1],
-  [[0.185, 0.365, 0], [0.075, 0.075, 0.085], 1],
+  ...paint(
+    SLEEVE,
+    0,
+    [[-0.185, 0.645, 0], [0.085, 0.2, 0.095], 0.9],
+    [[0.185, 0.645, 0], [0.085, 0.2, 0.095], 0.9],
+    [[-0.185, 0.475, 0], [0.07, 0.17, 0.08], 0.95],
+    [[0.185, 0.475, 0], [0.07, 0.17, 0.08], 0.95],
+  ),
+  ...paint(
+    SKIN,
+    0,
+    [[-0.185, 0.365, 0], [0.075, 0.075, 0.085], 1],
+    [[0.185, 0.365, 0], [0.075, 0.075, 0.085], 1],
+  ),
   // legs: thigh, shin, foot
-  [[-0.075, 0.32, 0], [0.105, 0.24, 0.11], 1.05],
-  [[0.075, 0.32, 0], [0.105, 0.24, 0.11], 1.05],
-  [[-0.075, 0.115, 0], [0.085, 0.19, 0.09], 1.1],
-  [[0.075, 0.115, 0], [0.085, 0.19, 0.09], 1.1],
-  [[-0.075, 0.025, -0.03], [0.09, 0.05, 0.19], 1],
-  [[0.075, 0.025, -0.03], [0.09, 0.05, 0.19], 1],
+  ...paint(
+    TROUSERS,
+    0,
+    [[-0.075, 0.32, 0], [0.105, 0.24, 0.11], 1.05],
+    [[0.075, 0.32, 0], [0.105, 0.24, 0.11], 1.05],
+    [[-0.075, 0.115, 0], [0.085, 0.19, 0.09], 1.1],
+    [[0.075, 0.115, 0], [0.085, 0.19, 0.09], 1.1],
+  ),
+  ...paint(
+    BOOTS,
+    0,
+    [[-0.075, 0.025, -0.03], [0.09, 0.05, 0.19], 1],
+    [[0.075, 0.025, -0.03], [0.09, 0.05, 0.19], 1],
+  ),
 ];
 
 /**
  * The tier-2 figure — `villager.glb`. The same person with the parts a
- * silhouette this size can actually show: a head with a jaw and a cap of hair,
- * a neck, shoulders, a tunic with a belt over the hips, arms with elbows and
- * hands, legs with knees and boots. ~500 triangles against the tier-1 figure's
- * 204, which at 1,024 walkers is half a million — comfortable at tier 2, and
- * the reason tier 1 keeps the boxes.
+ * silhouette this size can actually show: a head with a jaw, a nose, ears and
+ * hair, a neck, shoulders, a tabard with pleats and a belt, arms with elbows
+ * and hands, legs with knees and boots. 476 triangles against the tier-1
+ * figure's 216, which at 1,024 walkers is half a million — comfortable at tier
+ * 2, and the reason tier 1 keeps the boxes.
  *
  * # The joint lines still hold
  *
@@ -88,58 +143,96 @@ const PARTS = [
  * is body. So every torso part between the hip and the shoulder is kept inside
  * the torso half width — the tunic's hem included, which is why it does not
  * flare — and the shoulder pads sit *above* the shoulder line, where they count
- * as body and do not swing.
- *
- * Entries are `[centre, size, taper]` boxes as above, or
- * `{ prism: [centre, radius, height, sides, taper] }` for the round parts.
+ * as body and do not swing. The bigger head is all above the neck.
  */
 const DETAILED_PARTS = [
-  // head: an octagonal prism narrowing toward the crown, a jaw under it, a nose,
-  // a cap of hair, two ears
-  { prism: [[0, 0.905, 0.0], 0.105, 0.19, 8, 0.86] },
-  [[0, 0.822, 0.01], [0.15, 0.05, 0.14], 0.8],
-  [[0, 0.885, -0.11], [0.035, 0.04, 0.035], 0.9],
-  { prism: [[0, 0.985, 0.005], 0.112, 0.055, 8, 0.7] },
-  [[-0.11, 0.9, 0.01], [0.025, 0.05, 0.04], 1],
-  [[0.11, 0.9, 0.01], [0.025, 0.05, 0.04], 1],
+  // head: an octagonal prism narrowing toward the crown, a jaw under it, a
+  // nose and two ears; hair as a cap and a mass at the back
+  ...paint(
+    SKIN,
+    0,
+    { prism: [[0, 0.93, 0.0], 0.13, 0.23, 8, 0.86] },
+    [[0, 0.835, 0.01], [0.18, 0.06, 0.17], 0.8],
+    [[0, 0.91, -0.135], [0.04, 0.045, 0.04], 0.9],
+    [[-0.135, 0.92, 0.01], [0.03, 0.06, 0.05], 1],
+    [[0.135, 0.92, 0.01], [0.03, 0.06, 0.05], 1],
+  ),
+  ...paint(
+    HAIR,
+    0,
+    { prism: [[0, 1.035, 0.01], 0.138, 0.07, 8, 0.7] },
+    [[0, 0.95, 0.07], [0.22, 0.17, 0.13], 0.95],
+  ),
   // neck
-  [[0, 0.785, 0], [0.08, 0.06, 0.08], 1],
-  // shoulders, above the shoulder line so they are body
-  [[-0.15, 0.735, 0], [0.13, 0.06, 0.15], 0.75],
-  [[0.15, 0.735, 0], [0.13, 0.06, 0.15], 0.75],
-  // chest, belly, belt: all inside the torso half width
-  [[0, 0.675, 0], [0.23, 0.13, 0.17], 0.94],
-  [[0, 0.57, 0], [0.22, 0.09, 0.155], 1.04],
-  [[0, 0.505, 0], [0.23, 0.05, 0.165], 1],
-  // tunic pleats down the front
-  [[-0.06, 0.6, -0.085], [0.03, 0.2, 0.012], 1],
-  [[0.0, 0.6, -0.087], [0.03, 0.2, 0.012], 1],
-  [[0.06, 0.6, -0.085], [0.03, 0.2, 0.012], 1],
+  ...paint(SKIN, 0, [[0, 0.785, 0], [0.08, 0.06, 0.08], 1]),
+  // the tabard: shoulders (above the shoulder line, so they are body), chest
+  // and belly, all inside the torso half width, and pleats down the front
+  ...paint(
+    TABARD,
+    1,
+    [[-0.15, 0.735, 0], [0.13, 0.06, 0.15], 0.75],
+    [[0.15, 0.735, 0], [0.13, 0.06, 0.15], 0.75],
+    [[0, 0.675, 0], [0.23, 0.13, 0.17], 0.94],
+    [[0, 0.57, 0], [0.22, 0.09, 0.155], 1.04],
+  ),
+  ...paint(
+    PLEAT,
+    1,
+    [[-0.06, 0.6, -0.085], [0.03, 0.2, 0.012], 1],
+    [[0.0, 0.6, -0.087], [0.03, 0.2, 0.012], 1],
+    [[0.06, 0.6, -0.085], [0.03, 0.2, 0.012], 1],
+  ),
+  ...paint(BELT, 0, [[0, 0.505, 0], [0.23, 0.05, 0.165], 1]),
   // hips: below the hip line, so they split left and right with the legs
-  [[0, 0.44, 0], [0.24, 0.06, 0.17], 1],
-  // arms: upper arm, elbow, forearm, hand, thumb — all outboard of the torso
-  [[-0.19, 0.64, 0], [0.085, 0.13, 0.095], 0.9],
-  [[0.19, 0.64, 0], [0.085, 0.13, 0.095], 0.9],
-  [[-0.19, 0.565, 0], [0.09, 0.04, 0.1], 1],
-  [[0.19, 0.565, 0], [0.09, 0.04, 0.1], 1],
-  [[-0.19, 0.49, -0.005], [0.07, 0.12, 0.08], 0.9],
-  [[0.19, 0.49, -0.005], [0.07, 0.12, 0.08], 0.9],
-  [[-0.19, 0.41, -0.01], [0.075, 0.08, 0.085], 0.85],
-  [[0.19, 0.41, -0.01], [0.075, 0.08, 0.085], 0.85],
-  [[-0.155, 0.43, -0.045], [0.025, 0.04, 0.03], 1],
-  [[0.155, 0.43, -0.045], [0.025, 0.04, 0.03], 1],
-  // legs: thigh, knee, shin, boot cuff, foot
-  [[-0.075, 0.335, 0], [0.105, 0.17, 0.11], 0.95],
-  [[0.075, 0.335, 0], [0.105, 0.17, 0.11], 0.95],
-  [[-0.075, 0.245, -0.005], [0.1, 0.035, 0.11], 1],
-  [[0.075, 0.245, -0.005], [0.1, 0.035, 0.11], 1],
-  [[-0.075, 0.15, 0], [0.085, 0.16, 0.09], 1.08],
-  [[0.075, 0.15, 0], [0.085, 0.16, 0.09], 1.08],
-  [[-0.075, 0.075, 0], [0.1, 0.035, 0.105], 1],
-  [[0.075, 0.075, 0], [0.1, 0.035, 0.105], 1],
-  [[-0.075, 0.025, -0.03], [0.095, 0.05, 0.2], 0.9],
-  [[0.075, 0.025, -0.03], [0.095, 0.05, 0.2], 0.9],
+  ...paint(TROUSERS, 0, [[0, 0.44, 0], [0.24, 0.06, 0.17], 1]),
+  // arms: upper arm, elbow, forearm in the sleeve; hand and thumb — all
+  // outboard of the torso
+  ...paint(
+    SLEEVE,
+    0,
+    [[-0.19, 0.64, 0], [0.085, 0.13, 0.095], 0.9],
+    [[0.19, 0.64, 0], [0.085, 0.13, 0.095], 0.9],
+    [[-0.19, 0.565, 0], [0.09, 0.04, 0.1], 1],
+    [[0.19, 0.565, 0], [0.09, 0.04, 0.1], 1],
+    [[-0.19, 0.49, -0.005], [0.07, 0.12, 0.08], 0.9],
+    [[0.19, 0.49, -0.005], [0.07, 0.12, 0.08], 0.9],
+  ),
+  ...paint(
+    SKIN,
+    0,
+    [[-0.19, 0.41, -0.01], [0.075, 0.08, 0.085], 0.85],
+    [[0.19, 0.41, -0.01], [0.075, 0.08, 0.085], 0.85],
+    [[-0.155, 0.43, -0.045], [0.025, 0.04, 0.03], 1],
+    [[0.155, 0.43, -0.045], [0.025, 0.04, 0.03], 1],
+  ),
+  // legs: thigh, knee, shin, then the boot — cuff and foot
+  ...paint(
+    TROUSERS,
+    0,
+    [[-0.075, 0.335, 0], [0.105, 0.17, 0.11], 0.95],
+    [[0.075, 0.335, 0], [0.105, 0.17, 0.11], 0.95],
+    [[-0.075, 0.245, -0.005], [0.1, 0.035, 0.11], 1],
+    [[0.075, 0.245, -0.005], [0.1, 0.035, 0.11], 1],
+    [[-0.075, 0.15, 0], [0.085, 0.16, 0.09], 1.08],
+    [[0.075, 0.15, 0], [0.085, 0.16, 0.09], 1.08],
+  ),
+  ...paint(
+    BOOTS,
+    0,
+    [[-0.075, 0.075, 0], [0.1, 0.035, 0.105], 1],
+    [[0.075, 0.075, 0], [0.1, 0.035, 0.105], 1],
+    [[-0.075, 0.025, -0.03], [0.095, 0.05, 0.2], 0.9],
+    [[0.075, 0.025, -0.03], [0.095, 0.05, 0.2], 0.9],
+  ),
 ];
+
+/** sRGB hex to a linear `[r, g, b]`, the transfer function three's `Color` applies. */
+function linear(hex) {
+  return [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255].map((v) => {
+    const c = v / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  });
+}
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a, b) => [
@@ -152,10 +245,12 @@ function normalise(v) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 
-/** Flat-shaded triangles from parts, for one figure. */
+/** Flat-shaded triangles from parts, for one figure, with each part's colour and team mask. */
 function build(parts) {
   const positions = [];
   const normals = [];
+  const colors = [];
+  const team = [];
 
   /** One flat quad, `a b c d` counter-clockwise seen from outside. */
   const quad = (a, b, c, d) => {
@@ -225,10 +320,16 @@ function build(parts) {
     }
   }
 
-  for (const [k, part] of parts.entries()) {
+  for (const [k, { shape, colour, team: mask }] of parts.entries()) {
     const from = positions.length;
-    if (Array.isArray(part)) box(part[0], part[1], part[2]);
-    else prism(...part.prism);
+    if (Array.isArray(shape)) box(shape[0], shape[1], shape[2]);
+    else prism(...shape.prism);
+    // Every vertex the part just emitted takes its colour and mask.
+    const rgb = linear(colour);
+    for (let i = from; i < positions.length; i += 3) {
+      colors.push(...rgb);
+      team.push(mask);
+    }
     // Every part is a closed solid of its own, so each has to be wound outward
     // by itself. The whole-figure check in `assertWoundOutward` sums them, and
     // one inside-out thumb would disappear under the torso's volume.
@@ -237,7 +338,12 @@ function build(parts) {
       throw new Error(`part ${k}: signed volume ${v.toFixed(4)} — wound inward`);
     }
   }
-  return { positions: new Float32Array(positions), normals: new Float32Array(normals) };
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array(normals),
+    colors: new Float32Array(colors),
+    team: new Float32Array(team),
+  };
 }
 
 /**
@@ -289,10 +395,15 @@ function assertWoundOutward(name, positions, normals) {
 }
 
 // --- GLB assembly ----------------------------------------------------------
-// Written by hand rather than with a library: this is one mesh with two
+// Written by hand rather than with a library: this is one mesh with four
 // attributes, and the whole container is a header, a JSON chunk and a binary
-// chunk. A dependency to emit 9 KB would be the larger thing.
-function writeGlb(name, { positions: posArray, normals: nrmArray }) {
+// chunk. A dependency to emit 30 KB would be the larger thing.
+//
+// `COLOR_0` is the standard vertex colour, so any glTF viewer shows the figure
+// painted. `_TEAM` is this project's: glTF reserves the leading underscore for
+// application-specific attributes, and a viewer that does not know it ignores
+// it. `readGlb` in `geometry.ts` reads both.
+function writeGlb(name, { positions: posArray, normals: nrmArray, colors, team }) {
   const count = posArray.length / 3;
   assertWoundOutward(name, posArray, nrmArray);
   const min = [Infinity, Infinity, Infinity];
@@ -305,7 +416,16 @@ function writeGlb(name, { positions: posArray, normals: nrmArray }) {
   }
   const posBytes = Buffer.from(posArray.buffer);
   const nrmBytes = Buffer.from(nrmArray.buffer);
-  const bin = Buffer.concat([posBytes, nrmBytes]);
+  const colBytes = Buffer.from(colors.buffer);
+  const teamBytes = Buffer.from(team.buffer);
+  const bin = Buffer.concat([posBytes, nrmBytes, colBytes, teamBytes]);
+  // Every view is a multiple of four bytes long, so each starts aligned.
+  let viewAt = 0;
+  const view = (bytes) => {
+    const v = { buffer: 0, byteOffset: viewAt, byteLength: bytes.length, target: 34962 };
+    viewAt += bytes.length;
+    return v;
+  };
 
   const gltf = {
     asset: {
@@ -316,15 +436,19 @@ function writeGlb(name, { positions: posArray, normals: nrmArray }) {
     scene: 0,
     scenes: [{ nodes: [0] }],
     nodes: [{ mesh: 0, name: "villager" }],
-    meshes: [{ name: "villager", primitives: [{ attributes: { POSITION: 0, NORMAL: 1 }, mode: 4 }] }],
+    meshes: [
+      {
+        name: "villager",
+        primitives: [{ attributes: { POSITION: 0, NORMAL: 1, COLOR_0: 2, _TEAM: 3 }, mode: 4 }],
+      },
+    ],
     accessors: [
       { bufferView: 0, componentType: 5126, count, type: "VEC3", min, max },
       { bufferView: 1, componentType: 5126, count, type: "VEC3" },
+      { bufferView: 2, componentType: 5126, count, type: "VEC3" },
+      { bufferView: 3, componentType: 5126, count, type: "SCALAR" },
     ],
-    bufferViews: [
-      { buffer: 0, byteOffset: 0, byteLength: posBytes.length, target: 34962 },
-      { buffer: 0, byteOffset: posBytes.length, byteLength: nrmBytes.length, target: 34962 },
-    ],
+    bufferViews: [view(posBytes), view(nrmBytes), view(colBytes), view(teamBytes)],
     buffers: [{ byteLength: bin.length }],
   };
 
