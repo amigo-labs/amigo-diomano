@@ -1393,6 +1393,11 @@ const CATACLYSM_FROM: u32 = 5;
 /// economy the log floods away would demonstrate nothing.
 const AI_FROM: u32 = 8;
 
+/// Matches among the first `matches` that run the cataclysm profile.
+fn cataclysm_matches(matches: u32) -> u32 {
+    (CATACLYSM_FROM..matches).filter(|&m| m < AI_FROM).count() as u32
+}
+
 /// Sum of two censuses, for corpus-wide coverage.
 fn add_census(acc: &mut diomano_sim::world::Census, c: &diomano_sim::world::Census) {
     acc.combat_resolutions = acc.combat_resolutions.saturating_add(c.combat_resolutions);
@@ -1404,7 +1409,7 @@ fn add_census(acc: &mut diomano_sim::world::Census, c: &diomano_sim::world::Cens
 
 /// Every way `census` falls short of §6.3, rather than the first, so one run tells
 /// you the whole story instead of one round of it.
-fn coverage_shortfalls(census: &diomano_sim::world::Census) -> Vec<String> {
+fn coverage_shortfalls(census: &diomano_sim::world::Census, matches: u32) -> Vec<String> {
     let mut bad = Vec::new();
     if census.combat_resolutions < MIN_COMBAT_RESOLUTIONS {
         bad.push(format!(
@@ -1414,11 +1419,16 @@ fn coverage_shortfalls(census: &diomano_sim::world::Census) -> Vec<String> {
     }
     for verb in ALL_VERBS {
         let n = census.verb_applied[verb as usize];
-        if n < MIN_VERB_USES {
-            bad.push(format!(
-                "verb `{}` applied {n} times, wants {MIN_VERB_USES}",
-                verb_name(verb)
-            ));
+        // Armageddon can apply once per match: once the final wave is under
+        // way it is refunded (`tide::trigger_armageddon`), which is what stops
+        // a god postponing the end for ever. Twenty in ten matches is then
+        // unreachable by construction, so it is asked for once in every
+        // cataclysm match instead — the casts the script makes after that are
+        // the refusal path, exercised just as hard.
+        let wants =
+            if verb == VERB_ARMAGEDDON { cataclysm_matches(matches) } else { MIN_VERB_USES };
+        if n < wants {
+            bad.push(format!("verb `{}` applied {n} times, wants {wants}", verb_name(verb)));
         }
     }
     bad
@@ -1534,11 +1544,11 @@ fn cmd_corpus(o: &Opts) -> Result<(), String> {
     // thousands of resolutions, so a drop below 200 is a regression, not a
     // known condition.
     let mut failures = short_matches;
-    failures.extend(coverage_shortfalls(&total));
+    failures.extend(coverage_shortfalls(&total, o.matches));
 
     if failures.is_empty() {
         println!(
-            "\ncorpus OK — {} matches of {CORPUS_TICKS}+ ticks, every verb {MIN_VERB_USES}+, \
+            "\ncorpus OK — {} matches of {CORPUS_TICKS}+ ticks, every verb {MIN_VERB_USES}+ (armageddon once per cataclysm match), \
              {MIN_COMBAT_RESOLUTIONS}+ combat resolutions",
             o.matches,
         );
