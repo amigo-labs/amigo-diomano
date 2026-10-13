@@ -644,7 +644,15 @@ fn score_spot(
                     }
                 }
                 Spot::Spill => {
-                    if town_mine || mine {
+                    // Water on a home core is the core under water: sudden
+                    // death by one pour. Traced in a mirror match — both sides
+                    // dug the same spot in the same tick, the second hand came
+                    // up full of the sea the first had just let in, and it
+                    // went onto the other side's core.
+                    if town_mine
+                        || mine
+                        || near_home_core(face, x + dx - 1, y + dy - 1, CORE_CLEARANCE)
+                    {
                         return None;
                     }
                     if theirs {
