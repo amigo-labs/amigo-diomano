@@ -1,49 +1,20 @@
 /**
  * Sounds for what the *population* does: fighting, founding, rising, falling.
  *
- * The client sees its own commands and the applied-verb ring, and nothing
- * else about what happened in a tick. So this reads the state that is already
- * exported — the diagnostic census counters, the walker and settlement views —
- * and diffs it tick to tick. Combat is the count of resolutions going up;
- * where it happened is found by looking for the cell where walkers of both
- * gods stand. A settlement is founded when a slot appears, rises when its tier
- * does, falls when its slot goes dark.
- *
- * None of it feeds back. The census is write-only from the simulation's point
- * of view and stays so; this only reads it (§10).
+ * The diff that finds those moments lives in `worldEvents.ts`, shared with the
+ * particles, the off-screen pips and the readouts; this only gives each one a
+ * voice — placed where it happened, quieter when it is the other god's.
  */
 
-import type { Sim } from "../main";
+import type { WorldEvent } from "../worldEvents";
 import type { At, Synth } from "./synth";
 
-/** Fewest ticks between two clash sounds. Six a second is a battle; thirty is a buzz. */
-const CLASH_COOLDOWN_TICKS = 5;
-
-interface Known {
-  tier: number;
-  owner: number;
-  face: number;
-  x: number;
-  y: number;
-}
-
 export interface Events {
-  /** Once per tick, after the simulation advanced. */
-  sync(sim: Sim, tick: number, localPlayer: number): void;
-  /** Forget the match, for a restart: the tick counter is about to go back to zero. */
-  reset(): void;
+  /** Voice what the world did since the last call (`WorldEvents.sync`). */
+  play(events: readonly WorldEvent[], localPlayer: number): void;
 }
 
 export function createEvents(synth: Synth): Events {
-  let lastCombat = -1;
-  let lastMerges = -1;
-  let lastClash = -1_000;
-  let lastMerge = -1_000;
-  const known = new Map<number, Known>();
-  const seen = new Set<number>();
-  /** Cell → bitmask of owners with a walker on it, rebuilt when combat rose. */
-  const occupants = new Map<number, number>();
-
   const clash = (at: At | undefined, strength: number): void => {
     // Steel: a bright noise burst with a ringing metallic partial under it,
     // and a duller thud for the bodies.
@@ -113,83 +84,26 @@ export function createEvents(synth: Synth): Events {
   };
 
   return {
-    reset(): void {
-      // The cooldowns are tick stamps, and `known` is the old match's census: left
-      // alone across a restart, no clash sounded until the new match's tick passed
-      // the old one's, and the first sync mourned every settlement of the dead
-      // world at once.
-      lastCombat = -1;
-      lastMerges = -1;
-      lastClash = -1_000;
-      lastMerge = -1_000;
-      known.clear();
-    },
-
-    sync(sim, tick, localPlayer): void {
-      // --- combat --------------------------------------------------------------
-      const combat = sim.e.dio_census_combat() >>> 0;
-      const merges = sim.e.dio_census_merges() >>> 0;
-      if (lastCombat < 0) {
-        lastCombat = combat;
-        lastMerges = merges;
-      }
-      if (combat > lastCombat && tick - lastClash >= CLASH_COOLDOWN_TICKS) {
-        lastClash = tick;
-        const delta = combat - lastCombat;
-        // Where: the first cell holding walkers of both gods.
-        occupants.clear();
-        let at: At | undefined;
-        for (const w of sim.walkers()) {
-          const key = sim.idx(w.face, Math.floor(w.x), Math.floor(w.y));
-          const bits = (occupants.get(key) ?? 0) | (1 << w.owner);
-          occupants.set(key, bits);
-          if (bits === 3) {
-            at = { face: w.face, x: Math.floor(w.x), y: Math.floor(w.y) };
+    play(events, localPlayer): void {
+      for (const ev of events) {
+        switch (ev.kind) {
+          case "clash":
+            clash(ev.located ? { face: ev.face, x: ev.x, y: ev.y } : undefined, ev.strength);
             break;
-          }
+          case "merge":
+            // Two bands joining: a soft, low thump, unplaced.
+            synth.voice({ freq: 200, freqEnd: 140, gain: 0.05, decay: 0.12 });
+            break;
+          case "founded":
+            founded({ face: ev.face, x: ev.x, y: ev.y }, ev.owner === localPlayer);
+            break;
+          case "rose":
+            rose({ face: ev.face, x: ev.x, y: ev.y }, ev.owner === localPlayer, ev.tier);
+            break;
+          case "fell":
+            fell({ face: ev.face, x: ev.x, y: ev.y }, ev.owner === localPlayer);
+            break;
         }
-        clash(at, Math.min(1, delta / 4));
-      }
-      if (merges > lastMerges && tick - lastMerge >= CLASH_COOLDOWN_TICKS) {
-        lastMerge = tick;
-        // Two bands joining: a soft, low thump, unplaced.
-        synth.voice({ freq: 200, freqEnd: 140, gain: 0.05, decay: 0.12 });
-      }
-      lastCombat = combat;
-      lastMerges = merges;
-
-      // --- settlements ---------------------------------------------------------
-      seen.clear();
-      // The first sync of a match learns the seeded homes silently. Decided once,
-      // before the loop: evaluated per settlement, the first seeded home filled
-      // `known` and every further one in the same sync announced itself.
-      const learning = known.size === 0 && tick <= 1;
-      for (const s of sim.settlements()) {
-        seen.add(s.slot);
-        const at = { face: s.face, x: s.x, y: s.y };
-        const own = s.owner === localPlayer;
-        const k = known.get(s.slot);
-        if (!k) {
-          if (!learning) founded(at, own);
-          known.set(s.slot, { tier: s.tier, owner: s.owner, face: s.face, x: s.x, y: s.y });
-          continue;
-        }
-        if (k.owner !== s.owner || k.face !== s.face || k.x !== s.x || k.y !== s.y) {
-          // The slot was recycled between two ticks: one settlement fell and
-          // another was founded into its number. Both happened.
-          fell({ face: k.face, x: k.x, y: k.y }, k.owner === localPlayer);
-          founded(at, own);
-          known.set(s.slot, { tier: s.tier, owner: s.owner, face: s.face, x: s.x, y: s.y });
-          continue;
-        }
-        if (s.tier > k.tier) rose(at, own, s.tier);
-        k.tier = s.tier;
-        k.owner = s.owner;
-      }
-      for (const [slot, k] of known) {
-        if (seen.has(slot)) continue;
-        fell({ face: k.face, x: k.x, y: k.y }, k.owner === localPlayer);
-        known.delete(slot);
       }
     },
   };

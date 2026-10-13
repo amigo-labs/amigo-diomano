@@ -11,7 +11,7 @@
  *   of ground being worked, driven by the simulation *under the camera* and by
  *   how far out the camera is.
  * - `events.ts` — what the population does: fighting, founding, rising,
- *   falling, read off the census counters and the settlement slots.
+ *   falling, as `worldEvents.ts` finds it in the census and the settlements.
  * - this file — the verbs, the refusal, the stings, and the volume.
  *
  * One-shots for verbs matter here more than in most games: pillar 2 makes
@@ -35,6 +35,7 @@ import type * as THREE from "three";
 import type { Sim, VerbEventView } from "../main";
 import { DEFAULT_VOLUME, KEY, remember, rememberedFlag, rememberedLevel } from "../storage";
 import { VERB } from "../verbs";
+import type { WorldEvent } from "../worldEvents";
 import { type Ambience, createAmbience } from "./ambience";
 import { type Events, createEvents } from "./events";
 import { type At, type Synth, createSynth } from "./synth";
@@ -42,8 +43,11 @@ import { type At, type Synth, createSynth } from "./synth";
 export interface Audio {
   resume(): Promise<void>;
   suspend(): Promise<void>;
-  /** Once per frame: beds, the view for panning, and the per-tick event diff. */
-  sync(sim: Sim, camera: THREE.PerspectiveCamera, dtMs: number): void;
+  /**
+   * Once per frame: beds, the view for panning, and a voice for each of
+   * `world` — this frame's `WorldEvents.sync`, shared with the picture.
+   */
+  sync(sim: Sim, camera: THREE.PerspectiveCamera, dtMs: number, world: readonly WorldEvent[]): void;
   /**
    * One-shot for an applied verb — the player's own or, quieter, the
    * opponent's. With the event, it is placed where the verb landed.
@@ -55,8 +59,6 @@ export interface Audio {
   sculpt(material: number, handMaterial: number): void;
   /** Match-end sting. */
   sting(kind: "win" | "loss" | "draw"): void;
-  /** Forget the match's tick-stamped state, for a restart. */
-  reset(): void;
   /** Master volume, 0..1. Unaffected by mute — this is the remembered level. */
   volume(): number;
   /** Set master volume, 0..1. Persisted, and unmutes if it is *raised*. */
@@ -75,7 +77,6 @@ export function createAudio(localPlayer = 0): Audio {
   let events: Events | null = null;
   let volume = rememberedLevel(KEY.volume, DEFAULT_VOLUME);
   let isMuted = rememberedFlag(KEY.muted, false);
-  let lastEventTick = -1;
 
   /** Push `volume`/`isMuted` at the gain node, if one exists yet. */
   const applyGain = (): void => {
@@ -113,15 +114,12 @@ export function createAudio(localPlayer = 0): Audio {
       if (ctx && ctx.state === "running") await ctx.suspend();
     },
 
-    sync(sim, camera, dtMs): void {
+    sync(sim, camera, dtMs, world): void {
       if (!synth || !ambience || !events) return;
       synth.view(camera, sim.N);
       const tick = sim.e.dio_tick_count();
       ambience.sync(sim, camera, tick, dtMs);
-      if (tick !== lastEventTick) {
-        lastEventTick = tick;
-        events.sync(sim, tick, localPlayer);
-      }
+      events.play(world, localPlayer);
     },
 
     verbSfx(verb, gainIn, at): void {
@@ -317,11 +315,6 @@ export function createAudio(localPlayer = 0): Audio {
     },
 
     muted: () => isMuted,
-
-    reset(): void {
-      events?.reset();
-      lastEventTick = -1;
-    },
 
     sting(kind): void {
       const s = ensure();
