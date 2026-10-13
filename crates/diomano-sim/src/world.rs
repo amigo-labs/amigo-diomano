@@ -553,11 +553,11 @@ pub struct MapConfig {
     ///
     /// Separate from `recovery_ticks` because the two windows do different
     /// jobs. The recovery between waves is playing time — rebuild, replant,
-    /// reclaim — and at a fifteen-minute cadence it is fourteen minutes long.
+    /// reclaim — and at a five-minute cadence it is four minutes ten long.
     /// The opening and closing windows are not: nothing has happened yet at the
     /// start, and after the last wave recedes the match is only waiting for
     /// `decide_match` to fire. Running those on `recovery_ticks` would put
-    /// fourteen minutes of nothing at each end of a match.
+    /// four minutes of nothing at each end of a match.
     pub lull_ticks: u32,
     /// Percent per wave, integer (§5.4).
     pub escalation: u16,
@@ -611,11 +611,15 @@ impl MapConfig {
         n: N as u16,
         seed: 0x5EED,
         terrain: TERRAIN_ARCHIPELAGO,
-        // A wave every fifteen minutes, three of them (user decision). The
-        // cadence is `telegraph + impact + recovery` = 27,000 ticks at 30 Hz,
-        // exactly 15:00, so the waves land at 1:30, 16:30 and 31:30 and a match
-        // is about 34 minutes. §5.5's `[START]` was seven waves 45 seconds
-        // apart, which put a whole match inside six minutes.
+        // A wave every five minutes, three of them (user decision, 2026-10-13,
+        // superseding the fifteen-minute cadence). The cadence is
+        // `telegraph + impact + recovery` = 9,000 ticks at 30 Hz, exactly 5:00,
+        // so the waves peak at 2:10, 7:10 and 12:10 and a match is about
+        // fourteen minutes — §5.5's "roughly 15 minutes". At fifteen minutes
+        // apart a match ran 34 minutes, two thirds of it a recovery in which a
+        // sweep could not find a single event for a quarter of an hour. §5.5's
+        // `[START]` was seven waves 45 seconds apart, which put a whole match
+        // inside six minutes.
         //
         // Escalation rises with the cadence: over three waves rather than seven
         // it has to reach a comparable finale in a third of the steps, and 150%
@@ -623,7 +627,7 @@ impl MapConfig {
         waves: 3,
         telegraph_ticks: 900,
         impact_ticks: 600,
-        recovery_ticks: 25_500,
+        recovery_ticks: 7_500,
         lull_ticks: 2_700,
         escalation: 150,
         wave_strength: 48,

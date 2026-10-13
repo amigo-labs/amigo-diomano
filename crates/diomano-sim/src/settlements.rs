@@ -1175,7 +1175,7 @@ mod tests {
     fn the_causeway_survives_the_early_game() {
         let mut w = World::boxed();
         // The corpus's tide as well as its bridge. The shipped cadence is a
-        // wave every fifteen minutes, so "two full tide cycles" on it is 54,000
+        // wave every five minutes, so "two full tide cycles" on it is 18,000
         // ticks of simulation to assert something about erosion — and the
         // bridge only exists in the corpus configuration anyway, so testing it
         // under the corpus's own tide is both faster and more honest.
@@ -1264,7 +1264,7 @@ mod tests {
 
     /// The pacing regression (docs/specs/pacing.md): a player who opens the
     /// game and never touches it is not beaten before the second wave has
-    /// scored — about seventeen minutes on the shipped map. The opponent may
+    /// scored — about seven minutes on the shipped map. The opponent may
     /// win after that; a match nobody plays has to be losable.
     #[test]
     fn an_idle_player_survives_the_first_two_waves_against_the_scripted_opponent() {
@@ -1277,7 +1277,14 @@ mod tests {
             assert_eq!(w.outcome, 0, "an idle player's match was decided at tick {ticks}");
         }
         assert_eq!(crate::tide::waves_landed(&w), 2, "the second wave never landed");
-        assert!(ticks >= 30_000, "two waves landed by tick {ticks}");
+        // The second peak is a lull, a telegraph, half an impact and one whole
+        // cadence in: anything much sooner means the tide skipped ahead.
+        let cfg = MapConfig::DEFAULT;
+        let second_peak = cfg.lull_ticks
+            + cfg.telegraph_ticks
+            + cfg.impact_ticks / 2
+            + (cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks);
+        assert!(ticks + 2 >= second_peak, "two waves landed by tick {ticks}, not {second_peak}");
     }
 
     /// With no opponent and no input at all, the world alone must not dissolve

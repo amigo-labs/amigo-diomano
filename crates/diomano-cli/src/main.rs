@@ -673,7 +673,7 @@ struct TideSpec {
 }
 
 impl TideSpec {
-    /// The shipped cadence: a wave every fifteen minutes, three of them.
+    /// The shipped cadence: a wave every five minutes, three of them.
     fn shipped() -> Self {
         let cfg = MapConfig::DEFAULT;
         Self {

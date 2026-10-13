@@ -431,25 +431,25 @@ mod tests {
     }
 
     #[test]
-    fn a_wave_lands_every_fifteen_minutes() {
-        // User decision, superseding §5.5's 45-second `[START]`: the cadence is
-        // a wave every fifteen minutes. The cadence *is* the wave cycle —
-        // telegraph, impact, recovery — because the next telegraph begins the
-        // moment the last recovery ends.
+    fn a_wave_lands_every_five_minutes() {
+        // User decision, superseding the fifteen-minute cadence (and §5.5's
+        // 45-second `[START]` before it): a wave every five minutes. The
+        // cadence *is* the wave cycle — telegraph, impact, recovery — because
+        // the next telegraph begins the moment the last recovery ends.
         let cfg = MapConfig::DEFAULT;
         let cadence = cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks;
-        assert_eq!(cadence, 15 * 60 * 30, "a wave every {} s, not 900", cadence / 30);
+        assert_eq!(cadence, 5 * 60 * 30, "a wave every {} s, not 300", cadence / 30);
     }
 
     #[test]
     fn the_lulls_do_not_add_a_dead_quarter_hour_at_each_end() {
         // The whole reason `lull_ticks` exists. Running the opening and closing
-        // windows on `recovery_ticks` would put fourteen minutes of nothing
-        // before the first telegraph and another fourteen after the last wave
-        // had already decided the match.
+        // windows on `recovery_ticks` would put minutes of nothing before the
+        // first telegraph and again after the last wave had already decided
+        // the match.
         let cfg = MapConfig::DEFAULT;
         assert!(
-            cfg.lull_ticks * 4 < cfg.recovery_ticks,
+            cfg.lull_ticks * 2 < cfg.recovery_ticks,
             "a {}-second lull is not short against a {}-second recovery",
             cfg.lull_ticks / 30,
             cfg.recovery_ticks / 30
@@ -458,7 +458,8 @@ mod tests {
 
     #[test]
     fn a_match_is_roughly_the_target_length() {
-        // Three waves at the fifteen-minute cadence, plus a lull at each end.
+        // Three waves at the five-minute cadence, plus a lull at each end:
+        // §5.5's "roughly 15 minutes".
         let cfg = MapConfig::DEFAULT;
         let per_wave = cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks;
         // The last wave closes on a lull rather than a full recovery, so the
@@ -466,8 +467,8 @@ mod tests {
         let total = per_wave * u32::from(cfg.waves) - cfg.recovery_ticks + cfg.lull_ticks * 2;
         let minutes = total / 30 / 60;
         assert!(
-            (25..=45).contains(&minutes),
-            "a full cycle is {minutes} minutes; three waves fifteen minutes apart is ~34"
+            (12..=16).contains(&minutes),
+            "a full cycle is {minutes} minutes; three waves five minutes apart is ~14"
         );
     }
 
