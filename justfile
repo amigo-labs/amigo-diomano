@@ -204,6 +204,12 @@ perf ticks="600":
 sweep seeds="8" profile="all" cap="":
     cargo run --release -p diomano-cli -- sweep --seeds {{seeds}} --profile {{profile}} {{ if cap == "" { "" } else { "--cap " + cap } }}
 
+# Not in `check` either: every ordered pair of opponent levels and styles,
+# both sides scripted, from both sides of the planet. Whether the better
+# player wins — docs/specs/depth.md.
+depth seeds="2" cap="":
+    cargo run --release -p diomano-cli -- sweep --seeds {{seeds}} --profile mirror {{ if cap == "" { "" } else { "--cap " + cap } }}
+
 # Per-tick state hashes, for diffing two runs by hand.
 hash ticks="1000" seed="0x5EED":
     cargo run --release -p diomano-cli -- hash --ticks {{ticks}} --seed {{seed}}

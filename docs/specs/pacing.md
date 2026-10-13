@@ -1,10 +1,12 @@
 # Pacing and safety nets
 
-**Status: design, not yet implemented.** Every other file in `docs/specs/`
-describes code that exists. This one describes five rule changes that do not
-exist yet, agreed on 2026-08-27, and it is written down first because the
-changes touch the state hash and therefore every fixture in the repository —
-that is not a thing to discover halfway through.
+**Status: implemented** (`f2be82f`, `baf14fc`, `8a27d4e`, `0211c1e`, fixtures
+re-recorded in `8f71acd`; the home core grows per wave since `35aa7d2`). Written
+down first, on 2026-08-27, because the changes touch the state hash and
+therefore every fixture in the repository. Line numbers below are as of that
+date. Since then the tide runs a wave every five minutes instead of fifteen
+and the scripted opponent is a different program (`docs/specs/depth.md`);
+what this document calls `WAR_SCRIPT` and `PHASE_WAR` no longer exists.
 
 Supersedes the playtest-balance paragraph at the end of `PLAN.md`.
 

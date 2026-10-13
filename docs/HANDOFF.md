@@ -529,7 +529,7 @@ score = "per_wave"
 [mode.tide]
 telegraph_ticks = 900        # 30 s visible warning
 impact_ticks    = 600        # 20 s surge and recede
-recovery_ticks  = 25500      # 14:10 calm — a wave every 15 minutes
+recovery_ticks  = 7500       # 4:10 calm — a wave every 5 minutes
 lull_ticks      = 2700       # 90 s before the first wave and after the last
 escalation      = 150        # percent per wave, integer
 
@@ -574,21 +574,22 @@ its anchor. Escalation provides the match clock without a countdown UI.
 
 **Victory** — all `[START]`:
 
-- 3 waves, **fifteen minutes apart** (user decision, superseding the `[START]` of
-  7 waves 45 seconds apart, which put a whole match inside six minutes). Score
-  per wave = habitable cells under own influence, sampled at wave peak. Most
-  waves won takes the match.
-- The opening and closing calm are `lull_ticks`, not `recovery_ticks`: at this
-  cadence a recovery is fourteen minutes, and running the two ends on it would
-  put fourteen minutes of nothing before the first telegraph and another
-  fourteen after the last wave had already decided the match.
-- Sudden death: influence reaching 0 is an immediate loss, whatever the score.
-- Target match length ~34 minutes: three waves at the cadence plus the two lulls.
-- **Known consequence, unmeasured against a human.** The scripted opponent is
-  tick-paced and beats a player who never acts by siege at around tick 3,400,
-  while the first wave now lands at 3,900 — so an idle match against the AI ends
-  before any wave. Against a player who plays, and against another human, the
-  wave clock is the match clock as §5.5 intends. Phase 8 playtesting.
+- 3 waves, **five minutes apart** (user decision 2026-10-13, superseding the
+  fifteen-minute cadence, which superseded the `[START]` of 7 waves 45 seconds
+  apart). Peaks at 2:10, 7:10 and 12:10. Score per wave = habitable cells under
+  own influence, sampled at wave peak. Most waves won takes the match.
+- The opening and closing calm are `lull_ticks`, not `recovery_ticks`: running
+  the two ends on a recovery would put minutes of nothing before the first
+  telegraph and again after the last wave had already decided the match.
+- Sudden death: influence at 0 for the 90 s grace window, armed by the first
+  wave, loses whatever the score (`docs/specs/pacing.md`).
+- Target match length ~14 minutes — §5.5's "roughly 15": three waves at the
+  cadence plus the two lulls. The fifteen-minute cadence made it 34, and a
+  sweep found whole recoveries in which nothing a spectator would notice
+  happened at all (`docs/specs/depth.md`).
+- The planet hatches the land the next peak will drown
+  (`tide::next_peak_level`): the forecast every terraforming decision is a bet
+  against.
 
 **There is no starting land connection, on any profile** (user decision). The
 carved contact corridor is gone: a ridge running half the planet's circumference
