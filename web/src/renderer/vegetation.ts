@@ -35,6 +35,14 @@ import type { QualityTier } from "../main";
 import { SKY_GLSL } from "./atmosphere";
 import { readGlb } from "./geometry";
 import { SPECIES, buildingModels, floraModels, propModels } from "./models";
+import {
+  CHAMPION_ACCENT,
+  LEADER_ACCENT,
+  MAGNET_TEAM,
+  SETTLEMENT_TEAM,
+  WALKER_TEAM,
+  teamColour,
+} from "./palette";
 import { cellDirectionInto } from "./planet";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 import type { View } from "./view";
@@ -358,7 +366,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   const spin = new THREE.Quaternion();
   const colour = new THREE.Color();
   /** Hoisted: this is inside a per-walker loop that runs every tick. */
-  const leaderTint = new THREE.Color(1.0, 0.95, 0.7);
+  const leaderTint = new THREE.Color(...LEADER_ACCENT);
   /** One face edge spans a quarter of the circumference. */
   const cellScale = (Math.PI * 0.5 * BASE_RADIUS) / sim.N;
 
@@ -603,9 +611,8 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       const leader = (p.flags & WALKER_LEADER) !== 0;
       // Owner hue, then rank on top of it: a champion has to be findable in a
       // crowd of its own colour, and it had no distinguishing mark at all.
-      if (p.owner === 0) colour.setRGB(1.0, 0.85, 0.5);
-      else colour.setRGB(0.5, 0.85, 1.0);
-      if (champion) colour.setRGB(1.0, 0.42, 0.24);
+      colour.setRGB(...teamColour(WALKER_TEAM, p.owner));
+      if (champion) colour.setRGB(...CHAMPION_ACCENT);
       else if (leader) colour.lerp(leaderTint, 0.55);
 
       let f = figures.get(p.id);
@@ -747,7 +754,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       for (const s of settlements) {
         // Warm for the first god, cool for the second — the same two moods the
         // terrain shader blends by influence.
-        colour.setRGB(s.owner === 0 ? 0.95 : 0.62, 0.82, s.owner === 0 ? 0.6 : 0.98);
+        colour.setRGB(...teamColour(SETTLEMENT_TEAM, s.owner));
         const blocks = Math.min(6, 1 + s.tier);
         // What the tier builds: huts, then houses, then a keep at the centre of
         // a town — so a village and a citadel differ in kind, not only in count.
@@ -814,7 +821,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
         const my = sim.e.dio_magnet_y(player);
         cellDirectionInto(dir, face, mx + 0.5, my + 0.5, sim.N);
         place(magnets, m, radiusAt(face, mx, my), cellScale * 2.2, (tick / 30) * 0.35);
-        colour.setRGB(player === 0 ? 1.0 : 0.55, 0.9, player === 0 ? 0.55 : 1.0);
+        colour.setRGB(...teamColour(MAGNET_TEAM, player));
         magnets.instanceColor?.setXYZ(m, colour.r, colour.g, colour.b);
         m += 1;
       }

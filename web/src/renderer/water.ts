@@ -34,6 +34,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { SKY_GLSL } from "./atmosphere";
+import { WATER_GOD } from "./palette";
 import { BASE_RADIUS } from "./scale";
 import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
@@ -287,8 +288,8 @@ export function createWater(sim: Sim, view: View): Water {
       uWarning: view.warning,
       uSurge: view.surge,
       uTier: { value: 2 },
-      uGodA: { value: new THREE.Color(1.05, 0.95, 0.85) },
-      uGodB: { value: new THREE.Color(0.85, 0.92, 1.1) },
+      uGodA: { value: new THREE.Color(...WATER_GOD[0]) },
+      uGodB: { value: new THREE.Color(...WATER_GOD[1]) },
     },
   });
 
