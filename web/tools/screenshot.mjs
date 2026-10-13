@@ -109,6 +109,10 @@ async function main() {
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    // One capture through a software renderer on a loaded runner has been
+    // measured at fifteen seconds and more; Playwright's 30-second default
+    // failed runs for reasons the client had no part in.
+    page.setDefaultTimeout(120_000);
     // Recorded, not thrown: an exception inside an event listener never reaches
     // this `try`. Checked before every screenshot and once at the end.
     const pageErrors = [];
@@ -186,10 +190,12 @@ async function main() {
     // like weather rather than like a level. Ticked forward from the console
     // rather than waited out: the first wave is minutes away.
     //
-    // With the opponent off, deliberately. The scripted AI can win by siege
-    // against a player who never acts well before the first wave lands at the
-    // shipped cadence, and a world that has ended freezes — so on the normal
-    // page this loop would tick a frozen world forever and see no wave.
+    // With the opponent on: the page above is `?seed=5eed`, which leaves it
+    // playing, and the pictures should show the match as shipped. It cannot
+    // end the match before this loop sees the wave land — sudden death is
+    // armed only once the first wave has peaked (`tide::sudden_death_armed`),
+    // and a world that ended would freeze and never reach impact. The guard
+    // below still accepts an ended match rather than looping on it.
     const phase = await page.evaluate(() => {
       const sim = window.diomano.sim;
       for (let i = 0; i < 60000 && sim.e.dio_tide_phase() !== 2; i++) sim.tick();
@@ -211,18 +217,24 @@ async function main() {
 
     // Force the match to its end quickly: tick the sim hard from the console.
     // (The dev handle exists exactly for this kind of interrogation.)
+    //
+    // Enough ticks to reach the end on the wave score from the first impact:
+    // the last recovery closes at tick 24,900 (three waves five minutes
+    // apart), and an idle player is no longer guaranteed to lose by sudden
+    // death first, so 12,000 stopped short of any outcome at all.
     const { outcome, decidedAt } = await page.evaluate(() => {
       const sim = window.diomano.sim;
-      for (let i = 0; i < 12000 && sim.e.dio_outcome() === 0; i++) sim.tick();
+      for (let i = 0; i < 26000 && sim.e.dio_outcome() === 0; i++) sim.tick();
       return { outcome: sim.e.dio_outcome(), decidedAt: sim.e.dio_tick_count() };
     });
-    if (outcome === 0) fail("12,000 forced ticks and no outcome — the match never ends");
-    // Minimum match length: telegraph (300) + half impact (75) after the first
-    // calm (900) is the first wave peak at tick 1,275. An outcome before that
-    // means somebody's spawn dissolved with no war fought — the instant-defeat
-    // regression this line exists to catch.
-    if (decidedAt < 1275) {
-      fail(`match decided at tick ${decidedAt}, before the first wave peak (1,275)`);
+    if (outcome === 0) fail("26,000 forced ticks and no outcome — the match never ends");
+    // Minimum match length: the first wave peaks at lull (2,700) + telegraph
+    // (900) + half the impact (300) = tick 3,900, and sudden death is armed
+    // only from there. An outcome before that means somebody's spawn dissolved
+    // with no war fought — the instant-defeat regression this line exists to
+    // catch.
+    if (decidedAt < 3900) {
+      fail(`match decided at tick ${decidedAt}, before the first wave peak (3,900)`);
     }
     console.log(`  forced outcome: ${outcome} at tick ${decidedAt}`);
     // One rendered frame notices the outcome; the card follows 2.5 s later.

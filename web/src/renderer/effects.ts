@@ -22,6 +22,16 @@
  * The ring is instrumentation and excluded from the state hash, so nothing here
  * can desync a match.
  *
+ * # And by the population
+ *
+ * Fights, and settlements founded, rising a tier and falling, used to be
+ * audible and nothing else. They come from `worldEvents.ts` — the same diff
+ * the sound reads — and draw small: sparks at a clash, dust and the side's
+ * colours thrown down where a settlement fell, a slow column of light where
+ * one rose, a puff where one was founded. Tinted by owner from `palette.ts`,
+ * and held to a per-frame budget so a wave that takes a coastline at once
+ * cannot evict a power still in the air.
+ *
  * # One draw call
  *
  * Every particle for every effect is an instance of one small octahedron, in one
@@ -33,11 +43,19 @@
 import * as THREE from "three";
 import type { Sim, VerbEventView } from "../main";
 import { VERB } from "../verbs";
+import type { WorldEvent } from "../worldEvents";
+import { SETTLEMENT_TEAM, teamColour } from "./palette";
 import { cellDirectionInto } from "./planet";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 
 /** Live particles. Beyond this the oldest are recycled. */
 const MAX_PARTICLES = 900;
+
+/**
+ * Most particles the population's own events (`worldEvents.ts`) may start in
+ * one frame — a sixth of the pool, so a mass fall never evicts a power.
+ */
+const WORLD_BUDGET = 150;
 
 interface Particle {
   /** Unit direction from the planet centre. */
@@ -63,7 +81,12 @@ export interface Effects {
    *   they neither stutter at 30 Hz nor slow down when the tick rate does.
    * @returns Camera shake amplitude in radii, for the caller to apply.
    */
-  sync(sim: Sim, events: readonly VerbEventView[], dtMs: number): number;
+  sync(
+    sim: Sim,
+    events: readonly VerbEventView[],
+    world: readonly WorldEvent[],
+    dtMs: number,
+  ): number;
   /** Drop every live particle and the shake. A restart calls this. */
   reset(): void;
 }
@@ -256,10 +279,85 @@ export function createEffects(sim: Sim): Effects {
     }
   };
 
+  // The population's moments, tinted by whose they were. Dimmer than the
+  // powers' palettes and a fraction of their counts: a battle is dozens of
+  // these a minute, a power is one, and the picture must not say they matter
+  // equally.
+  const teamA = new THREE.Color();
+  const teamB = new THREE.Color();
+  const tint = (out: THREE.Color, owner: number, gain: number): THREE.Color => {
+    const [r, g, b] = teamColour(SETTLEMENT_TEAM, owner);
+    return out.setRGB(r * gain, g * gain, b * gain);
+  };
+  const SPARK = new THREE.Color(0.3, 0.24, 0.14);
+  const GLOW = new THREE.Color(0.2, 0.17, 0.08);
+
+  const c = cellScale;
+
+  /** Particles this event throws. Returns how many, against `WORLD_BUDGET`. */
+  const spawnWorld = (ev: WorldEvent): number => {
+    if (ev.kind === "merge" || (ev.kind === "clash" && !ev.located)) return 0;
+    cellDirectionInto(scratch, ev.face, ev.x + 0.5, ev.y + 0.5, sim.N);
+    const dir = scratch.clone();
+    const radius = surfaceAt(ev.face, ev.x, ev.y);
+    switch (ev.kind) {
+      case "clash": {
+        // Steel on steel: a tight, fast spray gone in half a second, a hot
+        // white core and a few sparks in each side's colour.
+        const a = tint(teamA, 0, 0.3);
+        const b = tint(teamB, 1, 0.3);
+        emit(dir, radius, 4, 0.03, c * 0.3, c * 3, c * 0.16, 0.5, SPARK, 2.4);
+        emit(dir, radius, 3, 0.026, c * 0.3, c * 3, c * 0.14, 0.45, a, 2.4);
+        emit(dir, radius, 3, 0.026, c * 0.3, c * 3, c * 0.14, 0.45, b, 2.4);
+        return 10;
+      }
+      case "fell": {
+        // Masonry: a low, wide cloud of dust that hangs, and the side's
+        // colours thrown up and falling back — the banners coming down. A
+        // larger town leaves a larger cloud.
+        const size = 1 + Math.min(ev.tier, 4) * 0.25;
+        const own = tint(teamA, ev.owner, 0.22);
+        emit(dir, radius, 16, 0.008, c * 1.4 * size, c * 1.2, c * 0.4, 2.2, DUST, 0.2);
+        emit(dir, radius, 10, 0.03, c * 0.6, c * 1.6, c * 0.18, 1.3, own, 2.6);
+        shake = Math.max(shake, c * 0.12);
+        return 26;
+      }
+      case "rose": {
+        // A column of the side's light, climbing and never falling: the place
+        // grew. Slow, so it reads as a glow rather than a burst.
+        const own = tint(teamA, ev.owner, 0.16);
+        emit(dir, radius, 12, 0.012, c * 0.8, c * 0.2, c * 0.26, 2.4, own, 0);
+        emit(dir, radius, 6, 0.016, c * 0.4, c * 0.1, c * 0.22, 2.0, GLOW, 0);
+        return 18;
+      }
+      case "founded": {
+        // A small puff where the first roof went up.
+        const own = tint(teamA, ev.owner, 0.2);
+        emit(dir, radius, 6, 0.006, c * 0.7, c * 0.8, c * 0.26, 1.2, DUST, 0.3);
+        emit(dir, radius, 4, 0.012, c * 0.4, c * 0.4, c * 0.16, 1.0, own, 0.4);
+        return 10;
+      }
+    }
+  };
+
   return {
     group,
-    sync(_sim: Sim, events: readonly VerbEventView[], dtMs: number): number {
+    sync(
+      _sim: Sim,
+      events: readonly VerbEventView[],
+      world: readonly WorldEvent[],
+      dtMs: number,
+    ): number {
       for (const ev of events) spawn(ev);
+      // A wave's impact can take a dozen settlements in one tick. The pool
+      // would recycle rather than overflow, but what it recycles first is the
+      // oldest — a power's column still in the air — so the population gets a
+      // budget per frame and the rest of a mass fall goes unthrown.
+      let spent = 0;
+      for (const ev of world) {
+        if (spent >= WORLD_BUDGET) break;
+        spent += spawnWorld(ev);
+      }
 
       const dt = Math.min(dtMs, 100) / 1000;
       let live = 0;

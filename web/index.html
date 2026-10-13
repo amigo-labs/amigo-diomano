@@ -19,7 +19,7 @@
 
           .overlay      the title and end cards, outside the match (§9.4)
           .radial       the power menu, alive only while right-click holds it
-          .hud          three lines in a corner, plus transient markers
+          .hud          four lines in a corner, a banner and a coaching line
           #fallback     an epitaph, if WebGL2 or WebAssembly is missing
 
         Everything else is a full-bleed canvas and a black page behind the
@@ -251,13 +251,55 @@
         color: #c8cdd8;
         font-variant-numeric: tabular-nums;
       }
+      /*
+        The opponent's level: three buttons, one chosen. Like the slider, a
+        click here is stopped before it reaches the card (`ui.ts`), so choosing
+        a level never starts the match by accident.
+      */
+      .overlay .level {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        margin: 0 0 22px;
+        color: #a8b0c0;
+      }
+      .overlay .level span {
+        margin-right: 6px;
+      }
+      .overlay .level button {
+        margin: 0;
+        padding: 4px 14px;
+      }
+      .overlay .level button.chosen {
+        border-color: #ffe9c0;
+        color: #ffe9c0;
+        background: rgba(255, 233, 192, 0.1);
+      }
+      /* The end card's per-wave rows: won in your colour, lost in theirs. */
+      .overlay table.waves td {
+        font-variant-numeric: tabular-nums;
+      }
+      .overlay table.waves tr.won td:last-child {
+        color: #ffb347;
+      }
+      .overlay table.waves tr.lost td:last-child {
+        color: #7fa6ff;
+      }
+      .overlay table.waves tr.draw td:last-child {
+        color: #a8b0c0;
+      }
+      .overlay .opponent {
+        margin-top: -10px;
+      }
 
       /*
-        The readouts. Three lines top-left, transient markers wherever an applied
-        verb landed, a banner for the tide's phase changes and a coaching line at
-        the bottom. Below .radial (5) and .overlay (10) in the stack, because a
-        menu or a card owning the screen has to sit over this, and it never takes
-        a pointer event at any depth.
+        The readouts. Four lines top-left, a banner for the tide's phase changes
+        and each wave's result, and a coaching line at the bottom. (Pointers to
+        events off screen are drawn in the WebGL scene, not here — see
+        `renderer/indicators.ts`.) Below .radial (5) and .overlay (10) in the
+        stack, because a menu or a card owning the screen has to sit over this,
+        and it never takes a pointer event at any depth.
       */
       .hud {
         position: fixed;
@@ -295,6 +337,26 @@
       /* The wave is coming, or landing. The one place the panel raises its voice. */
       .hud-tide.warning {
         color: #ff9d5e;
+      }
+      /*
+        The wave tally: one mark per wave — won in your colour, lost in theirs,
+        the rest grey. The match is decided on this row, so it is the one line
+        of the panel that uses both sides' colours.
+      */
+      .hud-waves {
+        letter-spacing: 0.35em;
+        color: #6b7484;
+        margin-top: 1px;
+      }
+      .hud-waves .won {
+        color: #ffb347;
+      }
+      .hud-waves .lost {
+        color: #7fa6ff;
+      }
+      .hud-waves .draw,
+      .hud-waves .skipped {
+        color: #a8b0c0;
       }
       /*
         Your people have no land left and sudden death is counting. Only ever
@@ -352,6 +414,13 @@
       }
       .hud-banner.shown {
         opacity: 1;
+      }
+      /* A wave's result, in the colour of whoever took it. */
+      .hud-banner.won {
+        color: #ffcf8a;
+      }
+      .hud-banner.lost {
+        color: #a9c2ff;
       }
       /*
         One coaching line, retired the moment the player does the thing. It needs
@@ -459,6 +528,12 @@
           <label for="volume">Lautstärke</label>
           <input id="volume" type="range" min="0" max="100" step="1" value="50" />
           <output for="volume">50%</output>
+        </p>
+        <p class="level" id="title-level">
+          <span>Gegner</span>
+          <button type="button" data-level="0">Leicht</button>
+          <button type="button" data-level="1" class="chosen">Normal</button>
+          <button type="button" data-level="2">Schwer</button>
         </p>
         <p class="hint" id="title-hint">Lädt …</p>
       </div>
