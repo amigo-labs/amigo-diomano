@@ -19,7 +19,7 @@
 
           .overlay      the title and end cards, outside the match (§9.4)
           .radial       the power menu, alive only while right-click holds it
-          .hud          three lines in a corner, plus transient markers
+          .hud          four lines in a corner, a banner and a coaching line
           #fallback     an epitaph, if WebGL2 or WebAssembly is missing
 
         Everything else is a full-bleed canvas and a black page behind the
@@ -253,11 +253,12 @@
       }
 
       /*
-        The readouts. Three lines top-left, transient markers wherever an applied
-        verb landed, a banner for the tide's phase changes and a coaching line at
-        the bottom. Below .radial (5) and .overlay (10) in the stack, because a
-        menu or a card owning the screen has to sit over this, and it never takes
-        a pointer event at any depth.
+        The readouts. Four lines top-left, a banner for the tide's phase changes
+        and each wave's result, and a coaching line at the bottom. (Pointers to
+        events off screen are drawn in the WebGL scene, not here — see
+        `renderer/indicators.ts`.) Below .radial (5) and .overlay (10) in the
+        stack, because a menu or a card owning the screen has to sit over this,
+        and it never takes a pointer event at any depth.
       */
       .hud {
         position: fixed;
@@ -295,6 +296,26 @@
       /* The wave is coming, or landing. The one place the panel raises its voice. */
       .hud-tide.warning {
         color: #ff9d5e;
+      }
+      /*
+        The wave tally: one mark per wave — won in your colour, lost in theirs,
+        the rest grey. The match is decided on this row, so it is the one line
+        of the panel that uses both sides' colours.
+      */
+      .hud-waves {
+        letter-spacing: 0.35em;
+        color: #6b7484;
+        margin-top: 1px;
+      }
+      .hud-waves .won {
+        color: #ffb347;
+      }
+      .hud-waves .lost {
+        color: #7fa6ff;
+      }
+      .hud-waves .draw,
+      .hud-waves .skipped {
+        color: #a8b0c0;
       }
       /*
         Your people have no land left and sudden death is counting. Only ever
@@ -352,6 +373,13 @@
       }
       .hud-banner.shown {
         opacity: 1;
+      }
+      /* A wave's result, in the colour of whoever took it. */
+      .hud-banner.won {
+        color: #ffcf8a;
+      }
+      .hud-banner.lost {
+        color: #a9c2ff;
       }
       /*
         One coaching line, retired the moment the player does the thing. It needs

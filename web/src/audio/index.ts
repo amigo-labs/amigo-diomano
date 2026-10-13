@@ -57,8 +57,8 @@ export interface Audio {
   refusal(): void;
   /** Earth being worked. Bumped per applied raise/lower, tuned to what moved. */
   sculpt(material: number, handMaterial: number): void;
-  /** Match-end sting. */
-  sting(kind: "win" | "loss" | "draw"): void;
+  /** Match-end sting, or the shorter one for a single wave's result. */
+  sting(kind: "win" | "loss" | "draw" | "wave-won" | "wave-lost" | "wave-draw"): void;
   /** Master volume, 0..1. Unaffected by mute — this is the remembered level. */
   volume(): number;
   /** Set master volume, 0..1. Persisted, and unmutes if it is *raised*. */
@@ -319,7 +319,37 @@ export function createAudio(localPlayer = 0): Audio {
     sting(kind): void {
       const s = ensure();
       if (!s) return;
-      if (kind === "win") {
+      if (kind === "wave-won") {
+        // A wave's result, not the match's: two notes up a fourth, short and
+        // bright, so the end-of-match triad still has somewhere to go.
+        s.voice({ freq: 392, gain: 0.16, decay: 0.5, send: 0.5 });
+        s.voice({ freq: 523, gain: 0.18, decay: 0.9, delay: 0.14, send: 0.55 });
+        s.voice({ freq: 1046, gain: 0.04, decay: 0.7, delay: 0.14, send: 0.55 });
+      } else if (kind === "wave-lost") {
+        // Two notes down a fourth instead, darker and filtered: a setback, not
+        // the end.
+        s.voice({
+          freq: 294,
+          type: "triangle",
+          gain: 0.16,
+          decay: 0.5,
+          filter: { type: "lowpass", from: 1400, to: 700 },
+          send: 0.45,
+        });
+        s.voice({
+          freq: 220,
+          freqEnd: 208,
+          type: "triangle",
+          gain: 0.18,
+          decay: 1.0,
+          delay: 0.16,
+          filter: { type: "lowpass", from: 1100, to: 400 },
+          send: 0.45,
+        });
+      } else if (kind === "wave-draw") {
+        s.voice({ freq: 330, gain: 0.14, decay: 0.7, send: 0.5 });
+        s.voice({ freq: 330, gain: 0.1, decay: 0.7, delay: 0.16, send: 0.5 });
+      } else if (kind === "win") {
         // A rising triad, staggered, each note left ringing in the room.
         s.voice({ freq: 330, gain: 0.26, decay: 1.0, send: 0.6 });
         s.voice({ freq: 415, gain: 0.26, decay: 1.0, delay: 0.22, send: 0.6 });

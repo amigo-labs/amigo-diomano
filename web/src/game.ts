@@ -95,7 +95,12 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   const audio = createAudio(LOCAL_PLAYER);
   // The readouts §8 did not allow for, and the reason the deviation was worth
   // it — see the header of `hud.ts` and the note in PLAN.md.
-  const hud = createHud(sim, LOCAL_PLAYER);
+  const hud = createHud(sim, LOCAL_PLAYER, {
+    // A wave's result gets its own short sting, so a peak that lands while
+    // the player is looking elsewhere is still heard to have been decided.
+    onWaveScored: (result) =>
+      audio.sting(result === "won" ? "wave-won" : result === "lost" ? "wave-lost" : "wave-draw"),
+  });
   /**
    * What the population did since the last frame, diffed once and read by the
    * sound, the particles, the off-screen pips and the readouts alike.
@@ -415,7 +420,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     indicators.sync(camera.camera, fired.events, world, dtMs);
     // The same applied-verb list the effects and the sounds read, so a
     // coaching hint retires on what the simulation did.
-    hud.sync(fired.events);
+    hud.sync(fired.events, world);
     if (radial.open && !menuWasOpen) hud.noteMenuOpened();
     menuWasOpen = radial.open;
     atmosphere.sync(
@@ -451,6 +456,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     view,
     effects,
     indicators,
+    hud,
     radial,
     audio,
     keys,
