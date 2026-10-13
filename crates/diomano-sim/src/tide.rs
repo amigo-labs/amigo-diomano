@@ -162,15 +162,22 @@ pub fn next_peak_level(w: &World) -> Option<i16> {
 
 /// Armageddon: immediately triggers the final tide wave at maximum strength
 /// (§5.1). The stalemate breaker, and deliberately awkward to invoke (§8).
-pub fn trigger_armageddon(w: &mut World) {
-    if w.tide.phase == TIDE_DONE {
-        return;
-    }
+///
+/// Returns whether it did anything. Once the final wave is under way —
+/// natural or summoned — there is nothing left to bring forward. It used to
+/// restart the final telegraph every time: a god casting it in the last
+/// recovery pushed the end of the match back another fifty seconds per cast,
+/// for ever, and the scripted opponent found that loop within a sweep.
+pub fn trigger_armageddon(w: &mut World) -> bool {
     let last = w.cfg.waves.saturating_sub(1);
+    if w.tide.phase == TIDE_DONE || (w.tide.wave >= last && w.tide.phase != TIDE_CALM) {
+        return false;
+    }
     w.tide.wave = last;
     w.tide.strength = wave_strength(w, last).saturating_mul(2);
     w.tide.scored = 0;
     enter(w, TIDE_TELEGRAPH);
+    true
 }
 
 /// Score per wave = habitable cells under own influence, sampled at wave peak.
@@ -404,10 +411,23 @@ mod tests {
     fn armageddon_jumps_straight_to_the_final_wave_at_double_strength() {
         let mut w = tidal_world();
         let natural_last = wave_strength(&w, w.cfg.waves - 1);
-        trigger_armageddon(&mut w);
+        assert!(trigger_armageddon(&mut w), "armageddon did nothing");
         assert_eq!(w.tide.phase, TIDE_TELEGRAPH, "armageddon skipped the warning");
         assert_eq!(w.tide.wave, w.cfg.waves - 1);
         assert!(w.tide.strength > natural_last, "armageddon is not the strongest wave");
+    }
+
+    #[test]
+    fn armageddon_cannot_postpone_the_end_once_the_final_wave_is_under_way() {
+        let mut w = tidal_world();
+        assert!(trigger_armageddon(&mut w));
+        for _ in 0..w.cfg.telegraph_ticks + w.cfg.impact_ticks + 10 {
+            step(&mut w);
+        }
+        assert_eq!(w.tide.phase, TIDE_RECOVERY);
+        let before = w.tide;
+        assert!(!trigger_armageddon(&mut w), "a second armageddon restarted the final wave");
+        assert_eq!(w.tide, before);
     }
 
     #[test]

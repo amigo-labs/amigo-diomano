@@ -121,10 +121,9 @@ pub fn apply(w: &mut World, player: usize, cmd: &Command) {
         // With nobody to promote there is no champion, and the refund below
         // undoes the gate: the mana or the pickup charge comes back.
         VERB_CHAMPION => crate::walkers::make_champion(w, player),
-        VERB_ARMAGEDDON => {
-            crate::tide::trigger_armageddon(w);
-            true
-        }
+        // Refunded once the final wave is already under way: see
+        // `tide::trigger_armageddon`.
+        VERB_ARMAGEDDON => crate::tide::trigger_armageddon(w),
         // Mixing is impossible: picking up a second material requires depositing
         // the first (§4.2). A full hand ignores the verb rather than swapping.
         // The client does not send this any more — an empty hand takes what is
