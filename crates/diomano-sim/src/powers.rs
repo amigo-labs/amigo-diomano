@@ -646,6 +646,21 @@ pub fn parse_manifest(src: &str) -> Result<MapConfig, ParseError> {
                         .ok_or_else(|| err(line_no, "not an integer"))?
                         .clamp(0, 1) as u8;
                 }
+                "level" | "style" => {
+                    let max = if key == "level" {
+                        crate::ai::LEVEL_COUNT - 1
+                    } else {
+                        crate::ai::STYLE_COUNT - 1
+                    };
+                    let v = parse_int(value)
+                        .ok_or_else(|| err(line_no, "not an integer"))?
+                        .clamp(0, i64::from(max)) as u8;
+                    if key == "level" {
+                        cfg.ai_level = [v; PLAYERS];
+                    } else {
+                        cfg.ai_style = [v; PLAYERS];
+                    }
+                }
                 _ => return Err(err(line_no, "unknown key in [ai]")),
             },
             other => {
@@ -731,6 +746,16 @@ pub fn parse_log_header(src: &str) -> Result<LogHeader, ParseError> {
             "escalation" => cfg.escalation = v.clamp(100, 1000) as u16,
             "strength" => cfg.wave_strength = v.clamp(0, 4096) as i16,
             "ai" => cfg.ai_enabled = u8::from(v != 0),
+            // The opponent's level and style, for every side it plays, and
+            // whether it plays both. Optional: a log without them replays
+            // the default opponent, which is what every older log recorded.
+            "ai_level" => {
+                cfg.ai_level = [v.clamp(0, i64::from(crate::ai::LEVEL_COUNT - 1)) as u8; PLAYERS];
+            }
+            "ai_style" => {
+                cfg.ai_style = [v.clamp(0, i64::from(crate::ai::STYLE_COUNT - 1)) as u8; PLAYERS];
+            }
+            "ai_mirror" => cfg.ai_mirror = u8::from(v != 0),
             // Keep simulating past the decided outcome. Corpus logs set this:
             // a default match decides around tick 10,000 and a frozen second
             // half would gut the §6.3 coverage. Real matches freeze.
@@ -1408,6 +1433,15 @@ enabled = true
     fn log_header_rejects_a_mismatched_grid() {
         assert!(parse_log_header("seed 1\nn 64\nticks 10\n").is_ok());
         assert!(parse_log_header("seed 1\nn 96\n").is_err());
+        let h = parse_log_header("seed 1\nai 1\nai_level 2\nai_style 9\nai_mirror 1\n")
+            .expect("the opponent's keys parse");
+        assert_eq!(h.cfg.ai_level, [crate::ai::LEVEL_HARD; PLAYERS]);
+        assert_eq!(
+            h.cfg.ai_style,
+            [crate::ai::STYLE_COUNT - 1; PLAYERS],
+            "a style past the end clamps"
+        );
+        assert_eq!(h.cfg.ai_mirror, 1);
     }
 
     #[test]

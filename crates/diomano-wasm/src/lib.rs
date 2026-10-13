@@ -104,6 +104,22 @@ pub extern "C" fn dio_init(seed: u32, terrain: u32, ai_enabled: u32) {
     m.rebuild_all(world());
 }
 
+/// Set the scripted opponent's level (0 easy, 1 normal, 2 hard) and style
+/// (0 balanced, 1 turtle, 2 rush, 3 disaster), for every side it plays.
+///
+/// Configuration, not state: call it after [`dio_init`] and before the first
+/// [`dio_tick`]. Values past the end clamp to the last level or style. Reads
+/// nothing back into the hash on its own — the opponent's *behaviour* does,
+/// which is why a level chosen on the title card has to reach both peers.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_set_ai(level: u32, style: u32) {
+    let w = world();
+    let level = level.min(u32::from(diomano_sim::ai::LEVEL_COUNT - 1)) as u8;
+    let style = style.min(u32::from(diomano_sim::ai::STYLE_COUNT - 1)) as u8;
+    w.cfg.ai_level = [level; PLAYERS];
+    w.cfg.ai_style = [style; PLAYERS];
+}
+
 /// Queue a command for the next [`dio_tick`].
 ///
 /// Commands are buffered rather than applied, because §4.1 puts command
@@ -448,6 +464,21 @@ pub extern "C" fn dio_outcome() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn dio_wave_count() -> u32 {
     u32::from(world().cfg.waves)
+}
+
+/// The sea level the next wave peak will reach (`tide::next_peak_level`),
+/// or `i32::MIN` once no wave is left. The planet shader hatches dry land
+/// below it: the forecast every terraforming decision is made against.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_next_peak_level() -> i32 {
+    diomano_sim::tide::next_peak_level(world()).map_or(i32::MIN, i32::from)
+}
+
+/// 1 from the current wave's peak (when it was scored) until the next wave
+/// begins: the edge the client stages the wave result on.
+#[unsafe(no_mangle)]
+pub extern "C" fn dio_tide_scored() -> u32 {
+    u32::from(world().tide.scored)
 }
 
 #[unsafe(no_mangle)]

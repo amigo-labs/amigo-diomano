@@ -42,6 +42,8 @@ export type QualityTier = 1 | 2;
 interface RawExports {
   memory: WebAssembly.Memory;
   dio_init(seed: number, terrain: number, ai: number): void;
+  /** Opponent level (0 easy, 1 normal, 2 hard) and style; after init, before the first tick. */
+  dio_set_ai(level: number, style: number): void;
   dio_tick(): void;
   dio_push_command(
     player: number,
@@ -104,6 +106,10 @@ interface RawExports {
   dio_tide_offset(): number;
   dio_tide_strength(): number;
   dio_ticks_to_impact(): number;
+  /** Sea level at the next wave peak, or -2^31 once no wave is left. */
+  dio_next_peak_level(): number;
+  /** 1 from the current wave's peak until the next wave begins. */
+  dio_tide_scored(): number;
   /** Consecutive ticks with no influence while sudden death is armed; 0 = safe. */
   dio_doom_ticks(player: number): number;
   /** The sudden-death grace window, in ticks. */
