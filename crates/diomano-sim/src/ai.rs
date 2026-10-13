@@ -21,11 +21,11 @@
 //!
 //! 1. lifts its own land clear of the **next peak's waterline**
 //!    ([`crate::tide::next_peak_level`]) with earth dug from ground nobody
-//!    scores on — the shallow shelf, neutral land, or, at `LEVEL_HARD`, the
-//!    enemy's own coast;
+//!    scores on — the shallow shelf, neutral land, and above `LEVEL_EASY`
+//!    the enemy's own coast (never its home pedestal);
 //! 2. spends mana instead of hoarding it: earthquakes on the enemy's best
 //!    town, a flood only when the forecast says the enemy loses more land to
-//!    it than it does, armageddon only when it is ahead;
+//!    it than it does, armageddon only to break a level score;
 //! 3. marches when its style says so, over whatever land joins the two
 //!    peoples.
 //!
@@ -39,11 +39,11 @@
 //! bookkeeping, and every scan runs in a fixed order with fixed tie-breaks.
 
 use crate::world::{
-    AiState, Command, CommandBuf, HAND_CAPACITY, HAND_EARTH, MOD_MASK, N, NO_SETTLEMENT, PLAYERS,
-    POWER_ARMAGEDDON, POWER_CHAMPION, POWER_EARTHQUAKE, POWER_FLOOD, POWER_MAGNET, POWER_VOLCANO,
-    TERRACE, TIDE_CALM, TIDE_DONE, TIDE_RECOVERY, VERB_ARMAGEDDON, VERB_CHAMPION, VERB_EARTHQUAKE,
-    VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_NOP, VERB_RAISE, VERB_VOLCANO, World, idx,
-    live_neighbour,
+    AiState, Command, CommandBuf, HAND_CAPACITY, HAND_EARTH, MOD_EXTREME, MOD_INCREASED, MOD_MASK,
+    N, NO_SETTLEMENT, PLAYERS, POWER_ARMAGEDDON, POWER_CHAMPION, POWER_EARTHQUAKE, POWER_FLOOD,
+    POWER_MAGNET, POWER_VOLCANO, TERRACE, TIDE_CALM, TIDE_DONE, TIDE_RECOVERY, VERB_ARMAGEDDON,
+    VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_NOP, VERB_RAISE,
+    VERB_VOLCANO, World, idx, live_neighbour,
 };
 
 /// Slow, generous, never steals and never floods. Thinks every four seconds.
@@ -65,6 +65,18 @@ pub const STYLE_RUSH: u8 = 2;
 pub const STYLE_DISASTER: u8 = 3;
 pub const STYLE_COUNT: u8 = 4;
 
+/// Cells around a home core the opponent never strikes inside. Even the core
+/// cell, which a quake leaves standing (`powers::earthquake`), drowns within
+/// seconds once the pedestal around it is broken: the ash slides into the sea
+/// and takes the soil with it. Traced: one quake beside an idle player's core
+/// was sudden death a grace window later — the "my last cell was shaken"
+/// ending docs/specs/pacing.md rules out.
+const CORE_CLEARANCE: usize = 7;
+
+/// Cells around a home core the opponent never digs inside, for the same
+/// reason.
+const CORE_DIG_CLEARANCE: usize = 2;
+
 /// Earth moved by one held tick of a poured raise or dig: nine cells, a
 /// terrace each.
 const BRUSH_LOAD: u16 = 9 * TERRACE as u16;
@@ -85,8 +97,9 @@ pub struct Tuning {
     pub strike_gap: u32,
     /// Mana it keeps back after paying for any power.
     pub reserve: i32,
-    /// Digs the enemy's land for its own earth.
-    pub steals: bool,
+    /// Digs the enemy's land for its own earth: 0 never, 1 open ground,
+    /// 2 under its towns as well.
+    pub steals: u8,
     /// Picks the best spot on the planet rather than the first good one.
     pub thorough: bool,
     pub floods: bool,
@@ -95,6 +108,9 @@ pub struct Tuning {
     pub volcano: bool,
     /// Sends the army at the enemy's strongest town, and buys champions.
     pub marches: bool,
+    /// Brush modifier for strikes: how much of the enemy's land one quake
+    /// breaks. The same `B` key a player cycles.
+    pub strike_modifier: u8,
 }
 
 /// The tuning for a level and a style. Out-of-range values clamp, so a
@@ -109,12 +125,13 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             strike_after: 2,
             strike_gap: 1_800,
             reserve: 400,
-            steals: false,
+            steals: 0,
             thorough: false,
             floods: false,
             armageddon: false,
             volcano: false,
             marches: false,
+            strike_modifier: 0,
         },
         LEVEL_NORMAL => Tuning {
             think: 45,
@@ -123,12 +140,13 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             strike_after: 1,
             strike_gap: 900,
             reserve: 200,
-            steals: false,
+            steals: 1,
             thorough: true,
             floods: true,
             armageddon: false,
             volcano: false,
             marches: false,
+            strike_modifier: MOD_INCREASED,
         },
         _ => Tuning {
             think: 15,
@@ -137,12 +155,13 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             strike_after: 1,
             strike_gap: 450,
             reserve: 120,
-            steals: true,
+            steals: 2,
             thorough: true,
             floods: true,
             armageddon: true,
             volcano: false,
             marches: false,
+            strike_modifier: MOD_EXTREME,
         },
     };
     match style {
@@ -277,8 +296,17 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
     };
     let between_waves = w.tide.phase == TIDE_CALM || w.tide.phase == TIDE_RECOVERY;
 
-    // 1. Armageddon: end it while ahead.
-    if t.armageddon && between_waves && afford(POWER_ARMAGEDDON) && armageddon_wins(w, player) {
+    // 1. Armageddon, as the stalemate breaker it is: waves level, one
+    // natural wave left, and a doubled final wave would go its way where the
+    // natural one would not. Cast whenever it was merely ahead, it ended
+    // matches at three minutes — a shortcut, not a breaker.
+    let finale = landed.saturating_add(1) >= w.cfg.waves;
+    if t.armageddon
+        && finale
+        && between_waves
+        && afford(POWER_ARMAGEDDON)
+        && armageddon_wins(w, player)
+    {
         return Some((VERB_ARMAGEDDON, home(player), 0));
     }
 
@@ -301,17 +329,20 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
         } else {
             (VERB_EARTHQUAKE, POWER_EARTHQUAKE)
         };
+        // A town if there is one; once there is none, the enemy's best
+        // remaining ground — a home core keeps scoring without a single town.
         if afford(power)
-            && let Some(at) = best_enemy_town(w, enemy)
+            && let Some(at) =
+                best_enemy_town(w, enemy, true).or_else(|| best_spot(w, player, t, Spot::Strike))
         {
-            return Some((verb, at, 0));
+            return Some((verb, at, t.strike_modifier));
         }
     }
 
     // 4. March.
     if t.marches
         && afford(POWER_MAGNET)
-        && let Some(at) = best_enemy_town(w, enemy)
+        && let Some(at) = best_enemy_town(w, enemy, false)
     {
         let m = w.magnet[player];
         if m.active == 0 || (m.face, m.x, m.y) != at {
@@ -385,8 +416,8 @@ fn flood_pays(w: &World, player: usize) -> bool {
 }
 
 /// Armageddon jumps to the last wave at double strength; the skipped waves
-/// score nobody. Cast it only when the waves already won plus that final wave
-/// add up to a win.
+/// score nobody. Worth it only when the waves stand level and the doubled
+/// final wave turns a loss into a win.
 fn armageddon_wins(w: &World, player: usize) -> bool {
     let enemy = (player + 1) % PLAYERS;
     if w.tide.phase == TIDE_DONE {
@@ -401,21 +432,35 @@ fn armageddon_wins(w: &World, player: usize) -> bool {
             won[1] += 1;
         }
     }
+    // Only from level: ahead, the natural waves already win it; behind,
+    // one more wave cannot.
+    if won[player] != won[enemy] {
+        return false;
+    }
     let last = w.cfg.waves.saturating_sub(1);
-    let final_line =
+    let natural = i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last));
+    let doubled =
         i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last)).saturating_mul(2);
-    let high = held_above(w, final_line);
-    let margin = (high[enemy] / 8).max(8);
-    won[player] >= won[enemy] && high[player] > high[enemy] + margin
+    let calm = held_above(w, natural);
+    let storm = held_above(w, doubled);
+    let margin = (storm[enemy] / 8).max(8);
+    // The doubled wave wins it where the natural one would not: the god who
+    // built higher calls down the sea that only high ground survives.
+    calm[player] <= calm[enemy] && storm[player] > storm[enemy] + margin
 }
 
 /// The enemy settlement most worth breaking: highest tier, then one that
-/// would still score at the next peak, then the lowest slot.
-fn best_enemy_town(w: &World, enemy: usize) -> Option<(u8, u8, u8)> {
+/// would still score at the next peak, then the lowest slot. `strike` skips
+/// the ones beside a home core (`CORE_CLEARANCE`); a march may go anywhere.
+fn best_enemy_town(w: &World, enemy: usize, strike: bool) -> Option<(u8, u8, u8)> {
     let line = waterline(w);
     let mut best: Option<(i32, usize)> = None;
     for (i, s) in w.settlements.iter().enumerate() {
-        if !s.alive() || s.owner as usize != enemy {
+        if !s.alive()
+            || s.owner as usize != enemy
+            || (strike
+                && near_home_core(s.face as usize, s.x as usize, s.y as usize, CORE_CLEARANCE))
+        {
             continue;
         }
         let c = idx(s.face as usize, s.x as usize, s.y as usize);
@@ -449,6 +494,14 @@ fn terraform(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), 
     {
         return Some((VERB_LOWER, at, 0));
     }
+    // A hand too full to dig and nothing worth building: empty it where it
+    // costs nobody, or the opponent stands frozen with a full hand for the
+    // rest of the match (traced, at LEVEL_HARD, from 2:25 on).
+    if hand.amount > HAND_CAPACITY - BRUSH_LOAD
+        && let Some(at) = best_spot(w, player, t, Spot::Dump)
+    {
+        return Some((VERB_RAISE, at, 0));
+    }
     None
 }
 
@@ -460,6 +513,11 @@ enum Spot {
     Dig,
     /// Where a hand of water or lava does the enemy most harm.
     Spill,
+    /// Where a strike breaks the most enemy ground that would score.
+    Strike,
+    /// A full hand with nothing worth saving: the deep shelf off its own
+    /// coast, which is new land one day and harms nobody now.
+    Dump,
 }
 
 /// Scan every brush centre on the planet (interior cells, so the poured brush
@@ -473,6 +531,8 @@ fn best_spot(w: &World, player: usize, t: &Tuning, kind: Spot) -> Option<(u8, u8
         Spot::Build => 4,
         Spot::Dig => 3,
         Spot::Spill => 1,
+        Spot::Strike => 5,
+        Spot::Dump => 1,
     };
     let span = 6 * (N - 2) * (N - 2);
     let start = if t.thorough { 0 } else { (usize::from(w.ai[player].decisions) * 7_919) % span };
@@ -533,7 +593,7 @@ fn score_spot(
                 return None;
             }
             match kind {
-                Spot::Build => {
+                Spot::Build | Spot::Dump => {
                     // Never on a footprint: a settlement is only as good as
                     // the exact flatness under it.
                     if town {
@@ -549,14 +609,22 @@ fn score_spot(
                         score += 3; // one or two raises lift it clear
                     } else if h > sea - 8 * terrace {
                         score += 2; // the shelf off its own coast: new land
+                    } else if kind == Spot::Dump {
+                        score += 1;
                     }
                 }
                 Spot::Dig => {
-                    if town_mine {
+                    // Never the enemy's home pedestal: sudden death is meant
+                    // to be "my land drowned" (docs/specs/pacing.md), and a
+                    // quake already leaves the core alone. Digging it out from
+                    // under an idle player by hand was the fastest win in the
+                    // sweep, and the least interesting one.
+                    if town_mine || near_home_core(face, x + dx - 1, y + dy - 1, CORE_DIG_CLEARANCE)
+                    {
                         return None;
                     }
                     if town {
-                        if !t.steals {
+                        if t.steals < 2 {
                             return None;
                         }
                         score += 4;
@@ -565,7 +633,7 @@ fn score_spot(
                     if mine {
                         score -= if h >= line + terrace { 6 } else { 1 };
                     } else if theirs {
-                        if !t.steals {
+                        if t.steals == 0 {
                             return None;
                         }
                         score += if h >= line { 3 } else { 1 };
@@ -583,10 +651,25 @@ fn score_spot(
                         score += if town { 4 } else { 1 };
                     }
                 }
+                Spot::Strike => {
+                    if mine || near_home_core(face, x, y, CORE_CLEARANCE) {
+                        return None;
+                    }
+                    if theirs && h > line && w.habitable(c) {
+                        score += 1;
+                    }
+                }
             }
         }
     }
     Some(score)
+}
+
+/// Within `r` cells of either spawn cell.
+fn near_home_core(face: usize, x: usize, y: usize, r: usize) -> bool {
+    crate::settlements::STARTS
+        .iter()
+        .any(|&(f, sx, sy)| f == face && x.abs_diff(sx) <= r && y.abs_diff(sy) <= r)
 }
 
 #[cfg(test)]
@@ -778,8 +861,8 @@ mod tests {
     }
 
     #[test]
-    fn only_a_hard_opponent_digs_the_enemys_land() {
-        for (level, may) in [(LEVEL_EASY, false), (LEVEL_NORMAL, false), (LEVEL_HARD, true)] {
+    fn an_easy_opponent_never_digs_the_enemys_land() {
+        for (level, may) in [(LEVEL_EASY, false), (LEVEL_NORMAL, true), (LEVEL_HARD, true)] {
             let mut cfg = MapConfig::DEFAULT;
             cfg.ai_enabled = 1;
             cfg.ai_level = [level; PLAYERS];
