@@ -7,9 +7,9 @@
  * absurd way to lose a player. So every read falls back and every write is
  * allowed to do nothing.
  *
- * Lives in its own module because three unrelated things now remember something:
- * the volume and the mute flag (`audio.ts`), and whether the controls overlay is
- * up (`hud.ts`). The title card also reads the volume *before* `audio.ts` is
+ * Lives in its own module because several unrelated things now remember
+ * something: the volume and the mute flag (`audio.ts`), whether the controls
+ * overlay is up (`hud.ts`), and the opponent's level (`main.ts`). The title card also reads the volume *before* `audio.ts` is
  * loaded at all — see `main.ts` — so the helper cannot live inside the audio
  * graph any more.
  */
@@ -40,6 +40,7 @@ export const KEY = {
   volume: "diomano.volume",
   muted: "diomano.muted",
   controls: "diomano.controls",
+  level: "diomano.level",
 } as const;
 
 /** A remembered 0..1 level. */

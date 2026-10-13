@@ -251,6 +251,34 @@
         color: #c8cdd8;
         font-variant-numeric: tabular-nums;
       }
+      /*
+        The opponent's level: three buttons, one chosen. Like the slider, a
+        click here is stopped before it reaches the card (`ui.ts`), so choosing
+        a level never starts the match by accident.
+      */
+      .overlay .level {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        margin: 0 0 22px;
+        color: #a8b0c0;
+      }
+      .overlay .level span {
+        margin-right: 6px;
+      }
+      .overlay .level button {
+        margin: 0;
+        padding: 4px 14px;
+      }
+      .overlay .level button.chosen {
+        border-color: #ffe9c0;
+        color: #ffe9c0;
+        background: rgba(255, 233, 192, 0.1);
+      }
+      .overlay .opponent {
+        margin-top: -10px;
+      }
 
       /*
         The readouts. Four lines top-left, a banner for the tide's phase changes
@@ -487,6 +515,12 @@
           <label for="volume">Lautstärke</label>
           <input id="volume" type="range" min="0" max="100" step="1" value="50" />
           <output for="volume">50%</output>
+        </p>
+        <p class="level" id="title-level">
+          <span>Gegner</span>
+          <button type="button" data-level="0">Leicht</button>
+          <button type="button" data-level="1" class="chosen">Normal</button>
+          <button type="button" data-level="2">Schwer</button>
         </p>
         <p class="hint" id="title-hint">Lädt …</p>
       </div>

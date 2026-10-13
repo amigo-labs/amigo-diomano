@@ -31,10 +31,13 @@
  */
 
 import type { Game, GameOptions } from "./game";
-import { DEFAULT_VOLUME, KEY, remember, rememberedLevel } from "./storage";
-import { type VolumeControl, createUi } from "./ui";
+import { DEFAULT_VOLUME, KEY, remember, remembered, rememberedLevel } from "./storage";
+import { type LevelControl, type VolumeControl, createUi } from "./ui";
 
 export const TIDE = { CALM: 0, TELEGRAPH: 1, IMPACT: 2, RECOVERY: 3, DONE: 4 } as const;
+
+/** The URL's `level=` values, indexed by `dio_set_ai`'s level. */
+const LEVEL_PARAM = ["easy", "normal", "hard"] as const;
 
 /** Quality tiers of §7.3. Tier 3 is out of scope for this run. */
 export type QualityTier = 1 | 2;
@@ -606,8 +609,37 @@ function boot(): void {
     },
   };
 
+  // The opponent's level: the URL's `level=` if it names one, else the last
+  // one chosen here, else Normal. A choice on the card is remembered *and*
+  // written into the URL, like the seed, so a link carries the match it was.
+  // It reaches the simulation in `begin` — the world behind the card was
+  // initialised long before anyone chose — and again on every restart.
+  const levelParam = params.get("level");
+  const fromUrl = LEVEL_PARAM.findIndex((name) => name === levelParam);
+  let chosenLevel =
+    fromUrl >= 0
+      ? fromUrl
+      : remembered(
+          KEY.level,
+          (raw) => {
+            const v = Number.parseInt(raw, 10);
+            return v >= 0 && v < LEVEL_PARAM.length ? v : null;
+          },
+          1,
+        );
+  const level: LevelControl = {
+    get: () => chosenLevel,
+    set: (v) => {
+      chosenLevel = Math.min(Math.max(Math.round(v), 0), LEVEL_PARAM.length - 1);
+      remember(KEY.level, String(chosenLevel));
+      const url = new URL(location.href);
+      url.searchParams.set("level", LEVEL_PARAM[chosenLevel] ?? "normal");
+      history.replaceState(null, "", url);
+    },
+  };
+
   const ui = createUi();
-  const card = ui.showTitle(volume);
+  const card = ui.showTitle(volume, level);
 
   void (async () => {
     try {
@@ -620,7 +652,7 @@ function boot(): void {
       game = module.startGame(canvas, sim, options, ui);
       card.markReady();
       await card.started;
-      game.begin();
+      game.begin(chosenLevel);
     } catch (err) {
       // The card comes down first. `#fallback` draws above it (z-index 20 over
       // 10) rather than replacing it, so leaving the card standing prints the

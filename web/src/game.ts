@@ -54,8 +54,11 @@ export interface Game {
   /**
    * Start the match. Called from the title card's click, which is also the
    * activation gesture the browsers require before audio may make a sound.
+   *
+   * @param level The opponent's level from the title card (`dio_set_ai`):
+   *   0 easy, 1 normal, 2 hard. Kept for every restart.
    */
-  begin(): void;
+  begin(level: number): void;
 }
 
 export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOptions, ui: Ui): Game {
@@ -106,6 +109,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
    * sound, the particles, the off-screen pips and the readouts alike.
    */
   const worldEvents = createWorldEvents();
+  /** The opponent's level, set on the title card; see `begin` and `restart`. */
+  let currentLevel = 1;
 
   // Volume, finally reachable: a slider on the title card and three keys in
   // the match. The banner is the feedback — a level you cannot hear changing
@@ -261,6 +266,10 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     // never grows, so every view stays valid — and the AudioContext stays
     // unlocked, which a page reload would lose.
     sim.e.dio_init(nextSeed, terrain, ai ? 1 : 0);
+    // `dio_init` starts from the default config, which has the default
+    // opponent: the level chosen on the title card has to be put back before
+    // the new match's first tick, or every rematch is played against Normal.
+    sim.e.dio_set_ai(currentLevel, 0);
     seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
     pendingCasts.length = 0;
     handledOutcome = 0;
@@ -318,7 +327,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       wave: sim.e.dio_tide_wave(),
     };
     setTimeout(() => {
-      if (handledOutcome !== 0) ui.showGameOver(outcome, waves, cause, restart);
+      if (handledOutcome !== 0) ui.showGameOver(outcome, waves, cause, currentLevel, restart);
     }, 2500);
   };
 
@@ -506,11 +515,15 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   return {
     audio,
 
-    begin(): void {
+    begin(level: number): void {
       // The title click is the browsers' required activation gesture: unlock
       // audio here and nothing is lost.
       void audio.resume();
       camera.drift(0);
+      // The world behind the card was initialised before anyone chose an
+      // opponent; this is the last moment before its first tick.
+      currentLevel = level;
+      sim.e.dio_set_ai(currentLevel, 0);
       matchStarted = true;
       radial.attach();
       hud.setVisible(true);
