@@ -276,6 +276,19 @@
         color: #ffe9c0;
         background: rgba(255, 233, 192, 0.1);
       }
+      /* The end card's per-wave rows: won in your colour, lost in theirs. */
+      .overlay table.waves td {
+        font-variant-numeric: tabular-nums;
+      }
+      .overlay table.waves tr.won td:last-child {
+        color: #ffb347;
+      }
+      .overlay table.waves tr.lost td:last-child {
+        color: #7fa6ff;
+      }
+      .overlay table.waves tr.draw td:last-child {
+        color: #a8b0c0;
+      }
       .overlay .opponent {
         margin-top: -10px;
       }

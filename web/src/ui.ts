@@ -218,17 +218,29 @@ export function createUi(): Ui {
       // Only waves that were actually scored; a match decided by sudden death
       // before the first wave peak has nothing to tabulate, and seven rows of
       // "0 · 0" would say less than one honest sentence.
-      const scored = waves.filter((w) => w.mine > 0 || w.theirs > 0);
+      //
+      // Numbered by the wave's own index, taken *before* filtering: armageddon
+      // skips straight to the last wave, and numbering the survivors 1, 2, …
+      // after the filter called the third wave "Welle 2".
+      const scored = waves
+        .map((w, wave) => ({ ...w, wave }))
+        .filter((w) => w.mine > 0 || w.theirs > 0);
       const rows = scored
-        .map((w, i) => {
-          const winner = w.mine > w.theirs ? "◂" : w.theirs > w.mine ? "▸" : "·";
-          return `<tr><td>Welle ${i + 1}</td><td>${w.mine} ${winner} ${w.theirs}</td></tr>`;
+        .map((w) => {
+          const [mark, verdict] =
+            w.mine > w.theirs
+              ? ["won", "gewonnen"]
+              : w.theirs > w.mine
+                ? ["lost", "verloren"]
+                : ["draw", "unentschieden"];
+          // Numbers and fixed literals only: nothing a player typed reaches this.
+          return `<tr class="${mark}"><td>Welle ${w.wave + 1}</td><td>${w.mine} : ${w.theirs}</td><td>${verdict}</td></tr>`;
         })
         .join("");
       const summary =
         scored.length > 0
-          ? `<p class="premise">Gehaltenes Land am Höhepunkt jeder Welle — du ◂ · ▸ Gegner</p>
-             <table>${rows}</table>`
+          ? `<p class="premise">Gehaltenes Land am Höhepunkt jeder Welle — du : Gegner</p>
+             <table class="waves">${rows}</table>`
           : `<p class="premise">Kein Wellenhöhepunkt wurde erreicht — nichts zu zählen.</p>`;
       el.innerHTML = `
         <div>
