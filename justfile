@@ -135,6 +135,15 @@ verify-cross: wasm
 verify-input: build-web
     cd web && node tools/verify-input.mjs
 
+# Play one match through, title card to end card, in the built client.
+#
+# Chooses a level on the card, follows the first hint, ticks to the first
+# wave's telegraph and peak and on to the end, and asserts what the HUD and the
+# end card say at each. Screenshots land in web/screenshots/ (gitignored). Not in
+# `check`: a whole match is minutes of simulation on a software renderer.
+play: build-web
+    cd web && node tools/play.mjs
+
 # Two simulations through the lockstep layer over a lossy, latent link.
 #
 # The Phase 7 DoD's network conditions — 120 ms RTT, 2% loss — without a network.
