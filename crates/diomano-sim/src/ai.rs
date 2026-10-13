@@ -75,7 +75,7 @@ const CORE_CLEARANCE: usize = 7;
 
 /// Cells around a home core the opponent never digs inside, for the same
 /// reason.
-const CORE_DIG_CLEARANCE: usize = 2;
+const CORE_DIG_CLEARANCE: usize = 5;
 
 /// Earth moved by one held tick of a poured raise or dig: nine cells, a
 /// terrace each.
