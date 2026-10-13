@@ -33,7 +33,8 @@ USAGE:
   diomano-cli record  [--out fixtures/session.log] [--seed N] [--ticks N]
   diomano-cli corpus  [--dir fixtures] [--matches N] [--ticks N] [--check-only]\n  diomano-cli trace   [--seed N] [--ticks N] [--every N]
   diomano-cli census  <file>
-  diomano-cli sweep   [--seeds N] [--seed N] [--profile idle|scripted|all] [--cap N]
+  diomano-cli sweep   [--seeds N] [--seed N] [--profile idle|scripted|all|mirror] [--cap N]
+                      [--level easy|normal|hard]
 
 TERRAIN: archipelago | pangaea | volcano
 ";
@@ -162,6 +163,8 @@ struct Opts {
     seeds: u32,
     /// `sweep`: which player-0 behaviours to run.
     profiles: Vec<Profile>,
+    /// `sweep`: the opponent's level in the idle and scripted profiles.
+    level: u8,
     /// `sweep`: stop a match that has not been decided after this many ticks.
     /// `None` runs it to the tick a full tide cycle ends, plus a margin.
     cap: Option<u32>,
@@ -189,6 +192,7 @@ impl Opts {
             check_only: false,
             seeds: 8,
             profiles: vec![Profile::Idle, Profile::Scripted],
+            level: diomano_sim::ai::LEVEL_NORMAL,
             cap: None,
         };
         let mut i = 0;
@@ -232,8 +236,14 @@ impl Opts {
                         "idle" => vec![Profile::Idle],
                         "scripted" => vec![Profile::Scripted],
                         "all" => vec![Profile::Idle, Profile::Scripted],
+                        "mirror" => mirror_profiles(),
                         _ => return Err(format!("unknown profile `{name}`\n\n{USAGE}")),
                     };
+                }
+                "--level" => {
+                    let name = value()?;
+                    o.level = level_by_name(&name)
+                        .ok_or_else(|| format!("unknown level `{name}`\n\n{USAGE}"))?;
                 }
                 // An unknown option is a typo, not a file name: `--tick 600` used
                 // to become a positional argument and run with the defaults.
@@ -841,9 +851,12 @@ fn cmd_trace(o: &Opts) -> Result<(), String> {
                 })
                 .collect();
             println!(
-                "      magnets: {} | ai phase {} | outcome {}",
+                "      magnets: {} | ai decisions {}/{} strikes {}/{} | outcome {}",
                 magnets.join(" | "),
-                w.ai.phase,
+                w.ai[0].decisions,
+                w.ai[1].decisions,
+                w.ai[0].strikes,
+                w.ai[1].strikes,
                 w.outcome
             );
             println!(
@@ -889,15 +902,60 @@ enum Profile {
     /// `demo_script`, one-sided and without the world-ending verbs: a player
     /// who digs, builds a plateau and moves the magnet, without playing well.
     Scripted,
+    /// Both sides scripted: player 0 plays `(level, style)` `a`, player 1 `b`.
+    /// The instrument for "easy to learn, hard to master": if the better
+    /// opponent does not beat the worse one, skill is not what wins.
+    Mirror { a: (u8, u8), b: (u8, u8) },
 }
 
 impl Profile {
-    const fn name(self) -> &'static str {
+    fn name(self) -> String {
         match self {
-            Self::Idle => "idle",
-            Self::Scripted => "scripted",
+            Self::Idle => "idle".into(),
+            Self::Scripted => "scripted".into(),
+            Self::Mirror { a, b } => format!("{}:{}", contestant(a), contestant(b)),
         }
     }
+}
+
+const LEVEL_NAMES: [&str; 3] = ["easy", "normal", "hard"];
+const STYLE_NAMES: [&str; 4] = ["balanced", "turtle", "rush", "disaster"];
+
+fn level_by_name(name: &str) -> Option<u8> {
+    LEVEL_NAMES.iter().position(|&n| n == name).map(|i| i as u8)
+}
+
+/// `normal-rush`, or just `hard` for a balanced player.
+fn contestant((level, style): (u8, u8)) -> String {
+    let l = LEVEL_NAMES.get(usize::from(level)).copied().unwrap_or("?");
+    if style == diomano_sim::ai::STYLE_BALANCED {
+        l.to_string()
+    } else {
+        format!("{l}-{}", STYLE_NAMES.get(usize::from(style)).copied().unwrap_or("?"))
+    }
+}
+
+/// Every ordered pair of distinct levels (balanced style), then every ordered
+/// pair of distinct styles (normal level). Ordered, so each pairing is played
+/// from both sides of the planet and the map's own asymmetry cancels out.
+fn mirror_profiles() -> Vec<Profile> {
+    use diomano_sim::ai::{LEVEL_COUNT, LEVEL_NORMAL, STYLE_BALANCED, STYLE_COUNT};
+    let mut out = Vec::new();
+    for a in 0..LEVEL_COUNT {
+        for b in 0..LEVEL_COUNT {
+            if a != b {
+                out.push(Profile::Mirror { a: (a, STYLE_BALANCED), b: (b, STYLE_BALANCED) });
+            }
+        }
+    }
+    for a in 0..STYLE_COUNT {
+        for b in 0..STYLE_COUNT {
+            if a != b {
+                out.push(Profile::Mirror { a: (LEVEL_NORMAL, a), b: (LEVEL_NORMAL, b) });
+            }
+        }
+    }
+    out
 }
 
 /// One sweep match, reduced to what the pacing question needs.
@@ -915,6 +973,20 @@ struct SweepMatch {
     /// Live settlements per player at the end, and their summed tiers.
     settlements: [u32; 2],
     tiers: [u32; 2],
+    /// Combat resolutions over the whole match.
+    combat: u32,
+    /// Longest stretch, in ticks, with nothing a spectator would notice: no
+    /// combat, no settlement founded, raised or lost, no power cast (raise
+    /// and lower excluded — they never stop), no wave peak.
+    quiet: u32,
+}
+
+impl SweepMatch {
+    /// Lost the first wave and won the match anyway.
+    fn comeback(&self) -> bool {
+        let Some(&(_, a, b)) = self.peaks.first() else { return false };
+        (self.outcome == 1 && b > a) || (self.outcome == 2 && a > b)
+    }
 }
 
 /// The tick a full tide cycle ends at on `cfg`, plus a lull of margin: the
@@ -925,34 +997,69 @@ fn full_match_ticks(cfg: &MapConfig) -> u32 {
     cfg.lull_ticks * 3 + per_wave * waves + cfg.recovery_ticks * (waves - 1)
 }
 
-fn sweep_one(seed: u32, terrain: u8, profile: Profile, cap: Option<u32>) -> SweepMatch {
+fn sweep_one(seed: u32, terrain: u8, profile: Profile, level: u8, cap: Option<u32>) -> SweepMatch {
     // Exactly what `dio_init` builds for a match in the client.
     let mut cfg = MapConfig::DEFAULT;
     cfg.seed = seed;
     cfg.terrain = terrain;
     cfg.ai_enabled = 1;
+    cfg.ai_level = [level; 2];
+    if let Profile::Mirror { a, b } = profile {
+        cfg.ai_mirror = 1;
+        cfg.ai_level = [a.0, b.0];
+        cfg.ai_style = [a.1, b.1];
+    }
     let cap = cap.unwrap_or_else(|| full_match_ticks(&cfg));
     let mut w = World::boxed();
     w.init(&cfg);
     let mut peaks = Vec::new();
     let mut scored = w.tide.scored;
     let mut end = None;
+    // What a spectator notices, sampled once a second.
+    let fingerprint = |w: &World| {
+        let mut f = u64::from(w.census.combat_resolutions);
+        for s in &w.settlements {
+            f = f.wrapping_mul(31).wrapping_add(if s.alive() { 1 + u64::from(s.tier) } else { 0 });
+        }
+        for (v, &n) in w.census.verb_applied.iter().enumerate() {
+            if v != usize::from(VERB_RAISE) && v != usize::from(VERB_LOWER) {
+                f = f.wrapping_mul(131).wrapping_add(u64::from(n));
+            }
+        }
+        f
+    };
+    let mut last_print = fingerprint(&w);
+    let mut last_event = 0u32;
+    let mut quiet = 0u32;
     for tick in 0..cap {
         let mut buf = CommandBuf::new();
         if profile == Profile::Scripted {
             demo_script(tick, seed, false, false, &mut buf);
         }
         w.tick(buf.as_slice());
+        let mut event = false;
         if w.tide.scored != 0 && scored == 0 {
             let wave = (w.tide.wave as usize).min(diomano_sim::world::MAX_WAVES - 1);
             peaks.push((tick, w.score[0][wave], w.score[1][wave]));
+            event = true;
         }
         scored = w.tide.scored;
+        if tick % TICK_HZ == 0 {
+            let f = fingerprint(&w);
+            event |= f != last_print;
+            last_print = f;
+        }
+        if event {
+            quiet = quiet.max(tick - last_event);
+            last_event = tick;
+        }
         if w.outcome != 0 {
             end = Some(tick);
             break;
         }
     }
+    let last = end.unwrap_or(cap);
+    quiet = quiet.max(last.saturating_sub(last_event));
     let mut settlements = [0u32; 2];
     let mut tiers = [0u32; 2];
     for s in &w.settlements {
@@ -972,6 +1079,8 @@ fn sweep_one(seed: u32, terrain: u8, profile: Profile, cap: Option<u32>) -> Swee
         peaks,
         settlements,
         tiers,
+        combat: w.census.combat_resolutions,
+        quiet,
     }
 }
 
@@ -1005,7 +1114,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let Some(&(seed, terrain, profile)) = jobs.get(i) else { break };
-                    let m = sweep_one(seed, terrain, profile, o.cap);
+                    let m = sweep_one(seed, terrain, profile, o.level, o.cap);
                     if let Ok(mut r) = results.lock() {
                         r.push((i, m));
                     }
@@ -1022,7 +1131,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
     };
 
     println!(
-        "profile   terrain      seed        end       mm:ss  cause    winner  settle  tiers   peaks (p0/p1 habitable cells held)"
+        "profile          terrain      seed        end       mm:ss  cause    winner  settle  tiers   combat quiet  peaks (p0/p1 habitable cells held)"
     );
     let mut failures = Vec::new();
     for (_, m) in &results {
@@ -1041,7 +1150,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
         let peaks: Vec<String> =
             m.peaks.iter().map(|(t, a, b)| format!("{}@{a}/{b}", mmss(*t))).collect();
         println!(
-            "{:<9} {:<12} {:#010x}  {:<9} {:<6} {:<8} {:<7} {}/{:<5} {}/{:<5} {}",
+            "{:<16} {:<12} {:#010x}  {:<9} {:<6} {:<8} {:<7} {}/{:<5} {}/{:<5} {:<6} {:<6} {}",
             m.profile.name(),
             terrain_name(m.terrain),
             m.seed,
@@ -1053,6 +1162,8 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
             m.settlements[1],
             m.tiers[0],
             m.tiers[1],
+            m.combat,
+            mmss(m.quiet),
             peaks.join(" ")
         );
         if m.end.is_some() && m.peaks.is_empty() {
@@ -1076,7 +1187,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
 
     println!();
     println!(
-        "profile   n    mean          median  p10     p90     min     max     sudden  waves  capped  p0/p1/draw"
+        "profile          n    mean          median  p10     p90     min     max     sudden  waves  capped  p0/p1/draw  comeback  quiet"
     );
     for &profile in &o.profiles {
         let ms: Vec<&SweepMatch> =
@@ -1104,7 +1215,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
         let wins =
             [count(&|m| m.outcome == 1), count(&|m| m.outcome == 2), count(&|m| m.outcome == 3)];
         println!(
-            "{:<9} {:<4} {:<6} {:<6} {:<7} {:<7} {:<7} {:<7} {:<7} {:<7} {:<6} {:<7} {}/{}/{}",
+            "{:<16} {:<4} {:<6} {:<6} {:<7} {:<7} {:<7} {:<7} {:<7} {:<7} {:<6} {:<7} {:<11} {:<9} {}",
             profile.name(),
             n,
             mean,
@@ -1117,9 +1228,9 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
             sudden,
             waves,
             capped,
-            wins[0],
-            wins[1],
-            wins[2]
+            format!("{}/{}/{}", wins[0], wins[1], wins[2]),
+            count(&|m| m.comeback()),
+            mmss((ms.iter().map(|m| u64::from(m.quiet)).sum::<u64>() / n.max(1) as u64) as u32)
         );
         if mean < MIN_MEAN_MATCH_TICKS {
             failures.push(format!(
@@ -1131,10 +1242,108 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
         }
     }
 
+    if o.profiles.iter().any(|p| matches!(p, Profile::Mirror { .. })) {
+        depth_report(&results.iter().map(|(_, m)| m).collect::<Vec<_>>(), &mut failures);
+    }
+
     if failures.is_empty() {
         Ok(())
     } else {
         Err(format!("pacing does not hold:\n  {}", failures.join("\n  ")))
+    }
+}
+
+/// A better opponent must beat a worse one this often, from either side of
+/// the planet: three in four. Below that, the level is a label and not a
+/// skill — and "hard to master" means nothing if mastering does not win.
+const SKILL_WIN_PERCENT: u32 = 75;
+
+/// No style may beat *every* other style this often. A strategy that wins
+/// everywhere is the only strategy, and "easy to learn" then becomes "learn
+/// this one thing".
+const DOMINANT_WIN_PERCENT: u32 = 65;
+
+/// Wins of contestant `a` over contestant `b`, from both sides, as
+/// (wins, decided-or-drawn matches).
+fn head_to_head(ms: &[&SweepMatch], a: (u8, u8), b: (u8, u8)) -> (u32, u32) {
+    let mut won = 0;
+    let mut played = 0;
+    for m in ms {
+        let Profile::Mirror { a: p0, b: p1 } = m.profile else { continue };
+        if (p0, p1) == (a, b) {
+            played += 1;
+            won += u32::from(m.outcome == 1);
+        } else if (p0, p1) == (b, a) {
+            played += 1;
+            won += u32::from(m.outcome == 2);
+        }
+    }
+    (won, played)
+}
+
+/// The two mirror matrices, and the gates on them.
+fn depth_report(ms: &[&SweepMatch], failures: &mut Vec<String>) {
+    use diomano_sim::ai::{LEVEL_COUNT, LEVEL_NORMAL, STYLE_BALANCED, STYLE_COUNT};
+    let pct = |(w, n): (u32, u32)| (w * 100).checked_div(n).unwrap_or(0);
+    println!();
+    println!("level vs level (balanced style), row wins % over column, both sides");
+    print!("{:<10}", "");
+    for b in 0..LEVEL_COUNT {
+        print!("{:>10}", LEVEL_NAMES[usize::from(b)]);
+    }
+    println!();
+    for a in 0..LEVEL_COUNT {
+        print!("{:<10}", LEVEL_NAMES[usize::from(a)]);
+        for b in 0..LEVEL_COUNT {
+            if a == b {
+                print!("{:>10}", "-");
+            } else {
+                print!("{:>9}%", pct(head_to_head(ms, (a, STYLE_BALANCED), (b, STYLE_BALANCED))));
+            }
+        }
+        println!();
+    }
+    for a in 1..LEVEL_COUNT {
+        let r = head_to_head(ms, (a, STYLE_BALANCED), (a - 1, STYLE_BALANCED));
+        if r.1 > 0 && pct(r) < SKILL_WIN_PERCENT {
+            failures.push(format!(
+                "{} beats {} in only {}% of {} matches (gate {SKILL_WIN_PERCENT}%)",
+                LEVEL_NAMES[usize::from(a)],
+                LEVEL_NAMES[usize::from(a - 1)],
+                pct(r),
+                r.1
+            ));
+        }
+    }
+
+    println!();
+    println!("style vs style (normal level), row wins % over column, both sides");
+    print!("{:<10}", "");
+    for b in 0..STYLE_COUNT {
+        print!("{:>10}", STYLE_NAMES[usize::from(b)]);
+    }
+    println!();
+    for a in 0..STYLE_COUNT {
+        print!("{:<10}", STYLE_NAMES[usize::from(a)]);
+        let mut beats_all = true;
+        let mut any = false;
+        for b in 0..STYLE_COUNT {
+            if a == b {
+                print!("{:>10}", "-");
+                continue;
+            }
+            let r = head_to_head(ms, (LEVEL_NORMAL, a), (LEVEL_NORMAL, b));
+            any |= r.1 > 0;
+            beats_all &= pct(r) > DOMINANT_WIN_PERCENT;
+            print!("{:>9}%", pct(r));
+        }
+        println!();
+        if any && beats_all {
+            failures.push(format!(
+                "style {} beats every other style more than {DOMINANT_WIN_PERCENT}% of the time",
+                STYLE_NAMES[usize::from(a)]
+            ));
+        }
     }
 }
 
