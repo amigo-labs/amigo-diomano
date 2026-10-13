@@ -898,6 +898,33 @@ Found and deliberately not fixed here, each for a stated reason:
       opened until the pointer next moves over the canvas
 - [ ] Two simulation findings that would move the fixtures — decision 8 below
 
+### 23. Depth: an opponent worth losing to, a five-minute tide, a forecast ✅
+
+Measured first (`docs/specs/depth.md`): an idle player beat the scripted
+opponent 9 of 12 times, every match ran 33:49, mana sat at its cap from
+minute ten and whole recoveries passed with nothing happening.
+
+- [x] `ai.rs` rewritten: terraforms against `tide::next_peak_level`, digs
+  where it costs nobody's score, strikes and floods by forecast, armageddon
+  only to break a level score; 3 levels x 4 styles, per side in `MapConfig`,
+  hashes unchanged with the opponent off.
+- [x] `sweep --profile mirror` / `just depth`: level and style matrices,
+  gated (each level beats the one below >= 75%, no style beats all > 65%).
+  Final: 100% / 100%, best style 58-91% against single styles, none against
+  all; rush dominated (see depth.md).
+- [x] A wave every five minutes (user decision): matches of 13:49.
+- [x] Armageddon refunded once the final wave is under way (it could
+  postpone the end for ever); corpus asks for it once per cataclysm match.
+- [x] Flood forecast hatched on the planet; wasm `dio_set_ai`,
+  `dio_next_peak_level`, `dio_tide_scored`.
+- [x] Models: team masks, citadel, coloured villagers, pickups by power.
+- [x] Feel: shared world events, effects, in-scene off-screen pips, wave-peak
+  readout and tally, difficulty on the title card, end-card numbering fix,
+  onboarding hints, `just play`.
+- [ ] Decisions for a human, in depth.md: levelling (new plateaus barely
+  form), wide quakes beside a home core, spawn asymmetry, swamp.
+- [ ] Rush style: march only where a land path exists.
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on

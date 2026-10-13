@@ -18,6 +18,9 @@ just dev            # build the wasm, serve the client on :5173
 just verify-boot    # the built client, loaded in a real browser — does it start?
 just verify-cross   # native vs headless browser determinism — the important one
 just perf           # per-pass ms breakdown against the 12 ms budget
+just sweep          # match length and outcome against the scripted opponent
+just depth          # every opponent level and style against every other
+just play           # one whole match in the built client, title card to end card
 ```
 
 Requires `rustup` (with the `wasm32-unknown-unknown` target), `bun`, `just` and
@@ -66,6 +69,11 @@ so a hill came out a ridge. Now the pointer only aims the hand.
 
 Alt and ctrl are not modifiers: with verbs on letter keys, `Ctrl+R` would be an
 extreme raise *and* a page reload.
+
+The title card picks the opponent: **Leicht**, **Normal** or **Schwer**
+(`?level=easy|normal|hard`). A match is three waves, five minutes apart; each
+peak counts the habitable land under your influence, and the planet hatches
+the land the next peak will drown. `docs/specs/depth.md` has the numbers.
 
 The two peoples do **not** start connected by land. If they are on separate
 islands, raising the ground between them is the player's job.
