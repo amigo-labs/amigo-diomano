@@ -141,8 +141,9 @@ export function createHand(
   //
   // It used to be a sphere, and a sphere is a perfectly good matter gauge and
   // not a hand: the game is called `dio` + `mano` and its whole interface is
-  // supposed to be one. So: a palm with four fingers and a thumb, built out of
-  // boxes and merged into **two** meshes rather than eleven, which is what lets
+  // supposed to be one. So: a palm with four fingers and a thumb — the palm
+  // out of boxes, the fingers out of rounded segments — merged into **two**
+  // meshes rather than eleven, which is what lets
   // it grip for one extra draw call instead of ten.
   //
   // The split is the knuckle line. Everything proximal to it — palm, thumb
@@ -169,12 +170,42 @@ export function createHand(
   const distalParts: THREE.BufferGeometry[] = [];
 
   /**
-   * A segment of finger: a box that narrows toward its tip, laid along -z
-   * from the origin. `taperedBox` stands on y; a quarter turn about x lays
-   * it forward, which is the direction the fingers run from the knuckle line.
+   * A segment of finger: a capsule that narrows toward its tip, `w` wide and
+   * `h` thick, laid along -z from the origin over `length`.
+   *
+   * It was a tapered box, and five fingers of tapered boxes under a lit,
+   * translucent material read as a rake — every flat side caught the sun on its
+   * own and the edges between them were the brightest thing on the hand. A
+   * lathe of a rounded profile has no edges to catch it: a quarter circle at
+   * each end, the radius narrowing by `taper` from root to tip, and smooth
+   * normals. Built standing on y with a unit-wide cross-section, then squashed
+   * to `w` by `h` and laid forward by a quarter turn about x, which is the
+   * direction the fingers run from the knuckle line. 112 triangles.
    */
-  const segment = (w: number, length: number, h: number, taper: number): THREE.BufferGeometry =>
-    withTransform(taperedBox(w, length, h, taper), (g) => g.rotateX(-Math.PI / 2));
+  const segment = (w: number, length: number, h: number, taper: number): THREE.BufferGeometry => {
+    const root = Math.min(w, h) / 2;
+    const tip = root * taper;
+    const outline: THREE.Vector2[] = [];
+    for (let k = 0; k <= 3; k++) {
+      const a = -Math.PI / 2 + (k * Math.PI) / 6;
+      outline.push(new THREE.Vector2(0.5 * Math.cos(a), root * (1 + Math.sin(a))));
+    }
+    for (let k = 0; k <= 3; k++) {
+      const a = (k * Math.PI) / 6;
+      outline.push(new THREE.Vector2(0.5 * taper * Math.cos(a), length - tip * (1 - Math.sin(a))));
+    }
+    // `LatheGeometry` emits an exact zero radius as a pole of degenerate
+    // triangles, and smooths the normals round it; both are what a fingertip
+    // wants.
+    return withTransform(new THREE.LatheGeometry(outline, 8), (g) => {
+      g.scale(w, 1, h);
+      g.rotateX(-Math.PI / 2);
+    });
+  };
+
+  /** A knuckle: a squashed sphere on the knuckle line, `size` `[w, h, d]`. 80 triangles. */
+  const knuckle = (w: number, h: number, d: number): THREE.BufferGeometry =>
+    withTransform(new THREE.SphereGeometry(0.5, 8, 6), (g) => g.scale(w, h, d));
 
   proximalParts.push(
     withTransform(new THREE.BoxGeometry(HAND.palm[0], HAND.palm[1], HAND.palm[2]), (g) => {
@@ -197,10 +228,10 @@ export function createHand(
         g.rotateY(splay);
         g.translate(offset, 0.01, KNUCKLE_Z);
       }),
-      // The knuckle itself, a slightly larger cube on the line: what makes a
+      // The knuckle itself, a slightly larger bulge on the line: what makes a
       // finger read as jointed rather than as a stick.
       withTransform(
-        new THREE.BoxGeometry(HAND.thickness * 1.08, HAND.thickness * 0.95, HAND.thickness * 0.9),
+        knuckle(HAND.thickness * 1.08, HAND.thickness * 0.95, HAND.thickness * 0.9),
         (g) => {
           g.rotateY(splay);
           g.translate(offset, 0.02, KNUCKLE_Z);
