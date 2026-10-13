@@ -568,6 +568,17 @@ pub struct MapConfig {
     /// Scripted opponent (this run only; not part of the shipped ruleset).
     pub ai_enabled: u8,
     pub ai_player: u8,
+    /// How well each side's opponent plays: `ai::LEVEL_EASY`, `LEVEL_NORMAL`
+    /// or `LEVEL_HARD`. Indexed by player, so a mirror match can pit two
+    /// levels against each other.
+    pub ai_level: [u8; PLAYERS],
+    /// How each side's opponent prefers to win: `ai::STYLE_BALANCED`,
+    /// `STYLE_TURTLE`, `STYLE_RUSH` or `STYLE_DISASTER`.
+    pub ai_style: [u8; PLAYERS],
+    /// Both sides scripted: the opponent plays itself. Measurement only
+    /// (`diomano-cli sweep --profile mirror`) — it is how "a better player
+    /// beats a worse one" becomes a number instead of a hope.
+    pub ai_mirror: u8,
     /// Carve the contact corridor between the two spawns.
     ///
     /// **Off in real matches, by user decision.** A ridge running half the
@@ -626,6 +637,9 @@ impl MapConfig {
         power_cost: [0, 20, 120, 200, 260, 600, 700, 2500],
         ai_enabled: 0,
         ai_player: 1,
+        ai_level: [1; PLAYERS],
+        ai_style: [0; PLAYERS],
+        ai_mirror: 0,
         land_bridge: 0,
         endless: 0,
     };
@@ -656,19 +670,34 @@ pub struct TideState {
     pub offset: i16,
 }
 
-/// Scripted-opponent bookkeeping. See `ai.rs`.
+/// Scripted-opponent bookkeeping for one side. See `ai.rs`.
+///
+/// All zero until the opponent first thinks, and the first four fields are
+/// hashed in the same fourteen bytes the old curriculum's state used, so a
+/// world with the opponent switched off hashes exactly as it always did.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AiState {
-    pub script_pc: u16,
-    /// Completed passes through the current script.
-    pub repeat: u16,
+    /// Decisions taken so far.
+    pub decisions: u16,
+    /// Strikes paid for so far.
+    pub strikes: u16,
+    /// Ticks left in the current move (hold or pause), or until the next
+    /// decision while idle.
     pub timer: u32,
-    pub anchor_face: u8,
-    pub anchor_x: u8,
-    pub anchor_y: u8,
-    /// 0 = tutorial curriculum, 1 = war. See `ai::PHASE_WAR`.
-    pub phase: u8,
+    /// Where the current move aims.
+    pub face: u8,
+    pub x: u8,
+    pub y: u8,
+    /// The verb being held, or `VERB_NOP` between moves.
+    pub verb: u8,
+    /// The current move's modifier.
+    pub modifier: u8,
+    /// 1 while the current move is held, 0 while it pauses afterwards.
+    pub holding: u8,
+    pub _pad: u16,
+    /// Tick of the last strike, for the spacing between them.
+    pub last_strike: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +765,7 @@ pub struct World {
     // --- scalars ---
     pub cfg: MapConfig,
     pub tide: TideState,
-    pub ai: AiState,
+    pub ai: [AiState; PLAYERS],
     pub magnet: [Magnet; PLAYERS],
     pub hand: [Hand; PLAYERS],
     /// Q16.16.
@@ -828,15 +857,19 @@ impl World {
                 strength: 0,
                 offset: 0,
             },
-            ai: AiState {
-                script_pc: 0,
-                repeat: 0,
+            ai: [AiState {
+                decisions: 0,
+                strikes: 0,
                 timer: 0,
-                anchor_face: 0,
-                anchor_x: 0,
-                anchor_y: 0,
-                phase: 0,
-            },
+                face: 0,
+                x: 0,
+                y: 0,
+                verb: 0,
+                modifier: 0,
+                holding: 0,
+                _pad: 0,
+                last_strike: 0,
+            }; PLAYERS],
             magnet: [Magnet { face: 0, x: 0, y: 0, active: 0, leader: u16::MAX, _pad: 0 }; PLAYERS],
             hand: [Hand { material: HAND_EARTH, _pad: 0, amount: 0 }; PLAYERS],
             mana: [0; PLAYERS],
@@ -1412,13 +1445,40 @@ impl World {
         // The scripted opponent's bookkeeping decides which commands it emits,
         // and it runs on both peers, so it is as much lockstep state as the
         // walkers it commands.
-        h.write_u16(self.ai.script_pc);
-        h.write_u16(self.ai.repeat);
-        h.write_u32(self.ai.timer);
-        h.write_u8(self.ai.anchor_face);
-        h.write_u8(self.ai.anchor_x);
-        h.write_u8(self.ai.anchor_y);
-        h.write_u8(self.ai.phase);
+        //
+        // The scripted side's first fourteen bytes go in unconditionally, in
+        // the layout the old curriculum hashed, so a world without an opponent
+        // (all zero) keeps every hash it ever had. The rest only once one is
+        // switched on, and the other side's only in a mirror match.
+        let primary = (self.cfg.ai_player as usize) % PLAYERS;
+        let a = &self.ai[primary];
+        h.write_u16(a.decisions);
+        h.write_u16(a.strikes);
+        h.write_u32(a.timer);
+        h.write_u8(a.face);
+        h.write_u8(a.x);
+        h.write_u8(a.y);
+        h.write_u8(a.verb);
+        if self.cfg.ai_enabled != 0 {
+            for p in 0..PLAYERS {
+                if p != primary && self.cfg.ai_mirror == 0 {
+                    continue;
+                }
+                let a = &self.ai[p];
+                if p != primary {
+                    h.write_u16(a.decisions);
+                    h.write_u16(a.strikes);
+                    h.write_u32(a.timer);
+                    h.write_u8(a.face);
+                    h.write_u8(a.x);
+                    h.write_u8(a.y);
+                    h.write_u8(a.verb);
+                }
+                h.write_u8(a.modifier);
+                h.write_u8(a.holding);
+                h.write_u32(a.last_strike);
+            }
+        }
         // A countdown that diverged outside the hash would be invisible until
         // it landed as an outcome — the desync class determinism.md rules out.
         for &d in &self.doom {
@@ -2209,9 +2269,9 @@ mod tests {
         assert_ne!(w.state_hash(), base, "the sudden-death countdown is not hashed");
         w.doom[1] = w.doom[1].wrapping_sub(1);
 
-        w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
+        w.ai[1].decisions = w.ai[1].decisions.wrapping_add(1);
         assert_ne!(w.state_hash(), base, "the scripted opponent's state is not hashed");
-        w.ai.script_pc = w.ai.script_pc.wrapping_sub(1);
+        w.ai[1].decisions = w.ai[1].decisions.wrapping_sub(1);
         assert_eq!(w.state_hash(), base);
 
         w.lava[c] = 7;

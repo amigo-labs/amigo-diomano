@@ -130,6 +130,36 @@ pub fn wave_strength(w: &World, wave: u8) -> i16 {
     s.clamp(0, i64::from(i16::MAX) / 2) as i16
 }
 
+/// The sea level the *next* wave peak will reach, or `None` once no wave is
+/// left to come.
+///
+/// What the scoring at that peak will drown: every cell with `height` below
+/// this is under the pinned ocean when `score_wave` counts. Exact for the
+/// ocean pin, blind to lakes and to a flood cast between now and then — it is
+/// a forecast, which is all a player (and the opponent) ever gets.
+#[must_use]
+pub fn next_peak_level(w: &World) -> Option<i16> {
+    let strength = match w.tide.phase {
+        TIDE_DONE => return None,
+        TIDE_CALM | TIDE_TELEGRAPH => {
+            if w.tide.strength == 0 {
+                wave_strength(w, w.tide.wave)
+            } else {
+                w.tide.strength
+            }
+        }
+        TIDE_IMPACT if w.tide.scored == 0 => w.tide.strength,
+        _ => {
+            let next = w.tide.wave.saturating_add(1);
+            if next >= w.cfg.waves {
+                return None;
+            }
+            wave_strength(w, next)
+        }
+    };
+    Some(w.sea_base.saturating_add(strength))
+}
+
 /// Armageddon: immediately triggers the final tide wave at maximum strength
 /// (§5.1). The stalemate breaker, and deliberately awkward to invoke (§8).
 pub fn trigger_armageddon(w: &mut World) {
