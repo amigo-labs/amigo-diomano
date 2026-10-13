@@ -22,6 +22,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL, SKY_GLSL } from "./atmosphere";
+import { TERRAIN_GOD } from "./palette";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
@@ -701,8 +702,8 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
       uCloudFade: view.cloudFade,
       uWarning: view.warning,
       uSeaRadius: { value: BASE_RADIUS },
-      uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
-      uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
+      uGodA: { value: new THREE.Color(...TERRAIN_GOD[0]) },
+      uGodB: { value: new THREE.Color(...TERRAIN_GOD[1]) },
       uTier: { value: 2 },
       uTexRock: { value: loadTex("rock.webp") },
       uTexGrass: { value: loadTex("grass.webp") },

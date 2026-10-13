@@ -35,6 +35,17 @@ import type { QualityTier } from "../main";
 import { SKY_GLSL } from "./atmosphere";
 import { readGlb } from "./geometry";
 import { SPECIES, buildingModels, floraModels, propModels } from "./models";
+import {
+  CHAMPION_ACCENT,
+  LEADER_ACCENT,
+  MAGNET_TEAM,
+  type Rgb,
+  SETTLEMENT_TEAM,
+  TEAM_MASK_GLSL,
+  WALKER_TEAM,
+  pickupColour,
+  teamColour,
+} from "./palette";
 import { cellDirectionInto } from "./planet";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 import type { View } from "./view";
@@ -218,11 +229,17 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   // scoreboard", and one box scaled up by tier is the same silhouette at every
   // tier — a village and a town differed only in how many pixels they covered.
   //
-  // At tier 2 the blocks are buildings: a hut, a house, a tower and a wall
-  // segment, each its own instanced mesh so a village and a citadel differ in
-  // shape and not only in count. Tier 1 keeps the box for all four.
+  // At tier 2 the blocks are buildings: a hut, a house, a keep, a wall segment
+  // and a citadel, each its own instanced mesh so a village and a citadel
+  // differ in shape and not only in count. Tier 1 draws a roofed block for each.
   const houses = buildingModels(tier);
   const building = (geometry: THREE.BufferGeometry) => {
+    // The team mask is read by the settlement shader whether or not a model
+    // has team parts; a wall segment has none, so it is all zeros.
+    if (!geometry.hasAttribute("team")) {
+      const count = geometry.getAttribute("position").count;
+      geometry.setAttribute("team", new THREE.BufferAttribute(new Float32Array(count), 1));
+    }
     const mesh = new THREE.InstancedMesh(
       geometry,
       settlementMaterial(view, houses.colour, geometry),
@@ -238,7 +255,14 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   const homes = building(houses.house);
   const towers = building(houses.tower);
   const walls = building(houses.wall);
-  const buildings = [huts, homes, towers, walls];
+  const citadels = building(houses.citadel);
+  const buildings = [huts, homes, towers, walls, citadels];
+  /** Indices into `buildings`, so the settlement rules read as what they mean. */
+  const HUT = 0;
+  const HOUSE = 1;
+  const KEEP = 2;
+  const WALL = 3;
+  const CITADEL = 4;
 
   // Walkers: tiny, and they must separate from any terrain, so they get a rim
   // light in the shader rather than relying on contrast (§7.3 tier 1).
@@ -260,15 +284,17 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
    */
   const walkPhase = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WALKERS), 1);
   walkPhase.setUsage(THREE.DynamicDrawUsage);
-  /**
-   * Every vertex of the stand-in capsule is "body", so it bobs and swings
-   * nothing. The attribute has to exist on it regardless: a shader that
-   * declares an attribute the geometry lacks reads a generic value, and three
-   * gives no warning that it happened.
-   */
-  const capsuleLimbs = new Float32Array(walkerGeometry.getAttribute("position").count);
-  walkerGeometry.setAttribute("limb", new THREE.BufferAttribute(capsuleLimbs, 1));
+  /** Rank, one float per instance: 0 walker, 1 leader, 2 champion. Rides like `walkPhase`. */
+  const walkRank = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WALKERS), 1);
+  walkRank.setUsage(THREE.DynamicDrawUsage);
   walkerGeometry.setAttribute("walk", walkPhase);
+  walkerGeometry.setAttribute("rank", walkRank);
+  // Every vertex of the stand-in capsule is "body", so it bobs and swings
+  // nothing, and it is the side's colour all over: it has no tabard to put it
+  // on. The attributes have to exist on it regardless: a shader that declares
+  // an attribute the geometry lacks reads a generic value, and three gives no
+  // warning that it happened.
+  figureAttributes(walkerGeometry, 1);
   walkers.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   walkers.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAX_WALKERS * 3), 3);
   walkers.frustumCulled = false;
@@ -283,7 +309,10 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
    * `geometry.ts` for the whole argument.
    *
    * The limb attribute is computed here rather than read from the file, so the
-   * file stays a plain glTF that anything can produce — see `FIGURE`.
+   * file stays a plain glTF that anything can produce — see `FIGURE`. Colour
+   * and team mask *are* read from it when it has them (`COLOR_0`, `_TEAM`); a
+   * replacement figure without them is drawn white and tinted all over, which
+   * is how every figure was drawn before the mask.
    */
   const loadFigure = async (): Promise<void> => {
     // Two figures from the same generator: the detailed one at tier 2, the
@@ -309,6 +338,8 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     geometry.setAttribute("limb", new THREE.BufferAttribute(limbs, 1));
 
     geometry.setAttribute("walk", walkPhase);
+    geometry.setAttribute("rank", walkRank);
+    figureAttributes(geometry, 1);
     walkers.geometry.dispose();
     walkers.geometry = geometry;
   };
@@ -326,14 +357,25 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 
   // One-shot pickups (§5.3): free single-use powers lying on the terrain.
   // Contested map objects, so they have to be findable from orbit — hence a
-  // bright unlit octahedron rather than something that shades into the ground.
+  // bright unlit crystal rather than something that shades into the ground. Its
+  // colour is the power it grants (`PICKUP_POWER`), and its facets are shaded
+  // into its vertex colours, since an unlit material has no light to find them.
   const props = propModels(tier);
   const pickupMesh = new THREE.InstancedMesh(
     props.pickup,
-    new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.9 }),
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+    }),
     MAX_PICKUPS,
   );
   pickupMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  pickupMesh.instanceColor = new THREE.InstancedBufferAttribute(
+    new Float32Array(MAX_PICKUPS * 3),
+    3,
+  );
   pickupMesh.frustumCulled = false;
   pickupMesh.count = 0;
 
@@ -342,6 +384,10 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   // "my leader is safe on the magnet" is unusable advice if you cannot see
   // where the magnet is. A spire, because it has to be findable from orbit and
   // anything lying flat on the ground is not.
+  //
+  // Drawn with the walkers' material, for its rim light; it stands still, and
+  // `figureAttributes` gives it the zeros that say so.
+  figureAttributes(props.magnet, 1);
   const magnets = new THREE.InstancedMesh(props.magnet, walkerMaterial(view), 2);
   magnets.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   magnets.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(2 * 3), 3);
@@ -357,8 +403,6 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
   const dir = new THREE.Vector3();
   const spin = new THREE.Quaternion();
   const colour = new THREE.Color();
-  /** Hoisted: this is inside a per-walker loop that runs every tick. */
-  const leaderTint = new THREE.Color(1.0, 0.95, 0.7);
   /** One face edge spans a quarter of the circumference. */
   const cellScale = (Math.PI * 0.5 * BASE_RADIUS) / sim.N;
 
@@ -585,6 +629,8 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     r: number;
     g: number;
     b: number;
+    /** 0 walker, 1 leader, 2 champion: the shader's `rank`. */
+    rank: number;
     /** Tick this record was last touched, for reaping the dead. */
     seen: number;
   }
@@ -601,12 +647,12 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       const wy = onFace(p.y);
       const champion = (p.flags & WALKER_CHAMPION) !== 0;
       const leader = (p.flags & WALKER_LEADER) !== 0;
-      // Owner hue, then rank on top of it: a champion has to be findable in a
-      // crowd of its own colour, and it had no distinguishing mark at all.
-      if (p.owner === 0) colour.setRGB(1.0, 0.85, 0.5);
-      else colour.setRGB(0.5, 0.85, 1.0);
-      if (champion) colour.setRGB(1.0, 0.42, 0.24);
-      else if (leader) colour.lerp(leaderTint, 0.55);
+      // Owner hue, always. Rank goes on top of it in the shader (`rank`, see
+      // `walkerMaterial`): a champion has to be findable in a crowd of its own
+      // colour, and it used to be found by painting it one orange for both
+      // sides — which made the most dangerous figure on the map the one whose
+      // side could not be read.
+      colour.setRGB(...teamColour(WALKER_TEAM, p.owner));
 
       let f = figures.get(p.id);
       if (!f) {
@@ -623,6 +669,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
           r: 0,
           g: 0,
           b: 0,
+          rank: 0,
           seen: tick,
         };
         figures.set(p.id, f);
@@ -661,6 +708,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       f.r = colour.r;
       f.g = colour.g;
       f.b = colour.b;
+      f.rank = champion ? 2 : leader ? 1 : 0;
       f.seen = tick;
     }
     // Reap the fallen. Without this the map grows for the whole match and the
@@ -682,6 +730,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       cellDirectionInto(dir, f.face, wx, wy, sim.N);
       place(walkers, k, surfaceAt(f.face, wx, wy), f.scale, f.heading);
       walkers.instanceColor?.setXYZ(k, f.r, f.g, f.b);
+      walkRank.setX(k, f.rank);
       // The walk cycle's per-instance phase. Negative means standing, which is
       // how the shader knows not to pedal on the spot — see `WALK_GLSL`.
       walkPhase.setX(k, f.moving ? f.phase : -f.phase - 1);
@@ -691,6 +740,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
     walkers.instanceMatrix.needsUpdate = true;
     if (walkers.instanceColor) walkers.instanceColor.needsUpdate = true;
     walkPhase.needsUpdate = true;
+    walkRank.needsUpdate = true;
   };
 
   let floraBuiltAt = -FLORA_REBUILD_TICKS;
@@ -734,7 +784,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 
       // --- settlements -------------------------------------------------------
       const settlements = sim.settlements();
-      const built = [0, 0, 0, 0];
+      const built = buildings.map(() => 0);
       /** Write one building of `kind`, if its mesh has room. */
       const erect = (kind: number, radius: number, scale: number, turn: number): void => {
         const mesh = buildings[kind];
@@ -746,23 +796,32 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
       };
       for (const s of settlements) {
         // Warm for the first god, cool for the second — the same two moods the
-        // terrain shader blends by influence.
-        colour.setRGB(s.owner === 0 ? 0.95 : 0.62, 0.82, s.owner === 0 ? 0.6 : 0.98);
+        // terrain shader blends by influence. Under the team mask this is the
+        // colour of the banners and team roofs, not of the whole town.
+        colour.setRGB(...teamColour(SETTLEMENT_TEAM, s.owner));
         const blocks = Math.min(6, 1 + s.tier);
-        // What the tier builds: huts, then houses, then a keep at the centre of
-        // a town — so a village and a citadel differ in kind, not only in count.
-        // At tier 1 all four meshes are the same box and this is only a split.
-        const centre = s.tier >= 4 ? 2 : s.tier >= 2 ? 1 : 0;
-        const outer = s.tier >= 3 ? 1 : 0;
+        // What the tier builds at its centre: a hut, a house at tier 2, a keep
+        // at tier 3 and the citadel at tier 4, the highest the simulation has
+        // (`TIER_SIZE` in `world.rs`) — so a village and a citadel differ in
+        // kind, not only in count. The ring around it is huts, then houses from
+        // tier 3 on.
+        const centre = s.tier >= 4 ? CITADEL : s.tier >= 3 ? KEEP : s.tier >= 2 ? HOUSE : HUT;
+        const outer = s.tier >= 3 ? HOUSE : HUT;
+        // The citadel is a compound about half again a keep's width, drawn a
+        // little smaller per unit, and the ring stands back from its towers.
+        const centreScale = centre === CITADEL ? 0.36 : 0.42;
+        const ringFrom = centre === CITADEL ? 0.68 : 0.55;
+        const ringDepth = centre === CITADEL ? 0.4 : 0.5;
         for (let k = 0; k < blocks; k++) {
           // The first block sits on the centre; the rest ring it, so a tier
           // rise adds buildings to a village instead of inflating one house.
           const angle = hash01(s.face, s.x, s.y, k) * Math.PI * 2;
-          const spread = k === 0 ? 0 : 0.55 + hash01(s.face, s.x, s.y, k + 8) * 0.5;
+          const spread = k === 0 ? 0 : ringFrom + hash01(s.face, s.x, s.y, k + 8) * ringDepth;
           const fx = onFace(s.x + 0.5 + Math.cos(angle) * spread);
           const fy = onFace(s.y + 0.5 + Math.sin(angle) * spread);
           cellDirectionInto(dir, s.face, fx, fy, sim.N);
-          const scale = cellScale * (k === 0 ? 0.42 : 0.26 + hash01(s.face, s.x, s.y, k) * 0.12);
+          const scale =
+            cellScale * (k === 0 ? centreScale : 0.26 + hash01(s.face, s.x, s.y, k) * 0.12);
           erect(k === 0 ? centre : outer, surfaceAt(s.face, fx, fy), scale, angle);
         }
         // A citadel gets a wall: eight segments laid tangentially around the
@@ -773,7 +832,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
             const fx = onFace(s.x + 0.5 + Math.cos(angle) * 1.25);
             const fy = onFace(s.y + 0.5 + Math.sin(angle) * 1.25);
             cellDirectionInto(dir, s.face, fx, fy, sim.N);
-            erect(3, surfaceAt(s.face, fx, fy), cellScale * 0.9, angle + Math.PI / 2);
+            erect(WALL, surfaceAt(s.face, fx, fy), cellScale * 0.9, angle + Math.PI / 2);
           }
         }
       }
@@ -800,10 +859,13 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
           cellScale * 0.5,
           (tick / 30) * 1.2,
         );
+        colour.setHex(pickupColour(d.power));
+        pickupMesh.instanceColor?.setXYZ(q, colour.r, colour.g, colour.b);
         q += 1;
       }
       pickupMesh.count = q;
       pickupMesh.instanceMatrix.needsUpdate = true;
+      if (pickupMesh.instanceColor) pickupMesh.instanceColor.needsUpdate = true;
 
       // --- papal magnets -----------------------------------------------------
       let m = 0;
@@ -814,7 +876,7 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
         const my = sim.e.dio_magnet_y(player);
         cellDirectionInto(dir, face, mx + 0.5, my + 0.5, sim.N);
         place(magnets, m, radiusAt(face, mx, my), cellScale * 2.2, (tick / 30) * 0.35);
-        colour.setRGB(player === 0 ? 1.0 : 0.55, 0.9, player === 0 ? 0.55 : 1.0);
+        colour.setRGB(...teamColour(MAGNET_TEAM, player));
         magnets.instanceColor?.setXYZ(m, colour.r, colour.g, colour.b);
         m += 1;
       }
@@ -857,10 +919,10 @@ export function createVegetation(sim: Sim, tier: QualityTier, view: View): Veget
 function hazedLambert(
   view: View,
   colour: number,
-  geometry?: THREE.BufferGeometry,
-  extra = "",
-  walk?: { vertex: string; normal: string; position: string },
+  geometry: THREE.BufferGeometry | null,
+  patch: ShaderPatch = {},
 ): THREE.MeshLambertMaterial {
+  const { extra = "", walk, team = false, vertexHead = "", fragmentHead = "" } = patch;
   // `vertexColors` only when the geometry actually carries a `color`
   // attribute. It defines `USE_COLOR`, and `color_vertex.glsl` then runs
   // `vColor *= color`; `MeshLambertMaterial` — unlike `ShaderMaterial` — has
@@ -869,10 +931,13 @@ function hazedLambert(
   // settlement and walker rendered *black*. With the attribute present (the
   // tier-2 models in `models.ts`) it is the trunk's brown and the roof's red,
   // multiplied by the per-instance colour, which arrives through
-  // `instanceColor` and sets `USE_INSTANCING_COLOR` on its own.
+  // `instanceColor` and sets `USE_INSTANCING_COLOR` on its own. A material
+  // whose geometry is swapped later (the walkers') passes `null` and sets
+  // `vertexColors` itself, with every geometry it will ever draw carrying the
+  // attribute.
   const material = new THREE.MeshLambertMaterial({
     color: colour,
-    vertexColors: geometry?.hasAttribute("color") ?? false,
+    vertexColors: patch.vertexColors ?? geometry?.hasAttribute("color") ?? false,
   });
   material.onBeforeCompile = (shader) => {
     // Shared by reference — see `view.ts`.
@@ -885,8 +950,15 @@ function hazedLambert(
       "#include <common>",
       `#include <common>
        varying vec3 vDioWorld;
-       ${walk?.vertex ?? ""}`,
+       ${team ? TEAM_MASK_GLSL.head : ""}
+       ${vertexHead}`,
     );
+    if (team) {
+      // Replaces the chunk rather than following it: stock three has already
+      // multiplied the owner's colour into every vertex by then. See
+      // `TEAM_MASK_GLSL`.
+      vertex = inject(vertex, "#include <color_vertex>", TEAM_MASK_GLSL.colour);
+    }
     if (walk) {
       // Two injections, because three's vertex shader consumes the normal before
       // it defines the position: `beginnormal_vertex` declares `objectNormal`,
@@ -934,6 +1006,7 @@ function hazedLambert(
        uniform vec3 uSunDirection;
        uniform vec3 uCameraPosition;
        uniform float uWarning;
+       ${fragmentHead}
        ${SKY_GLSL}`,
     );
     fragment = inject(
@@ -954,10 +1027,36 @@ function hazedLambert(
   // one compiled was the program for all of them that also agreed on
   // `vertexColors`: the settlements drew with the flora's shader and never lit
   // their windows, and the walkers drew with the buildings' and lost their
-  // rim light and their walk cycle. `verify-boot` asserts it.
-  const key = `dio|${extra}|${walk ? `${walk.vertex}|${walk.normal}|${walk.position}` : ""}`;
+  // rim light and their walk cycle. `verify-boot` asserts it. Every piece of
+  // text the hook can inject is therefore in the key, the team flag included:
+  // a team-masked and an unmasked material that agreed on everything else
+  // would otherwise share whichever program compiled first.
+  const key = [
+    "dio",
+    team ? "team" : "",
+    vertexHead,
+    fragmentHead,
+    extra,
+    walk ? `${walk.normal}|${walk.position}` : "",
+  ].join("|");
   material.customProgramCacheKey = () => key;
   return material;
+}
+
+/** What a material adds to the hazed Lambert of `hazedLambert`. */
+interface ShaderPatch {
+  /** GLSL on `outgoingLight`, before the haze. */
+  extra?: string;
+  /** Declarations for the vertex shader: attributes, varyings, helpers. */
+  vertexHead?: string;
+  /** Declarations for the fragment shader, for what `extra` reads. */
+  fragmentHead?: string;
+  /** The walk cycle's two vertex patches; see `WALK_GLSL`. */
+  walk?: { normal: string; position: string };
+  /** Tint by `instanceColor` through the `team` mask rather than everywhere. */
+  team?: boolean;
+  /** Overrides the geometry check, for a material whose geometry changes later. */
+  vertexColors?: boolean;
 }
 
 /**
@@ -992,35 +1091,93 @@ function inject(source: string, marker: string, replacement: string): string {
  * population distribution at a glance." That second clause is the reason it is
  * tier 2 rather than tier 3: with no HUD, the night hemisphere is otherwise the
  * one place where you cannot read who holds what.
+ *
+ * Team-masked: the owner's colour is on the pennants, banners and team roofs
+ * and only washed over the rest (`TEAM_MASK_GLSL`). The lights take `vColor`,
+ * so a lit town glows warm through its walls and in its side's colour through
+ * its banners.
  */
 function settlementMaterial(
   view: View,
   colour: number,
   geometry: THREE.BufferGeometry,
 ): THREE.MeshLambertMaterial {
-  return hazedLambert(
-    view,
-    colour,
-    geometry,
-    /* glsl */ `
+  return hazedLambert(view, colour, geometry, {
+    team: true,
+    extra: /* glsl */ `
       // Lights come on where the sun has gone down, and only there.
       float dioNight = smoothstep(0.12, -0.25, dot(normalize(vDioWorld), uSunDirection));
       outgoingLight += vColor * vec3(1.0, 0.72, 0.36) * dioNight * 0.9;`,
-  );
+  });
 }
 
-/** Lambert plus a rim term, so a walker never disappears into the ground. */
+/**
+ * Lambert plus a rim term, so a walker never disappears into the ground, and
+ * rank on top of it.
+ *
+ * Team-masked like the settlements: the side's colour is the tabard, and the
+ * face, hair and boots keep their own. Rank arrives per instance as `rank`
+ * (0 walker, 1 leader, 2 champion) and is drawn *over* the side rather than
+ * instead of it — the champion used to be painted one orange for both players,
+ * so the most dangerous figure on the map was the one whose side you could not
+ * tell. A leader's rim is warmer; a champion's rim burns in `CHAMPION_ACCENT`
+ * and the whole figure carries a low ember glow, which is what finds it in a
+ * crowd and on the night side.
+ *
+ * Every geometry drawn with this carries `color`, `team`, `limb`, `walk` and
+ * `rank` — `figureAttributes` fills what a model lacks.
+ */
 function walkerMaterial(view: View): THREE.MeshLambertMaterial {
-  return hazedLambert(
-    view,
-    0xffffff,
-    undefined,
-    /* glsl */ `
+  const glsl = (c: Rgb): string => `vec3(${c.map((v) => v.toFixed(3)).join(", ")})`;
+  return hazedLambert(view, 0xffffff, null, {
+    team: true,
+    vertexColors: true,
+    vertexHead: /* glsl */ `
+      ${WALK_GLSL.vertex}
+      attribute float rank;
+      varying float vDioRank;`,
+    fragmentHead: "varying float vDioRank;",
+    walk: {
+      normal: WALK_GLSL.normal,
+      position: `${WALK_GLSL.position}\nvDioRank = rank;`,
+    },
+    extra: /* glsl */ `
       vec3 dioView = normalize(vViewPosition);
       float dioRim = pow(1.0 - max(dot(normalize(vNormal), dioView), 0.0), 2.0);
-      outgoingLight += dioRim * 0.55;`,
-    WALK_GLSL,
-  );
+      float dioChampion = step(1.5, vDioRank);
+      float dioLeader = step(0.5, vDioRank) * (1.0 - dioChampion);
+      vec3 dioRimColour = vec3(0.55);
+      dioRimColour = mix(dioRimColour, ${glsl(LEADER_ACCENT)} * 0.95, dioLeader);
+      dioRimColour = mix(dioRimColour, ${glsl(CHAMPION_ACCENT)} * 1.6, dioChampion);
+      outgoingLight += dioRim * dioRimColour;
+      outgoingLight += ${glsl(CHAMPION_ACCENT)} * (0.22 * dioChampion);`,
+  });
+}
+
+/**
+ * Give a geometry every attribute the walker material reads, where it has none.
+ *
+ * `color` white and the per-vertex walk attributes zero — a body that stands
+ * still and never swings — and `team` at `team`. Needed because a Lambert
+ * material has no default attribute values: a missing attribute reads whatever
+ * that location last held, which for `limb` could be "arm" and for `team`
+ * anything at all. The walker's own `walk` and `rank` are per instance and set
+ * by the caller; a magnet, which shares the material, gets per-vertex zeros.
+ */
+function figureAttributes(geometry: THREE.BufferGeometry, team: number): void {
+  const count = geometry.getAttribute("position").count;
+  const fill = (name: string, size: number, value: number): void => {
+    if (geometry.hasAttribute(name)) return;
+    geometry.setAttribute(
+      name,
+      new THREE.BufferAttribute(new Float32Array(count * size).fill(value), size),
+    );
+  };
+  fill("color", 3, 1);
+  fill("team", 1, team);
+  fill("limb", 1, LIMB.body);
+  fill("walk", 1, 0);
+  fill("rank", 1, 0);
 }
 
 /**
@@ -1057,11 +1214,11 @@ const WALK_GLSL = {
       float pivotY = 0.0;
       if (limb > 2.5) {
         // Legs, from the hip.
-        pivotY = ${(0.46).toFixed(3)};
+        pivotY = ${FIGURE.hip.toFixed(3)};
         angle = limb > 3.5 ? swingB : swingA;
       } else if (limb > 0.5) {
         // Arms, from the shoulder, opposite the diagonal leg.
-        pivotY = ${(0.7).toFixed(3)};
+        pivotY = ${FIGURE.shoulder.toFixed(3)};
         angle = (limb > 1.5 ? swingA : swingB) * 0.7;
       }
       // A little bob, so the body rises on each step rather than gliding.

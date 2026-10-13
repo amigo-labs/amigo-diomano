@@ -125,6 +125,7 @@ async function sharedPrograms(browser, port, tier) {
       renderer.compile(scene, camera.camera);
       const markers = [
         "#include <common>",
+        "#include <color_vertex>",
         "#include <beginnormal_vertex>",
         "#include <begin_vertex>",
         "#include <project_vertex>",
