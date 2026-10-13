@@ -139,8 +139,9 @@ ten-minute floor against a player who does nothing is the floor working as
 intended — it is defined for the default opponent.
 
 Mirror matches (`just depth`, 2 seeds x 3 terrains per ordered pairing, so
-every cell below is 12 matches from both sides of the planet), measured
-before `ec0e3b7` widened the dig clearance around home cores:
+every cell below is 12 matches from both sides of the planet), on the final
+opponent (`9d72024`). All 108 matches ran to 13:49 and were decided on the
+waves; none by sudden death.
 
 | row beats column | easy | normal | hard |
 |---|---|---|---|
@@ -150,16 +151,25 @@ before `ec0e3b7` widened the dig clearance around home cores:
 
 | row beats column (normal level) | balanced | turtle | rush | disaster |
 |---|---|---|---|---|
-| balanced | – | 58% | 41% | 58% |
-| turtle | 41% | – | 41% | 58% |
-| rush | 58% | 58% | – | 58% |
-| disaster | 41% | 41% | 41% | – |
+| balanced | – | 50% | 91% | 58% |
+| turtle | 50% | – | 91% | 58% |
+| rush | 8% | 8% | – | 16% |
+| disaster | 41% | 41% | 83% | – |
 
-Every level beats the one below it every time; no style beats every other
-more than 58% of the time, and between styles 2-3 matches in 6 are won by
-the side that lost the first wave. Style matches all ran to 13:49 on the
-waves. Pairings with `hard` averaged 9:34 — every hard win was sudden death
-a minute after the second peak, which is what `ec0e3b7` fixed.
+Every level beats the one below it every time (gate: 75%). No style beats
+every other (gate: 65%) — but **rush is dominated**: a march needs land to
+walk on, and on two of the three terrains the spawns share none, so its
+magnet and champions are mana spent on nothing while the others terraform.
+It wins comebacks (4 of 6 against each style after losing the first wave)
+and loses the matches. Making the march conditional on a land path, or the
+rush style a pangaea specialist, is the obvious next step and is not done
+here.
+
+Two earlier runs are worth keeping for what they caught: the first had every
+hard win as sudden death a minute after the second peak (digging too close
+to a home core, `ec0e3b7`); the second lost player 0 at 3:39 on one seed in
+every pairing, because both sides dug the same spot in the same tick and the
+second hand came up full of sea, which went onto a core (`9d72024`).
 
 ## Decisions for a human
 
