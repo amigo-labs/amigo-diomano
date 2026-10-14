@@ -39,11 +39,11 @@
 //! bookkeeping, and every scan runs in a fixed order with fixed tie-breaks.
 
 use crate::world::{
-    AiState, Command, CommandBuf, HAND_CAPACITY, HAND_EARTH, MOD_EXTREME, MOD_INCREASED, MOD_MASK,
-    N, NO_SETTLEMENT, PLAYERS, POWER_ARMAGEDDON, POWER_CHAMPION, POWER_EARTHQUAKE, POWER_FLOOD,
-    POWER_MAGNET, POWER_SWAMP, POWER_VOLCANO, TERRACE, TIDE_CALM, TIDE_DONE, TIDE_RECOVERY,
-    VERB_ARMAGEDDON, VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_NOP,
-    VERB_RAISE, VERB_SWAMP, VERB_VOLCANO, World, idx, live_neighbour,
+    AiState, Command, CommandBuf, HAND_CAPACITY, HAND_EARTH, MAT_SWAMP, MOD_EXTREME, MOD_INCREASED,
+    MOD_MASK, N, NO_SETTLEMENT, PLAYERS, POWER_ARMAGEDDON, POWER_CHAMPION, POWER_EARTHQUAKE,
+    POWER_FLOOD, POWER_MAGNET, POWER_SWAMP, POWER_VOLCANO, TERRACE, TIDE_CALM, TIDE_DONE,
+    TIDE_RECOVERY, VERB_ARMAGEDDON, VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER,
+    VERB_MAGNET, VERB_NOP, VERB_RAISE, VERB_SWAMP, VERB_VOLCANO, World, idx, live_neighbour,
 };
 
 /// Slow, generous, never steals and never floods. Thinks every four seconds.
@@ -123,6 +123,10 @@ pub struct Tuning {
     /// Swamps the road an enemy army is marching up, in front of its own
     /// towns (`threat`, `moat_spot`).
     pub moats: bool,
+    /// Raises or digs its own swamped ground clear before anything else it
+    /// would terraform: a raise buries a swamp, a dig cuts it out
+    /// (`World::deform`), and either gives the plateau back.
+    pub clears_swamps: bool,
 }
 
 /// The tuning for a level and a style. Out-of-range values clamp, so a
@@ -147,6 +151,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             builds_for_last: false,
             swamps: false,
             moats: false,
+            clears_swamps: false,
         },
         LEVEL_NORMAL => Tuning {
             think: 45,
@@ -165,6 +170,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             builds_for_last: false,
             swamps: true,
             moats: false,
+            clears_swamps: false,
         },
         _ => Tuning {
             think: 15,
@@ -183,6 +189,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             builds_for_last: false,
             swamps: true,
             moats: false,
+            clears_swamps: false,
         },
     };
     match style {
@@ -201,6 +208,11 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             // other styles answer with a strike of their own. Not on easy,
             // which swamps nothing.
             t.moats = t.swamps;
+            // And it repairs. Its losses were where no army marches: the
+            // enemy's swamps lay on the plateaus it builds for the finale,
+            // out of its score and eating its own walkers, and the hand that
+            // buries a swamp was busy elsewhere.
+            t.clears_swamps = t.swamps;
         }
         STYLE_RUSH => {
             t.marches = true;
@@ -791,6 +803,11 @@ fn score_spot(
                     if town {
                         return None;
                     }
+                    // Its own swamp, whatever its height: a raise buries it.
+                    if t.clears_swamps && mine && w.material[c] == MAT_SWAMP {
+                        score += 4;
+                        continue;
+                    }
                     let shore = !mine
                         && owner.is_none()
                         && (0..4).any(|d| owner_of(w, live_neighbour(c, d)) == Some(player));
@@ -822,7 +839,10 @@ fn score_spot(
                         score += 4;
                         continue;
                     }
-                    if mine {
+                    if mine && t.clears_swamps && w.material[c] == MAT_SWAMP {
+                        // A dig cuts it out: earth in the hand, ground back.
+                        score += 4;
+                    } else if mine {
                         score -= if h >= line + terrace { 6 } else { 1 };
                     } else if theirs {
                         if t.steals == 0 {
@@ -1243,6 +1263,48 @@ mod tests {
         );
         assert!(!tuning(LEVEL_EASY, STYLE_TURTLE).moats, "an easy turtle swamps");
         assert!(tuning(LEVEL_HARD, STYLE_TURTLE).moats);
+    }
+
+    /// Player 1's own land eight cells from its core, a 3x3 of it swamped,
+    /// no mana for anything but the hand, and the hand `amount` full.
+    fn swamped_at_home(
+        style: u8,
+        amount: u16,
+    ) -> (alloc::boxed::Box<World>, (usize, usize, usize)) {
+        let mut w = ai_world();
+        w.cfg.ai_style = [style; PLAYERS];
+        let (f, x, y) = crate::settlements::STARTS[1];
+        let at = (f, x + 8, y);
+        for dy in 0..3 {
+            for dx in 0..3 {
+                let c = idx(f, at.1 + dx - 1, at.2 + dy - 1);
+                w.material[c] = MAT_SWAMP;
+                w.influence[c] = -100;
+            }
+        }
+        w.mana[1] = 0;
+        w.hand[1] = crate::world::Hand { material: HAND_EARTH, _pad: 0, amount };
+        (w, at)
+    }
+
+    #[test]
+    fn a_turtle_clears_the_swamp_off_its_own_land() {
+        let t = tuning(LEVEL_NORMAL, STYLE_TURTLE);
+        for (amount, verb) in [(0, VERB_LOWER), (HAND_CAPACITY, VERB_RAISE)] {
+            let (w, (f, x, y)) = swamped_at_home(STYLE_TURTLE, amount);
+            let Some((v, at, _)) = decide(&w, 1, &t) else {
+                panic!("the turtle left its swamp lying (hand {amount})");
+            };
+            assert_eq!(v, verb, "hand {amount}");
+            assert_eq!(usize::from(at.0), f);
+            assert!(
+                usize::from(at.1).abs_diff(x) <= 1 && usize::from(at.2).abs_diff(y) <= 1,
+                "hand {amount}: worked {at:?}, not the swamp at {:?}",
+                (f, x, y)
+            );
+        }
+        assert!(!tuning(LEVEL_NORMAL, STYLE_BALANCED).clears_swamps);
+        assert!(!tuning(LEVEL_EASY, STYLE_TURTLE).clears_swamps);
     }
 
     #[test]
