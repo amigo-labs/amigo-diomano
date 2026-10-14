@@ -1406,7 +1406,7 @@ mod tests {
     /// "Flatten land, the people build" (HANDOFF §4.6), as a player would do
     /// it: a hand of earth, a held poured raise on uneven dry ground inside
     /// their own influence, and a settlement on it within 45 seconds. Every
-    /// such site around the first spawn of six maps is tried. Before
+    /// such site around the first spawn of twelve maps is tried. Before
     /// raise levelled (`World::deform`) none of 44 sites across 12 maps
     /// founded anything; now most do, and here at least two in three must.
     #[test]
@@ -1422,8 +1422,10 @@ mod tests {
         };
         let (face, hx, hy) = STARTS[0];
         let (mut tried, mut founded) = (0usize, 0usize);
-        for seed in [0x5EED_u32, 0x9E37_D8A6, 0x3C6F_525F] {
-            for terrain in [TERRAIN_PANGAEA, crate::world::TERRAIN_VOLCANO] {
+        for seed in [0x5EED_u32, 0x9E37_D8A6, 0x3C6F_525F, 0xDAA6_CC18] {
+            for terrain in
+                [crate::world::TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, crate::world::TERRAIN_VOLCANO]
+            {
                 let cfg = MapConfig { seed, terrain, ..MapConfig::DEFAULT };
                 let base = fresh(&cfg);
                 for cy in 2..N as i32 - 2 {
