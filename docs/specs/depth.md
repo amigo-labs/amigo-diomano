@@ -60,9 +60,11 @@ decides it:
   the line keeps it scoring; digging the enemy's coast below it stops theirs.
   Material is conserved (pillar 4), so the earth for one is the hole of the
   other — the decision is *where* the hole goes.
-- **Spend.** Earthquakes break the enemy's best ground; a flood is worth it
-  only when the forecast says the enemy has more land just above the line
-  than you; armageddon breaks a level score in favour of whoever built higher.
+- **Spend.** Earthquakes break the enemy's best ground; a swamp takes one of
+  their plateaus out of the score and swallows whoever walks onto it; a flood
+  is worth it only when the forecast says the enemy has more land just above
+  the line than you; armageddon breaks a level score in favour of whoever
+  built higher.
 - **Waves every five minutes.** Peaks at 2:10, 7:10 and 12:10, a match in
   13:49 (user decision, `MapConfig::DEFAULT`).
 
@@ -78,7 +80,8 @@ long enough to watch and followed by a pause. Each decision, in order:
 3. **Strike** — earthquake (volcano for the disaster style) on the enemy's best
    town, or with none left on its densest scoring ground; spaced by
    `strike_gap`, never inside `CORE_CLEARANCE` of a home core, gated by a mana
-   reserve.
+   reserve. Above easy every other strike is a swamp instead, on the enemy
+   plateau where it takes the most scoring ground (`Spot::Mire`).
 4. **March** (rush style) — the magnet onto the enemy's best town, then
    champions.
 5. **Terraform** — with earth in hand, raise where the most own land (and the
@@ -101,12 +104,37 @@ long enough to watch and followed by a pause. Each decision, in order:
 | Digs enemy land | never | open ground | also under towns |
 | Picks | the first good spot | the best spot | the best spot |
 | Floods / armageddon | no / no | yes / no | yes / yes |
+| Swamps | never | every other strike | every other strike |
 
 Styles modify a level: **turtle** strikes at half the rate, holds its raises
 half again as long with half the pause, builds against the *last* wave's line
 instead of the next, and never floods or calls armageddon; **rush** marches
 and strikes from the start; **disaster** strikes with volcanoes instead of
 quakes, from the second wave, floods, and calls armageddon above easy.
+
+## The swamp
+
+Withheld from the shipped manifest until 2026-10-14, and as it was written it
+deserved to be: every cell in the brush went unbuildable, unscoring and
+impassable for good, nothing could remove it, and the walkers §5.2 says it
+swallows routed around it. Now (user decisions: trap and land denial both,
+one victim a cell by default, enabled if the gates hold — they did):
+
+- **It is aimed.** Only cells at the height of the cell aimed at turn — the
+  plateau under the cursor, the same equal-height ground a settlement needs —
+  and never a home platform, which would make one cast sudden death.
+- **It is a trap.** Swamp is passable, so the flow field leads armies into
+  it, and a walker that enters sinks — either side's, a champion's too; one
+  standing on ground swamped under it sinks as well. The cell that took one is
+  ground again, unless the map says `bottomless`.
+- **It can be undone.** A raise or a lower over a swamp cell buries it or
+  digs it out. The victim's answer costs a few seconds of the hand.
+- **It denies.** Nobody builds on it and it scores for nobody.
+
+Easy to learn — it eats walkers and takes land. Hard to master — it only
+takes the one plateau you aim at, it drowns your own walkers as readily as
+theirs, it is the counter to a march or a champion whose path you can read,
+and the enemy can terraform it away.
 
 ## Measuring it
 
@@ -124,13 +152,14 @@ Gates, as constants in `crates/diomano-cli/src/main.rs`:
 - the pacing gates of `pacing.md` (nothing decided before the first peak, an
   idle player not beaten before the second, a mean of at least ten minutes).
 
-Each match line also reports combat resolutions and the longest quiet stretch;
-the summary counts comebacks (lost the first wave, won the match).
+Each match line also reports combat resolutions, swamps cast, walkers each
+side lost to them, and the longest quiet stretch; the summary counts
+comebacks (lost the first wave, won the match).
 
 ### Results
 
 Idle player vs. each level, 4 seeds x 3 terrains, five-minute cadence, on
-`4043797`:
+`d995f78` (with the swamp; the same 12/12 on `4043797` without it):
 
 | Opponent | Opponent wins | Decided by | Mean length |
 |---|---|---|---|
@@ -147,27 +176,32 @@ distance from a home core.
 Mirror matches (`just depth`, 2 seeds x 3 terrains per ordered pairing, so
 every cell below is 12 matches from both sides of the planet), on the rules
 of 2026-10-14 — levelling, the immune platform, fair and rough spawn land, the
-rush fix, the turtle and dig changes and the later volcano (`4043797`). All
-108 matches were decided on the waves, none by sudden death; 104 ran to 13:49
-and 4 ended at 9:40, where hard or disaster called armageddon for the finale.
-The longest quiet stretch in any match was 15 s to 2:08.
+rush fix, the turtle and dig changes, the later volcano and the swamp
+(`d995f78`). All 108 matches were decided on the waves, none by sudden death;
+107 ran to 13:49 and one ended at 9:40 on a finale armageddon. Every match
+saw swamps — 1,558 in all, about 14 a match — and they swallowed 1,559
+walkers, spread over every pairing (most where a rush army marched). The
+longest quiet stretch in any match was 9 s to 2:08.
 
 | row beats column | easy | normal | hard |
 |---|---|---|---|
-| easy | – | 16% | 0% |
-| normal | 83% | – | 8% |
-| hard | 100% | 91% | – |
+| easy | – | 8% | 0% |
+| normal | 91% | – | 25% |
+| hard | 100% | 75% | – |
 
 | row beats column (normal level) | balanced | turtle | rush | disaster |
 |---|---|---|---|---|
-| balanced | – | 50% | 41% | 50% |
-| turtle | 50% | – | 41% | 50% |
-| rush | 58% | 58% | – | 41% |
-| disaster | 50% | 50% | 58% | – |
+| balanced | – | 66% | 41% | 66% |
+| turtle | 33% | – | 33% | 50% |
+| rush | 58% | 66% | – | 66% |
+| disaster | 33% | 50% | 33% | – |
 
-Every level beats the one below it more often than the gate asks (75%). No
-style beats every other, and none is beaten by every other: the widest margin
-is 58%, and turtle, the weakest before, wins 41-50% against each.
+Every level beats the one below it at least as often as the gate asks (75%;
+hard over normal sits on it, from 91% without the swamp). No style beats
+every other more than 65% of the time; rush comes nearest (58-66%), and
+turtle is again the weakest (33-50%), down from 41-50%. Without the swamp,
+on `4043797`: normal over easy 83%, hard over normal 91%, styles within
+41-58%.
 
 The runs that got here, and what each caught:
 
@@ -191,7 +225,10 @@ The runs that got here, and what each caught:
   floods, no armageddon: each measured, none below 66%. The first vent was
   what decided — lava over flat land before the second peak cost the enemy
   about a hundred scoring cells — so it now waits for that peak
-  (`4043797`).
+  (`4043797`);
+- with the swamp enabled the gates held on the first run (`d995f78`), but
+  the margins moved: hard over normal fell to the gate, rush rose from
+  41-58% to 58-66%, and turtle fell back to 33-50%.
 
 ## Decisions for a human
 
@@ -212,7 +249,16 @@ Decided on 2026-10-14 and implemented:
    first wave at half the rate.
 6. **The pangaea outlier** was the opponent's digs, not the spawn balance's
    radius; fixed in the opponent.
+7. **Swamp** — enabled, as trap and land denial: flat ground only, never a
+   home platform, passable and swallowing, one victim a cell
+   (`MapConfig::swamp_bottomless` for the other §5.2 option), buried or dug
+   out by raise and lower. See *The swamp* above.
 
 Still open:
 
-7. **Swamp** stays disabled (§5.4). Nothing measured here argues for it.
+8. **Turtle** is the weakest style again with the swamp (33-50%). A
+   defensive swamp — across the approach to its own towns — is the obvious
+   lever and fits the style; not built yet.
+9. **Hard over normal** sits on the 75% gate with the swamp.
+10. **A sinking walker** has no effect of its own on screen; it simply
+    vanishes. The client would need the sim to export where walkers sank.

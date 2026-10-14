@@ -964,6 +964,28 @@ User decisions of 2026-10-14 on the two items step 24 left open.
   every style, no style above 58%, levels 83/91/100%, no sudden deaths.
   Corpus re-recorded.
 
+### 26. The swamp: aimed, a trap, undone by the hand ✅
+
+User decisions of 2026-10-14: trap and land denial both, one victim a cell by
+default, enabled if the gates hold. They held; it ships enabled.
+
+- [x] Forms only on the plateau aimed at (cells at the target's height), dry,
+  never on a home platform (`powers::swamp`).
+- [x] Passable, so armies march in; whoever enters sinks, champions too, and
+  one standing on swamped ground. The cell is ground again unless
+  `MapConfig::swamp_bottomless` (log key `swamp_bottomless`, manifest
+  `[powers.swamp] bottomless`).
+- [x] Raise or lower over it buries or digs it out (`World::deform`). Still
+  unbuildable and unscoring while it lies; pickups avoid it.
+- [x] The opponent swamps every other strike above easy (`Spot::Mire`).
+  `Census::swamp_victims`, unhashed; the sweep prints swamps and the sunk.
+- [x] Measured (`d995f78`): idle loses 12/12 to every level, all to 13:49;
+  mirror levels 91/100/75%, no style above 65% against all, no sudden
+  deaths, about 14 swamps and 14 drowned walkers a match. Corpus re-recorded;
+  `session.log` keeps swamp off in its own header.
+- [ ] Turtle is the weakest style again (33-50%): a defensive swamp is the
+  lever. Hard over normal sits on the gate. No sinking effect on screen yet.
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on
