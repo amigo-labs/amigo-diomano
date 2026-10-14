@@ -11,7 +11,7 @@ land_bridge 0
 waves 3
 telegraph_ticks 900
 impact_ticks 600
-recovery_ticks 25500
+recovery_ticks 7500
 lull_ticks 2700
 escalation 150
 strength 48
