@@ -805,11 +805,179 @@ pub fn seed_starting_positions(w: &mut World) {
         w.settlement_count = w.settlement_count.saturating_add(1);
         carve_spawn_pedestal(w, face, cx as i32, cy as i32, platform);
     }
+    balance_spawns(w);
     if w.cfg.land_bridge != 0 {
         carve_contact_corridor(w);
     }
     w.ghost_copy_all();
     detect_plateaus(w);
+}
+
+/// How far round a spawn its first-wave land is counted: the home core's reach
+/// once it has grown to [`crate::flowfield::SANCTUARY_MAX`].
+pub const SPAWN_FAIR_RADIUS: i32 =
+    crate::flowfield::SANCTUARY_MAX * crate::flowfield::INFLUENCE_REACH;
+
+/// The poorer spawn is topped up until it holds at least this share, in
+/// percent, of what the richer one holds.
+pub const SPAWN_FAIR_PERCENT: i32 = 95;
+
+/// Most cells one spawn may be given, so a freak map cannot turn the sea round
+/// a spawn into a continent.
+const SPAWN_FAIR_MAX_CELLS: usize = 600;
+
+/// Ground round `STARTS[player]` that scores at every wave peak: soil or
+/// rock, dry, above the last wave's waterline (`fair_line`), within
+/// [`SPAWN_FAIR_RADIUS`].
+#[must_use]
+pub fn lasting_land(w: &World, player: usize) -> i32 {
+    let (face, cx, cy) = STARTS[player];
+    let line = fair_line(w);
+    let mut n = 0;
+    for dy in -SPAWN_FAIR_RADIUS..=SPAWN_FAIR_RADIUS {
+        for dx in -SPAWN_FAIR_RADIUS..=SPAWN_FAIR_RADIUS {
+            let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+            if scores_every_wave(w, c, line) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// The waterline spawn land is measured against: the last natural wave's
+/// peak. Land above it scores at every wave; land given just above the
+/// *first* peak drowned at the second, and an opponent handed 1,200 cells
+/// for the first wave held 130 at the next.
+fn fair_line(w: &World) -> i32 {
+    let last = w.cfg.waves.saturating_sub(1);
+    i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last))
+}
+
+/// Soil or rock, dry, molten-free and above `line`: what `lasting_land`
+/// counts.
+fn scores_every_wave(w: &World, c: usize, line: i32) -> bool {
+    let solid = w.material[c] == crate::world::MAT_SOIL || w.material[c] == crate::world::MAT_ROCK;
+    solid && w.water[c] == 0 && w.lava[c] == 0 && i32::from(w.height[c]) > line
+}
+
+/// Give the poorer spawn land until both start with about the same ground
+/// that scores at every wave.
+///
+/// User decision (decision 3 in `docs/specs/depth.md`). The generator places
+/// the spawns on whatever geology the seed drew, and on some seeds one spawn
+/// had twice the land of the other inside its core's reach — measured in the
+/// sweep as an idle player out-scoring an opponent at the first peak before
+/// anyone had touched anything.
+///
+/// Raise-only, like the pedestal: seabed, low ground and sand round the poorer
+/// spawn become bare rock at least a terrace above the last peak's waterline, ring by ring
+/// outward from the shelf in a fixed order (Chebyshev distance, then flat
+/// index), and only next to ground that is already high — so the new land is
+/// one piece with the spawn's island and the influence projected over
+/// passable ground reaches all of it. Rock, as on the shelf, because rock
+/// neither rots nor slides.
+///
+/// At most `SPAWN_FAIR_MAX_CELLS` are given, so the sea round a small island
+/// does not become a continent. A gap wider than that — measured: 869 cells
+/// against 223 on one archipelago seed — is closed from the other side too
+/// (`take_land`): the richer spawn's outermost land sinks into the first
+/// wave's flood band.
+fn balance_spawns(w: &mut World) {
+    let land = [lasting_land(w, 0), lasting_land(w, 1)];
+    let (poor, rich) = if land[0] < land[1] { (0, 1) } else { (1, 0) };
+    // Rounded up, so the test the docs state (`poor * 100 >= rich * 95`) holds.
+    let want = (land[rich] * SPAWN_FAIR_PERCENT + 99) / 100;
+    let mut have = land[poor];
+    if have >= want {
+        return;
+    }
+    have = give_land(w, poor, have, want);
+    if have < want {
+        take_land(w, rich, land[rich], have);
+    }
+}
+
+/// Raise ground round `player`'s spawn into first-wave land, ring by ring, until
+/// it holds `want` cells or has been given `SPAWN_FAIR_MAX_CELLS`. Returns what
+/// it holds afterwards.
+fn give_land(w: &mut World, player: usize, mut have: i32, want: i32) -> i32 {
+    let (face, cx, cy) = STARTS[player];
+    let line = fair_line(w);
+    let new_height = (line + i32::from(crate::world::TERRACE)) as i16;
+    let high = |w: &World, c: usize| i32::from(w.height[c]) > line && w.water[c] == 0;
+    let mut given = 0usize;
+    for ring in SPAWN_SHELF_INNER..=SPAWN_FAIR_RADIUS {
+        // One ring at a time, but swept until it stops growing: a cell whose
+        // only high neighbour is a cell given earlier in this same ring would
+        // otherwise wait for the next ring.
+        loop {
+            let mut grew = false;
+            for dy in -ring..=ring {
+                for dx in -ring..=ring {
+                    if dx.abs().max(dy.abs()) != ring
+                        || have >= want
+                        || given >= SPAWN_FAIR_MAX_CELLS
+                    {
+                        continue;
+                    }
+                    let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+                    // Anything that does not score yet — seabed, low ground, or a
+                    // sand beach above the line, which `habitable` never counts.
+                    if scores_every_wave(w, c, line) || w.lava[c] > 0 {
+                        continue;
+                    }
+                    if !(0..4).any(|d| high(w, crate::world::live_neighbour(c, d))) {
+                        continue;
+                    }
+                    w.height[c] = w.height[c].max(new_height);
+                    w.material[c] = crate::world::MAT_ROCK;
+                    w.water[c] = 0;
+                    w.sediment[c] = 0;
+                    w.vegetation[c] = 0;
+                    w.fertility[c] = 0;
+                    have += 1;
+                    given += 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        if have >= want || given >= SPAWN_FAIR_MAX_CELLS {
+            break;
+        }
+    }
+    have
+}
+
+/// The other half of a gap too wide to fill: the richer spawn's outermost
+/// lasting land, from the edge of its core's reach inward, sinks to a terrace
+/// below the last peak's waterline — still dry ground through the first two
+/// waves, but under water when the last one scores — until the poorer one's
+/// `have` is within `SPAWN_FAIR_PERCENT` of it. Never the pedestal: only
+/// cells farther out than the widest apron.
+fn take_land(w: &mut World, player: usize, mut rich: i32, have: i32) {
+    let (face, cx, cy) = STARTS[player];
+    let line = fair_line(w);
+    let sunk = (line - i32::from(crate::world::TERRACE)) as i16;
+    let pedestal = (SPAWN_APRON_RADIUS_16 + SPAWN_APRON_WOBBLE_16) / 16 + 1;
+    for ring in (pedestal..=SPAWN_FAIR_RADIUS).rev() {
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs().max(dy.abs()) != ring || have * 100 >= rich * SPAWN_FAIR_PERCENT {
+                    continue;
+                }
+                let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+                if !scores_every_wave(w, c, line) {
+                    continue;
+                }
+                w.height[c] = w.height[c].min(sunk);
+                rich -= 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1311,6 +1479,31 @@ mod tests {
             founded * 3 >= tried * 2,
             "a held raise founded a settlement on {founded} of {tried} sites"
         );
+    }
+
+    /// Both spawns start with about the same ground to score at the first
+    /// wave, on every terrain: within SPAWN_FAIR_PERCENT of each other.
+    #[test]
+    fn both_spawns_start_with_the_same_lasting_land() {
+        for terrain in
+            [crate::world::TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, crate::world::TERRAIN_VOLCANO]
+        {
+            for i in 0..8u32 {
+                let seed = 0x5EED_u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+                let mut w = World::boxed();
+                w.init(&MapConfig { seed, terrain, ..MapConfig::DEFAULT });
+                let (a, b) = (lasting_land(&w, 0), lasting_land(&w, 1));
+                let (lo, hi) = (a.min(b), a.max(b));
+                assert!(
+                    lo * 100 >= hi * SPAWN_FAIR_PERCENT,
+                    "terrain {terrain} seed {seed:#x}: the spawns start with {a} and {b} cells"
+                );
+                // The platforms are still the platforms.
+                for s in &w.settlements[..PLAYERS] {
+                    assert!(s.alive() && s.tier == 2, "a seed settlement did not survive");
+                }
+            }
+        }
     }
 
     fn influence_held(w: &World) -> [u32; PLAYERS] {
