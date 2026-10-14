@@ -1235,6 +1235,84 @@ mod tests {
 
     /// Cells each player influences right now — the quantity sudden death
     /// watches (tide.rs::check_sudden_death).
+    /// "Flatten land, the people build" (HANDOFF §4.6), as a player would do
+    /// it: a hand of earth, a held poured raise on uneven dry ground inside
+    /// their own influence, and a settlement on it within 45 seconds. Every
+    /// such site around the first spawn of six maps is tried. Before
+    /// raise levelled (`World::deform`) none of 44 sites across 12 maps
+    /// founded anything; now most do, and here at least two in three must.
+    #[test]
+    fn a_held_raise_on_uneven_ground_founds_a_settlement() {
+        use crate::world::{Command, CommandBuf, HAND_EARTH, TERRACE, VERB_RAISE};
+        let fresh = |cfg: &MapConfig| {
+            let mut w = World::boxed();
+            w.init(cfg);
+            for _ in 0..30 {
+                w.tick(&[]);
+            }
+            w
+        };
+        let (face, hx, hy) = STARTS[0];
+        let (mut tried, mut founded) = (0usize, 0usize);
+        for seed in [0x5EED_u32, 0x9E37_D8A6, 0x3C6F_525F] {
+            for terrain in [TERRAIN_PANGAEA, crate::world::TERRAIN_VOLCANO] {
+                let cfg = MapConfig { seed, terrain, ..MapConfig::DEFAULT };
+                let base = fresh(&cfg);
+                for cy in 2..N as i32 - 2 {
+                    for cx in 2..N as i32 - 2 {
+                        if (cx - hx as i32).abs().max((cy - hy as i32).abs()) > 14 {
+                            continue;
+                        }
+                        let at =
+                            |dx: i32, dy: i32| idx(face, (cx + dx) as usize, (cy + dy) as usize);
+                        let brush: std::vec::Vec<usize> =
+                            (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| at(dx, dy))).collect();
+                        let own = brush.iter().all(|&c| base.habitable(c) && base.influence[c] > 0);
+                        let clear = (-2..=2).all(|dy| {
+                            (-2..=2).all(|dx| base.settle_of[at(dx, dy)] == NO_SETTLEMENT)
+                        });
+                        let lo = brush.iter().map(|&c| base.height[c]).min().unwrap_or(0);
+                        let hi = brush.iter().map(|&c| base.height[c]).max().unwrap_or(0);
+                        // Gentle, uneven ground — where a player would build,
+                        // not against the face of a cliff.
+                        if !(own && clear && hi != lo && hi - lo <= 4 * TERRACE) {
+                            continue;
+                        }
+                        tried += 1;
+                        let mut w = fresh(&cfg);
+                        w.hand[0].material = HAND_EARTH;
+                        w.hand[0].amount = crate::world::HAND_CAPACITY;
+                        for t in 0..45 * crate::TICK_HZ {
+                            let mut buf = CommandBuf::new();
+                            if t < 20 {
+                                buf.push(Command {
+                                    tick: w.tick,
+                                    x: cx as u16,
+                                    y: cy as u16,
+                                    player: 0,
+                                    verb: VERB_RAISE,
+                                    face: face as u8,
+                                    modifier: 0,
+                                });
+                            }
+                            w.tick(buf.as_slice());
+                            let slot = w.settle_of[at(0, 0)];
+                            if slot != NO_SETTLEMENT && w.settlements[slot as usize].owner == 0 {
+                                founded += 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tried >= 5, "only {tried} gentle uneven sites to try");
+        assert!(
+            founded * 3 >= tried * 2,
+            "a held raise founded a settlement on {founded} of {tried} sites"
+        );
+    }
+
     fn influence_held(w: &World) -> [u32; PLAYERS] {
         // Live cells only: the ghost ring mirrors the border rows, and counting
         // it double-counted 1,536 cells in every threshold below.

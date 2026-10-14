@@ -1202,6 +1202,22 @@ impl World {
     /// cannot build**, which is the anti-griefing rule stated as a mechanic
     /// rather than as a cost.
     ///
+    /// **Raise fills the lowest ground first; lower cuts the highest.** A raise
+    /// lifts every brush cell below the next terrace line above the brush's
+    /// *lowest* cell up to that line (at most a terrace each), and leaves the
+    /// rest alone; a lower cuts every cell above the terrace line below the
+    /// brush's *highest* cell down to it. Held, a raise therefore fills the
+    /// hollows of the brush until every cell sits on one terrace line, and from
+    /// then on lifts the whole patch together: it levels. That is what makes
+    /// "flatten land, the people build" (HANDOFF §4.6) a thing a player can
+    /// do on purpose.
+    ///
+    /// It used to move every cell a whole terrace from wherever it was, which
+    /// preserves every difference it starts with: on the 44 uneven dry sites
+    /// around the spawns of 4 seeds x 3 terrains, holding a raise founded a
+    /// settlement in 45 s on none of them (`docs/specs/depth.md`). On ground
+    /// that is already level the two rules are the same.
+    ///
     /// Returns the number of height units actually moved.
     pub fn deform(
         &mut self,
@@ -1215,21 +1231,50 @@ impl World {
         if self.hand[player].material != HAND_EARTH {
             return 0;
         }
+        let in_brush = |dx: i32, dy: i32| dx * dx + dy * dy <= radius * radius + radius;
+
+        // The terrace line this stroke works towards, from the brush's lowest
+        // cell for a raise and its highest for a lower.
+        let mut extreme: Option<i16> = None;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if !in_brush(dx, dy) {
+                    continue;
+                }
+                let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
+                let h = self.height[idx(f, x, y)];
+                extreme = Some(match extreme {
+                    None => h,
+                    Some(e) if raise => e.min(h),
+                    Some(e) => e.max(h),
+                });
+            }
+        }
+        let Some(extreme) = extreme else { return 0 };
+        let line = if raise {
+            i32::from(extreme) + terrace_step_up(extreme)
+        } else {
+            i32::from(extreme) - terrace_step_down(extreme)
+        };
+
         let mut moved = 0i32;
         // Fixed traversal order (row-major within the brush) so the order in
         // which the hand fills or empties is not a function of anything else.
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                if dx * dx + dy * dy > radius * radius + radius {
+                if !in_brush(dx, dy) {
                     continue;
                 }
                 let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
                 let c = idx(f, x, y);
                 let was_sea = self.is_seabed(c);
+                let h = i32::from(self.height[c]);
                 if raise {
-                    let room = i32::from(HEIGHT_MAX) - i32::from(self.height[c]);
-                    let take =
-                        i32::from(TERRACE).min(room).min(i32::from(self.hand[player].amount));
+                    let room = i32::from(HEIGHT_MAX) - h;
+                    let take = (line - h)
+                        .min(i32::from(TERRACE))
+                        .min(room)
+                        .min(i32::from(self.hand[player].amount));
                     if take <= 0 {
                         continue;
                     }
@@ -1238,8 +1283,8 @@ impl World {
                     moved += take;
                 } else {
                     let room = i32::from(HAND_CAPACITY) - i32::from(self.hand[player].amount);
-                    let avail = i32::from(self.height[c]) - i32::from(HEIGHT_MIN);
-                    let take = i32::from(TERRACE).min(room).min(avail);
+                    let avail = h - i32::from(HEIGHT_MIN);
+                    let take = (h - line).min(i32::from(TERRACE)).min(room).min(avail);
                     if take <= 0 {
                         continue;
                     }
@@ -1892,6 +1937,23 @@ const fn widen(h: i32) -> i32 {
     smooth((h - 16384) * 2)
 }
 
+/// Height units from `h` up to the next terrace line: a whole terrace from a
+/// line, the remainder from between two.
+#[must_use]
+pub const fn terrace_step_up(h: i16) -> i32 {
+    let t = TERRACE as i32;
+    t - (h as i32).rem_euclid(t)
+}
+
+/// Height units from `h` down to the previous terrace line: a whole terrace
+/// from a line, the remainder from between two.
+#[must_use]
+pub const fn terrace_step_down(h: i16) -> i32 {
+    let t = TERRACE as i32;
+    let r = (h as i32).rem_euclid(t);
+    if r == 0 { t } else { r }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2148,7 +2210,16 @@ mod tests {
             .sum();
         assert_eq!(before - after, i64::from(moved), "matter was not conserved");
 
-        let raised = w.deform(0, 0, 32, 32, 2, true);
+        // A raise levels rather than retracing the dig, so it can take more
+        // than one stroke to empty the hand — but every unit comes back.
+        let mut raised = 0;
+        for _ in 0..64 {
+            let r = w.deform(0, 0, 32, 32, 2, true);
+            if r == 0 {
+                break;
+            }
+            raised += r;
+        }
         assert_eq!(raised, moved, "the hand did not give back what it took");
         assert_eq!(w.hand[0].amount, 0);
     }
@@ -2166,8 +2237,9 @@ mod tests {
     #[test]
     fn raising_the_seabed_above_the_sea_leaves_it_dry() {
         // A shelf 40 units under the sea, wide enough that the brush's interior
-        // cells have neighbours that rise with them. Three raises of a terrace
-        // each bring the footprint clear of the water. Then the water pass runs:
+        // cells have neighbours that rise with them. Four raises bring the
+        // footprint clear of the water: the first only up to the terrace line
+        // above it (-40 -> -32), then a terrace each. Then the water pass runs:
         // it is what used to be relied on to drain the land, and what could not,
         // because `(surface difference) / 4` is zero below four units — the
         // interior kept a film for the rest of the match and was never
@@ -2187,7 +2259,7 @@ mod tests {
             }
         }
         w.hand[0] = Hand { material: HAND_EARTH, _pad: 0, amount: HAND_CAPACITY };
-        for _ in 0..3 {
+        for _ in 0..4 {
             assert!(w.deform(0, face, cx, cy, 2, true) > 0, "the raise moved nothing");
         }
         for _ in 0..30 {

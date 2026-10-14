@@ -214,7 +214,7 @@ fn step_player(w: &mut World, player: usize, out: &mut CommandBuf) {
     let a = w.ai[player];
 
     if a.verb != VERB_NOP && a.holding != 0 {
-        if a.timer == 0 || !still_worth_holding(w, player, a.verb) {
+        if a.timer == 0 || !still_worth_holding(w, player, &a) {
             // Done: stand back and let the world respond.
             w.ai[player].holding = 0;
             w.ai[player].timer = t.pause;
@@ -273,13 +273,39 @@ fn emit(w: &World, player: usize, out: &mut CommandBuf, verb: u8, at: (u8, u8, u
 
 /// A raise stops when the hand is empty, a dig when it is full: holding on
 /// past that is a refused verb every tick, which the client reads as an error.
-fn still_worth_holding(w: &World, player: usize, verb: u8) -> bool {
+/// Either stops the moment one of its own towns stands under the brush: a
+/// held raise levels ground (`World::deform`), a settlement founds itself on
+/// the level ground mid-hold, and the next tick of the same raise would break
+/// the plateau it just made.
+fn still_worth_holding(w: &World, player: usize, a: &AiState) -> bool {
     let amount = w.hand[player].amount;
-    match verb {
+    let sculpting = match a.verb {
         VERB_RAISE => amount > 0,
         VERB_LOWER => amount <= HAND_CAPACITY - BRUSH_LOAD,
-        _ => true,
+        _ => return true,
+    };
+    sculpting && !brush_covers_own_town(w, player, a)
+}
+
+fn brush_covers_own_town(w: &World, player: usize, a: &AiState) -> bool {
+    let r = World::brush_radius(a.modifier);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let Some((f, x, y)) =
+                crate::world::walk(usize::from(a.face), i32::from(a.x), i32::from(a.y), dx, dy)
+            else {
+                continue;
+            };
+            let slot = w.settle_of[idx(f, x, y)];
+            if slot != NO_SETTLEMENT
+                && w.settlements[slot as usize].alive()
+                && w.settlements[slot as usize].owner as usize == player
+            {
+                return true;
+            }
+        }
     }
+    false
 }
 
 fn verb_power_cost(w: &World, verb: u8) -> Option<i32> {
