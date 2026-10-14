@@ -11,8 +11,8 @@
 use crate::fixed::{Fx, ONE};
 use crate::seams::{Axis, DIR_DX, DIR_DY, DIR_E, DIR_N, DIR_S, DIR_W, SEAM};
 use crate::world::{
-    N, NO_FLOW, NO_SETTLEMENT, PLAYERS, WALKER_ALIVE, WALKER_CHAMPION, WALKER_LEADER, Walker,
-    World, idx,
+    MAT_SOIL, MAT_SWAMP, N, NO_FLOW, NO_SETTLEMENT, PLAYERS, WALKER_ALIVE, WALKER_CHAMPION,
+    WALKER_LEADER, Walker, World, idx,
 };
 
 /// Cells per tick. `[START]` 1/16 of a cell, i.e. ~1.9 cells per second.
@@ -136,6 +136,13 @@ fn step_walker(w: &mut World, id: usize) {
     let cx = crate::fixed::floor_int(wk.x).clamp(0, N as i32 - 1);
     let cy = crate::fixed::floor_int(wk.y).clamp(0, N as i32 - 1);
     let here = idx(face, cx as usize, cy as usize);
+    // A swamp laid under a walker's feet takes it as surely as one it walks
+    // into: one standing still — on the magnet, or with nowhere to go — would
+    // otherwise stand on it unharmed for good.
+    if w.material[here] == MAT_SWAMP {
+        sink(w, id, here);
+        return;
+    }
 
     // A champion seeks enemy settlements (§4.7). It does that by following the
     // *opponent's* flow field, which already points at exactly those targets —
@@ -178,7 +185,30 @@ fn step_walker(w: &mut World, id: usize) {
     w.walkers[id].x = nx;
     w.walkers[id].y = ny;
 
+    if w.material[dest] == MAT_SWAMP {
+        sink(w, id, dest);
+        return;
+    }
+
     claim_magnet(w, id, owner, nface, dcx, dcy);
+}
+
+/// "Swallows walkers that enter" (§5.2).
+///
+/// Anyone's — a swamp has no owner, and one laid across your own road takes
+/// your own people. A champion sinks too: its holy fire is proof against
+/// walkers, not against ground. Removed here rather than left at zero hp for
+/// `combat::reap`, so a sunk walker cannot fight, besiege or take a pickup on
+/// its way down, and a sinking leader drops the magnet where it went under.
+/// Unless the map says the swamp is bottomless, the cell that took a walker
+/// is ground again.
+fn sink(w: &mut World, id: usize, c: usize) {
+    let owner = (w.walkers[id].owner as usize) % PLAYERS;
+    w.census.swamp_victims[owner] = w.census.swamp_victims[owner].saturating_add(1);
+    if w.cfg.swamp_bottomless == 0 {
+        w.material[c] = MAT_SOIL;
+    }
+    remove(w, id);
 }
 
 /// First walker to reach the magnet becomes leader (§5.1).
@@ -294,7 +324,7 @@ pub fn cell_of(wk: &Walker) -> usize {
 mod tests {
     use super::*;
     use crate::seams::step;
-    use crate::world::{MAT_SOIL, Magnet, MapConfig, TERRAIN_PANGAEA};
+    use crate::world::{Magnet, MapConfig, TERRAIN_PANGAEA};
 
     fn open_world() -> alloc::boxed::Box<World> {
         let mut cfg = MapConfig::DEFAULT;
@@ -531,6 +561,56 @@ mod tests {
             movement(&mut w);
         }
         assert!(crate::fixed::floor_int(w.walkers[id].x) < 40, "walker walked into the sea");
+    }
+
+    /// One walker, marching east into a swamp cell two cells ahead.
+    fn march_into_swamp(bottomless: u8) -> (alloc::boxed::Box<World>, usize, usize) {
+        let mut w = open_world();
+        w.cfg.swamp_bottomless = bottomless;
+        let bog = idx(4, 32, 30);
+        w.material[bog] = MAT_SWAMP;
+        w.flow[0].fill(crate::seams::DIR_E as u8);
+        let id = spawn(&mut w, 0, 4, 30, 30, 2, NO_SETTLEMENT).unwrap() as usize;
+        (w, id, bog)
+    }
+
+    #[test]
+    fn a_walker_that_enters_a_swamp_sinks_and_spends_it() {
+        let (mut w, id, bog) = march_into_swamp(0);
+        for _ in 0..200 {
+            movement(&mut w);
+        }
+        assert!(!w.walkers[id].alive(), "the swamp let the walker through");
+        assert_eq!(w.walker_count[0], 0);
+        assert_eq!(w.census.swamp_victims, [1, 0]);
+        assert_eq!(w.material[bog], MAT_SOIL, "a one-victim swamp is still there");
+    }
+
+    #[test]
+    fn a_bottomless_swamp_takes_the_next_walker_too() {
+        let (mut w, id, bog) = march_into_swamp(1);
+        for _ in 0..200 {
+            movement(&mut w);
+        }
+        assert!(!w.walkers[id].alive());
+        assert_eq!(w.material[bog], MAT_SWAMP, "a bottomless swamp filled up");
+        let next = spawn(&mut w, 0, 4, 30, 30, 2, NO_SETTLEMENT).unwrap() as usize;
+        for _ in 0..200 {
+            movement(&mut w);
+        }
+        assert!(!w.walkers[next].alive());
+        assert_eq!(w.census.swamp_victims, [2, 0]);
+    }
+
+    #[test]
+    fn a_swamp_laid_under_a_standing_walker_takes_it() {
+        let mut w = open_world();
+        w.flow[1].fill(NO_FLOW);
+        let id = spawn(&mut w, 1, 4, 30, 30, 2, NO_SETTLEMENT).unwrap() as usize;
+        w.material[cell_of(&w.walkers[id])] = MAT_SWAMP;
+        movement(&mut w);
+        assert!(!w.walkers[id].alive(), "a walker stood on a swamp unharmed");
+        assert_eq!(w.census.swamp_victims, [0, 1]);
     }
 
     #[test]

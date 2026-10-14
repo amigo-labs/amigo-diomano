@@ -322,7 +322,17 @@ fn earthquake(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
 }
 
 /// Created on flat ground; swallows walkers that enter (§5.2).
+///
+/// Flat means the height of the cell aimed at: the swamp takes the plateau
+/// under the cursor and nothing above or below it — the same equal-height
+/// ground a settlement needs, which is what makes it a spell to aim rather
+/// than a blanket. Never on a home platform, which an earthquake spares for
+/// the same reason (`settlements::is_home_platform`): a core that can be made
+/// unbuildable by one cast is sudden death by one cast. Raising or lowering
+/// over it buries it or digs it out (`World::deform`).
 fn swamp(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
+    let Some((tf, tx, ty)) = walk(face, cx, cy, 0, 0) else { return };
+    let level = w.height[idx(tf, tx, ty)];
     for dy in -radius..=radius {
         for dx in -radius..=radius {
             if dx * dx + dy * dy > radius * radius {
@@ -330,7 +340,11 @@ fn swamp(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
             }
             let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
             let c = idx(f, x, y);
-            if w.water[c] > 0 || w.lava[c] > 0 {
+            if w.water[c] > 0
+                || w.lava[c] > 0
+                || w.height[c] != level
+                || crate::settlements::is_home_platform(c)
+            {
                 continue;
             }
             w.material[c] = MAT_SWAMP;
@@ -472,9 +486,13 @@ fn spawn_pickup(w: &mut World) {
     }
 }
 
-/// Dry, walkable, and claimed by nobody.
+/// Dry, walkable, claimed by nobody, and not swamp — a pickup on a swamp
+/// would be bait that drowns whoever takes it.
 fn is_pickup_site(w: &World, c: usize) -> bool {
-    w.influence[c] == 0 && w.passable(c) && w.settle_of[c] == crate::world::NO_SETTLEMENT
+    w.influence[c] == 0
+        && w.passable(c)
+        && w.material[c] != MAT_SWAMP
+        && w.settle_of[c] == crate::world::NO_SETTLEMENT
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +693,11 @@ pub fn parse_manifest(src: &str) -> Result<MapConfig, ParseError> {
                         cfg.power_enabled[p] =
                             u8::from(parse_bool(value).ok_or_else(|| err(line_no, "not a bool"))?);
                     }
+                    // §5.2's map option, on the one power it applies to.
+                    "bottomless" if p == crate::world::POWER_SWAMP => {
+                        cfg.swamp_bottomless =
+                            u8::from(parse_bool(value).ok_or_else(|| err(line_no, "not a bool"))?);
+                    }
                     "cost" => {
                         cfg.power_cost[p] = parse_int(value)
                             .ok_or_else(|| err(line_no, "cost is not an integer"))?
@@ -759,6 +782,8 @@ pub fn parse_log_header(src: &str) -> Result<LogHeader, ParseError> {
                 cfg.ai_style = [v.clamp(0, i64::from(crate::ai::STYLE_COUNT - 1)) as u8; PLAYERS];
             }
             "ai_mirror" => cfg.ai_mirror = u8::from(v != 0),
+            // §5.2's map option; absent means the default, one walker a cell.
+            "swamp_bottomless" => cfg.swamp_bottomless = u8::from(v != 0),
             // Keep simulating past the decided outcome. Corpus logs set this:
             // a default match decides around tick 10,000 and a frozen second
             // half would gut the §6.3 coverage. Real matches freeze.
@@ -1532,5 +1557,66 @@ enabled = true
         for (c, h, m) in platform {
             assert_eq!((w.height[c], w.material[c]), (h, m), "platform cell {c} moved");
         }
+    }
+
+    #[test]
+    fn a_swamp_takes_the_plateau_it_is_aimed_at_and_nothing_else() {
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.terrain = TERRAIN_PANGAEA;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        for y in 14..27 {
+            for x in 14..27 {
+                let c = idx(4, x, y);
+                w.height[c] = 400;
+                w.water[c] = 0;
+                w.lava[c] = 0;
+                w.material[c] = MAT_SOIL;
+            }
+        }
+        w.height[idx(4, 22, 20)] = 400 + TERRACE;
+        w.water[idx(4, 20, 22)] = 50;
+        w.lava[idx(4, 18, 20)] = 10;
+        swamp(&mut w, 4, 20, 20, 2);
+        assert_eq!(w.material[idx(4, 20, 20)], MAT_SWAMP, "the cell aimed at");
+        assert_eq!(w.material[idx(4, 21, 21)], MAT_SWAMP, "level ground in the brush");
+        assert_eq!(w.material[idx(4, 22, 20)], MAT_SOIL, "a terrace higher is not the plateau");
+        assert_eq!(w.material[idx(4, 20, 22)], MAT_SOIL, "under water");
+        assert_eq!(w.material[idx(4, 18, 20)], MAT_SOIL, "under lava");
+        assert_eq!(w.material[idx(4, 23, 20)], MAT_SOIL, "outside the brush");
+    }
+
+    #[test]
+    fn a_swamp_spares_a_home_platform() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let (face, x, y) = crate::settlements::STARTS[0];
+        let radius = World::brush_radius(crate::world::MOD_THROWN | crate::world::MOD_EXTREME);
+        swamp(&mut w, face, x as i32, y as i32, radius);
+        for dy in -2..=2i32 {
+            for dx in -2..=2i32 {
+                let c = idx(face, (x as i32 + dx) as usize, (y as i32 + dy) as usize);
+                assert_ne!(w.material[c], MAT_SWAMP, "platform cell {c} went to swamp");
+            }
+        }
+    }
+
+    #[test]
+    fn the_bottomless_swamp_is_a_map_option() {
+        let h = parse_log_header("seed 1\nswamp_bottomless 1\n").expect("the key parses");
+        assert_eq!(h.cfg.swamp_bottomless, 1);
+        assert_eq!(parse_log_header("seed 1\n").unwrap().cfg.swamp_bottomless, 0);
+        let cfg = parse_manifest("[powers.swamp]\nenabled = true\nbottomless = true\n")
+            .expect("the manifest key parses");
+        assert_eq!(cfg.swamp_bottomless, 1);
+        assert!(
+            parse_manifest("[powers.volcano]\nbottomless = true\n").is_err(),
+            "only a swamp has a bottom"
+        );
+    }
+
+    #[test]
+    fn the_shipped_game_has_every_power() {
+        assert_eq!(MapConfig::DEFAULT.power_enabled, [1; POWER_COUNT]);
     }
 }

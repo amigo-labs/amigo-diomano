@@ -265,6 +265,8 @@ pub struct Census {
     pub verb_events: [VerbEvent; VERB_EVENTS],
     /// Total events ever written. The ring index is this modulo its length.
     pub verb_events_written: u32,
+    /// Walkers a swamp swallowed, by their owner.
+    pub swamp_victims: [u32; PLAYERS],
 }
 
 /// Capacity of the verb-event ring. At most one command per verb per player per
@@ -307,6 +309,7 @@ impl Census {
         verb_applied: [0; VERB_COUNT as usize],
         verb_events: [VerbEvent::ZEROED; VERB_EVENTS],
         verb_events_written: 0,
+        swamp_victims: [0; PLAYERS],
     };
 }
 
@@ -593,6 +596,10 @@ pub struct MapConfig {
     /// meet resolve none. A corpus log states `land_bridge 1` for itself, the
     /// same way it states its own tide.
     pub land_bridge: u8,
+    /// A swamp swallows every walker that enters it (§5.2's "bottomless"),
+    /// instead of the default: a swamp cell takes one walker and is ground
+    /// again. Either way raising or lowering over it buries or digs it out.
+    pub swamp_bottomless: u8,
     /// Keep simulating after the outcome is decided. Off for real matches —
     /// an ended world freezes — but the §6.3 corpus needs 20,000 ticks of
     /// activity from matches whose outcome lands around tick 10,000.
@@ -631,7 +638,7 @@ impl MapConfig {
         lull_ticks: 2_700,
         escalation: 150,
         wave_strength: 48,
-        power_enabled: [1, 1, 1, 0, 1, 1, 1, 1],
+        power_enabled: [1; POWER_COUNT],
         // Armageddon at 2,500 is roughly a minute of late-game accrual — see
         // `armageddon_is_earnable_in_a_match` — so the stalemate breaker is
         // reachable exactly when a stalemate exists and not before. At the
@@ -645,6 +652,7 @@ impl MapConfig {
         ai_style: [0; PLAYERS],
         ai_mirror: 0,
         land_bridge: 0,
+        swamp_bottomless: 0,
         endless: 0,
     };
 }
@@ -1292,6 +1300,11 @@ impl World {
                     self.hand[player].amount += take as u16;
                     moved += take;
                 }
+                // Buried by a raise or dug out by a lower (§5.2): the only way
+                // to be rid of a swamp, and the victim's answer to one.
+                if self.material[c] == MAT_SWAMP {
+                    self.material[c] = MAT_SOIL;
+                }
                 self.refresh_cell_water(c, was_sea);
             }
         }
@@ -1335,12 +1348,16 @@ impl World {
     // Queries
     // -----------------------------------------------------------------------
 
-    /// Above the waterline, not molten, not swamp: somewhere a walker can stand.
+    /// Above the waterline, not molten: somewhere a walker can stand.
+    ///
+    /// Swamp is passable on purpose. It used to be a wall the flow field
+    /// routed around, so the walkers §5.2 says it swallows never entered it;
+    /// now armies march into it and it takes them (`walkers::step_walker`).
+    /// What it still denies is building and scoring (`habitable`).
     #[inline]
     #[must_use]
     pub fn passable(&self, c: usize) -> bool {
         self.lava[c] == 0
-            && self.material[c] != MAT_SWAMP
             && i32::from(self.height[c]) > i32::from(self.sea_level)
             && i32::from(self.water[c]) < i32::from(TERRACE)
     }
@@ -1957,6 +1974,41 @@ pub const fn terrace_step_down(h: i16) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_swamp_is_walked_into_but_neither_built_on_nor_scored() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let c = idx(4, 20, 20);
+        w.height[c] = 400;
+        w.water[c] = 0;
+        w.lava[c] = 0;
+        w.material[c] = MAT_SWAMP;
+        assert!(w.passable(c), "the flow field would route armies around the swamp");
+        assert!(!w.habitable(c), "a swamp scores");
+    }
+
+    #[test]
+    fn raising_or_lowering_over_a_swamp_does_away_with_it() {
+        for raise in [true, false] {
+            let mut w = World::boxed();
+            w.init(&MapConfig::DEFAULT);
+            for y in 16..25 {
+                for x in 16..25 {
+                    let c = idx(4, x, y);
+                    w.height[c] = 400;
+                    w.water[c] = 0;
+                    w.lava[c] = 0;
+                    w.material[c] = MAT_SWAMP;
+                }
+            }
+            w.hand[0] =
+                Hand { material: HAND_EARTH, _pad: 0, amount: if raise { 2_000 } else { 0 } };
+            assert!(w.deform(0, 4, 20, 20, 1, raise) > 0, "the stroke moved nothing");
+            assert_eq!(w.material[idx(4, 20, 20)], MAT_SOIL, "raise {raise}: the swamp survived");
+            assert_eq!(w.material[idx(4, 23, 20)], MAT_SWAMP, "raise {raise}: outside the brush");
+        }
+    }
 
     #[test]
     fn a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners() {
