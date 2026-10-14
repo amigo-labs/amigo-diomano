@@ -56,8 +56,8 @@ pub const LEVEL_COUNT: u8 = 3;
 
 /// No preference: terraform, strike, flood as the forecast says.
 pub const STYLE_BALANCED: u8 = 0;
-/// Builds high and late; strikes only after the second wave, never ends the
-/// match early.
+/// Builds for the last wave and builds more; strikes at half the rate, never
+/// floods, never ends the match early.
 pub const STYLE_TURTLE: u8 = 1;
 /// Marches on the enemy from the first wave and pays for champions.
 pub const STYLE_RUSH: u8 = 2;
@@ -114,6 +114,9 @@ pub struct Tuning {
     /// Brush modifier for strikes: how much of the enemy's land one quake
     /// breaks. The same `B` key a player cycles.
     pub strike_modifier: u8,
+    /// Builds against the *last* wave's waterline instead of the next one:
+    /// ground lifted once that never has to be lifted again.
+    pub builds_for_last: bool,
 }
 
 /// The tuning for a level and a style. Out-of-range values clamp, so a
@@ -135,6 +138,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             volcano: false,
             marches: false,
             strike_modifier: 0,
+            builds_for_last: false,
         },
         LEVEL_NORMAL => Tuning {
             think: 45,
@@ -150,6 +154,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             volcano: false,
             marches: false,
             strike_modifier: MOD_INCREASED,
+            builds_for_last: false,
         },
         _ => Tuning {
             think: 15,
@@ -165,12 +170,19 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             volcano: false,
             marches: false,
             strike_modifier: MOD_EXTREME,
+            builds_for_last: false,
         },
     };
     match style {
         STYLE_TURTLE => {
-            t.strike_after = if t.strike_after < 2 { 2 } else { t.strike_after };
+            // Builds for the finale and builds more of it, strikes at half the
+            // rate. It used to wait for the second wave to strike at all, and
+            // won 8-41% against every other style: everyone else was spending
+            // from the first wave on while it sat on a full purse.
             t.strike_gap *= 2;
+            t.hold = t.hold * 3 / 2;
+            t.pause = if t.pause / 2 < 8 { 8 } else { t.pause / 2 };
+            t.builds_for_last = true;
             t.armageddon = false;
             t.floods = false;
         }
@@ -427,6 +439,16 @@ fn waterline(w: &World) -> i32 {
     i32::from(crate::tide::next_peak_level(w).unwrap_or(w.sea_base))
 }
 
+/// The waterline of the last natural wave's peak, or the calm sea once the
+/// tide is done.
+fn last_waterline(w: &World) -> i32 {
+    if w.tide.phase == TIDE_DONE {
+        return i32::from(w.sea_base);
+    }
+    let last = w.cfg.waves.saturating_sub(1);
+    i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last))
+}
+
 /// Habitable cells each god holds that stand above `level`.
 fn held_above(w: &World, level: i32) -> [i32; PLAYERS] {
     let mut held = [0i32; PLAYERS];
@@ -572,7 +594,8 @@ enum Spot {
 /// decision count, which reads as a player who notices *a* problem rather
 /// than the worst one.
 fn best_spot(w: &World, player: usize, t: &Tuning, kind: Spot) -> Option<(u8, u8, u8)> {
-    let line = waterline(w);
+    let building = matches!(kind, Spot::Build | Spot::Dump);
+    let line = if building && t.builds_for_last { last_waterline(w) } else { waterline(w) };
     let threshold = match kind {
         Spot::Build => 4,
         Spot::Dig => 3,
@@ -682,9 +705,28 @@ fn score_spot(
                         if t.steals == 0 {
                             return None;
                         }
-                        score += if h >= line { 3 } else { 1 };
+                        // A dig levels what it cuts (`World::deform`), so
+                        // taking the enemy's ground is only taking it when it
+                        // ends up under the next peak's water. Cut it down to a
+                        // flat patch still above the line and it is a building
+                        // site handed to them: traced on a pangaea seed, an
+                        // idle player whose coast the opponent kept digging
+                        // held 697 cells at the first peak against 265
+                        // without it.
+                        score += if h - terrace <= line {
+                            3
+                        } else if h >= line {
+                            -2
+                        } else {
+                            0
+                        };
                     } else if w.passable(c) {
-                        score += 1; // nobody's land
+                        // Nobody's land — unless it borders the enemy's, where
+                        // the levelled patch is theirs to found on next.
+                        let borders_enemy = (0..4).any(|d| {
+                            owner_of(w, live_neighbour(c, d)).is_some_and(|o| o != player)
+                        });
+                        score += if borders_enemy { -1 } else { 1 };
                     } else if h < line - 4 * terrace {
                         score += 2; // the shelf: earth nobody will miss
                     }
@@ -974,9 +1016,13 @@ mod tests {
     #[test]
     fn strikes_wait_for_their_wave_and_never_overdraw_the_reserve() {
         let mut w = ai_world();
-        w.cfg.ai_style = [STYLE_TURTLE; PLAYERS];
+        w.cfg.ai_level = [LEVEL_EASY; PLAYERS];
         after_waves(&mut w, 1);
-        assert_eq!(strikes(&mut w, 9_999, 2_000), 0, "a turtle struck before the second wave");
+        assert_eq!(
+            strikes(&mut w, 9_999, 2_000),
+            0,
+            "an easy opponent struck before the second wave"
+        );
         after_waves(&mut w, 2);
         assert_eq!(strikes(&mut w, 0, 2_000), 0, "a broke opponent still paid for a strike");
         assert!(strikes(&mut w, 9_999, 2_000) > 0, "a rich opponent never strikes");
