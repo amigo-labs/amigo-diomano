@@ -192,9 +192,15 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             t.strike_gap = t.strike_gap * 2 / 3;
         }
         STYLE_DISASTER => {
-            // Volcanoes at the level's own pace. At twice the pace it beat
-            // every other style 66-83% of the time in the mirror sweep.
+            // Volcanoes at the level's own pace, from the second wave. At
+            // twice the pace it beat every other style 66-83% of the time in
+            // the mirror sweep; venting from the first wave it still beat
+            // them 75-83%, at half the pace or with smaller vents, with or
+            // without floods and armageddon. The first vent is what decides:
+            // lava over the enemy's flat land before the second peak costs
+            // them about a hundred scoring cells.
             t.volcano = true;
+            t.strike_after = 2;
             t.floods = true;
             t.armageddon = level != LEVEL_EASY;
         }
