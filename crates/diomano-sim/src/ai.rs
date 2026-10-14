@@ -120,6 +120,9 @@ pub struct Tuning {
     /// Every other strike is a swamp on the enemy's best plateau, when one
     /// is worth it.
     pub swamps: bool,
+    /// Swamps the road an enemy army is marching up, in front of its own
+    /// towns (`threat`, `moat_spot`).
+    pub moats: bool,
 }
 
 /// The tuning for a level and a style. Out-of-range values clamp, so a
@@ -143,6 +146,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             strike_modifier: 0,
             builds_for_last: false,
             swamps: false,
+            moats: false,
         },
         LEVEL_NORMAL => Tuning {
             think: 45,
@@ -160,6 +164,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             strike_modifier: MOD_INCREASED,
             builds_for_last: false,
             swamps: true,
+            moats: false,
         },
         _ => Tuning {
             think: 15,
@@ -177,6 +182,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             strike_modifier: MOD_EXTREME,
             builds_for_last: false,
             swamps: true,
+            moats: false,
         },
     };
     match style {
@@ -191,6 +197,10 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             t.builds_for_last = true;
             t.armageddon = false;
             t.floods = false;
+            // Its answer to an army is the swamp across the road, where the
+            // other styles answer with a strike of their own. Not on easy,
+            // which swamps nothing.
+            t.moats = t.swamps;
         }
         STYLE_RUSH => {
             t.marches = true;
@@ -374,6 +384,20 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
         return Some((VERB_FLOOD, home(player), 0));
     }
 
+    // 3a. A moat across the road an army is marching up. Before any strike,
+    // and from the first minute: a strike can wait for its wave, a siege
+    // cannot. Spaced by `MOAT_GAP` against the last strike of any kind, so
+    // a held-off army does not turn every thought into a swamp, and a moat
+    // pushes the next strike back by the same spacing.
+    if t.moats
+        && (w.ai[player].strikes == 0 || w.tick.wrapping_sub(w.ai[player].last_strike) >= MOAT_GAP)
+        && afford(POWER_SWAMP)
+        && let Some(front) = threat(w, player)
+        && let Some(at) = moat_spot(w, player, front)
+    {
+        return Some((VERB_SWAMP, at, 0));
+    }
+
     // 3. Strike the enemy's best town.
     let spaced =
         w.ai[player].strikes == 0 || w.tick.wrapping_sub(w.ai[player].last_strike) >= t.strike_gap;
@@ -438,6 +462,79 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
 fn home(player: usize) -> (u8, u8, u8) {
     let (f, x, y) = crate::settlements::STARTS[player];
     (f as u8, x as u8, y as u8)
+}
+
+/// Cells around one of its own towns an enemy walker has to come within to
+/// count as marching on it.
+const MOAT_RADIUS: usize = 12;
+/// Enemy walkers that close before a turtle swamps their road.
+const MOAT_THREAT: usize = 3;
+/// Ticks between two moats, or a moat and any other strike: ten seconds.
+const MOAT_GAP: u32 = 300;
+/// How far ahead of the army, in steps of its own flow field, a moat goes:
+/// far enough that the front walker has not passed it when it forms, near
+/// enough that the road has not forked yet.
+const MOAT_AHEAD: core::ops::RangeInclusive<usize> = 3..=6;
+
+/// The front of an army marching on one of `player`'s towns: the cell of the
+/// enemy walker nearest its goal, once `MOAT_THREAT` of them are within
+/// `MOAT_RADIUS` of the same town. Walkers and towns in id order, nearest by
+/// the enemy's own flow-field distance with ties to the lower id, so the
+/// answer is a function of state alone.
+fn threat(w: &World, player: usize) -> Option<usize> {
+    let enemy = (player + 1) % PLAYERS;
+    let near = |s: &crate::world::Settlement, k: &crate::world::Walker| {
+        let c = crate::walkers::cell_of(k);
+        let (f, x, y) = crate::world::decode(c);
+        f == s.face as usize
+            && x.abs_diff(i32::from(s.x)) as usize <= MOAT_RADIUS
+            && y.abs_diff(i32::from(s.y)) as usize <= MOAT_RADIUS
+    };
+    for s in w.settlements.iter().filter(|s| s.alive() && s.owner as usize == player) {
+        let army =
+            || w.walkers.iter().filter(|k| k.alive() && k.owner as usize == enemy && near(s, k));
+        if army().count() < MOAT_THREAT {
+            continue;
+        }
+        return army().map(crate::walkers::cell_of).min_by_key(|&c| w.dist[enemy][c]);
+    }
+    None
+}
+
+/// Where on the army's road a moat goes: `MOAT_AHEAD` steps along the
+/// enemy's flow field from its front, the first cell there a swamp can form
+/// on (dry, not a home platform, no town of its own) that costs it no
+/// scoring ground of its own, or failing that the first it can form on at
+/// all. The swamp itself then takes only that cell's plateau
+/// (`powers::swamp`).
+fn moat_spot(w: &World, player: usize, front: usize) -> Option<(u8, u8, u8)> {
+    let enemy = (player + 1) % PLAYERS;
+    let mut c = front;
+    let mut fallback = None;
+    for step in 1..=*MOAT_AHEAD.end() {
+        let dir = w.flow[enemy][c];
+        if dir == crate::world::NO_FLOW || usize::from(dir) >= 4 {
+            break;
+        }
+        c = live_neighbour(c, usize::from(dir));
+        if !MOAT_AHEAD.contains(&step) {
+            continue;
+        }
+        let slot = w.settle_of[c];
+        let own_town = slot != NO_SETTLEMENT
+            && w.settlements[slot as usize].alive()
+            && w.settlements[slot as usize].owner as usize == player;
+        if w.water[c] > 0 || w.lava[c] > 0 || own_town || crate::settlements::is_home_platform(c) {
+            continue;
+        }
+        let (f, x, y) = crate::world::decode(c);
+        let at = (f as u8, x as u8, y as u8);
+        if !(owner_of(w, c) == Some(player) && w.habitable(c)) {
+            return Some(at);
+        }
+        fallback = fallback.or(Some(at));
+    }
+    fallback
 }
 
 fn walker_count(w: &World, player: usize) -> usize {
@@ -1085,6 +1182,67 @@ mod tests {
         assert!(normal.contains(&VERB_SWAMP), "a normal opponent never swamped");
         assert!(normal.contains(&VERB_EARTHQUAKE), "a normal opponent only swamped");
         assert!(!run(LEVEL_EASY).contains(&VERB_SWAMP), "an easy opponent swamped");
+    }
+
+    /// A turtle's home under a march: player 0's magnet on player 1's core,
+    /// the flow fields rebuilt to lead there, and `walkers` of player 0's
+    /// eight cells out along the face's x axis.
+    fn marched_on(style: u8, walkers: usize) -> alloc::boxed::Box<World> {
+        let mut w = ai_world();
+        w.cfg.ai_style = [style; PLAYERS];
+        let (f, x, y) = crate::settlements::STARTS[1];
+        w.magnet[0] = crate::world::Magnet {
+            face: f as u8,
+            x: x as u8,
+            y: y as u8,
+            active: 1,
+            leader: u16::MAX,
+            _pad: 0,
+        };
+        crate::flowfield::rebuild(&mut w);
+        for k in 0..walkers {
+            crate::walkers::spawn(&mut w, 0, f, x - 8, y + k - 1, 2, NO_SETTLEMENT)
+                .expect("room for a walker");
+        }
+        w.mana[1] = 9_999 << 16;
+        w
+    }
+
+    #[test]
+    fn a_turtle_swamps_the_road_an_army_marches_up() {
+        let w = marched_on(STYLE_TURTLE, MOAT_THREAT);
+        let t = tuning(LEVEL_NORMAL, STYLE_TURTLE);
+        let front = threat(&w, 1).expect("three walkers at its door are no threat");
+        let Some((verb, at, modifier)) = decide(&w, 1, &t) else {
+            panic!("the turtle did nothing about the march");
+        };
+        assert_eq!((verb, modifier), (VERB_SWAMP, 0), "not a moat");
+        // On the army's own road, ahead of its front.
+        let mut c = front;
+        let mut on_road = false;
+        for _ in 0..*MOAT_AHEAD.end() {
+            let dir = w.flow[0][c];
+            if usize::from(dir) >= 4 {
+                break;
+            }
+            c = live_neighbour(c, usize::from(dir));
+            on_road |= c == idx(usize::from(at.0), usize::from(at.1), usize::from(at.2));
+        }
+        assert!(on_road, "the moat is not on the road the army walks");
+    }
+
+    #[test]
+    fn two_walkers_are_not_an_army_and_other_styles_dig_no_moats() {
+        assert!(threat(&marched_on(STYLE_TURTLE, MOAT_THREAT - 1), 1).is_none());
+        let w = marched_on(STYLE_BALANCED, MOAT_THREAT);
+        assert!(threat(&w, 1).is_some());
+        let t = tuning(LEVEL_NORMAL, STYLE_BALANCED);
+        assert!(
+            decide(&w, 1, &t).is_none_or(|(v, _, m)| (v, m) != (VERB_SWAMP, 0)),
+            "a balanced opponent dug a moat"
+        );
+        assert!(!tuning(LEVEL_EASY, STYLE_TURTLE).moats, "an easy turtle swamps");
+        assert!(tuning(LEVEL_HARD, STYLE_TURTLE).moats);
     }
 
     #[test]
