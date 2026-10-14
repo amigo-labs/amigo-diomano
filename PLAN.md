@@ -925,6 +925,25 @@ minute ten and whole recoveries passed with nothing happening.
   form), wide quakes beside a home core, spawn asymmetry, swamp.
 - [ ] Rush style: march only where a land path exists.
 
+### 24. The four decisions: levelling, an immune platform, fair spawns, a rush with somewhere to go ✅
+
+User decisions of 2026-10-14 on the open items of `docs/specs/depth.md`.
+
+- [x] Raise fills the brush's lowest ground first, lower cuts its highest
+  (`World::deform`): a held raise levels. 0 of 44 uneven sites founded a
+  settlement from a held raise before, 31 now (median 5 ticks).
+- [x] Earthquakes spare the whole home platform
+  (`settlements::is_home_platform`).
+- [x] `settlements::balance_spawns`: both spawns hold land above the last
+  wave's line within 95% of each other; given land is rough rock, very wide
+  gaps also sink the richer side's outer land.
+- [x] Rush marches only where the flow field finds a land path.
+- [x] Mirror sweep on the new rules: every gate holds (normal over easy 75%,
+  hard over both 100%, no dominant style), 108/108 matches to 13:49 on the
+  waves. Fixtures re-recorded.
+- [ ] Turtle is the weakest style (8-41%); normal over easy sits on the gate.
+- [ ] Influence beyond the balanced radius (one pangaea seed).
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on

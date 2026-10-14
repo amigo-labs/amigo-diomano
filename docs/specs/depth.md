@@ -101,7 +101,7 @@ long enough to watch and followed by a pause. Each decision, in order:
 
 Styles modify a level: **turtle** strikes from wave 2 at half the rate and
 never floods or calls armageddon; **rush** marches and strikes from the start;
-**disaster** strikes with volcanoes twice as often and floods.
+**disaster** strikes with volcanoes instead of quakes and floods.
 
 ## Measuring it
 
@@ -139,37 +139,44 @@ ten-minute floor against a player who does nothing is the floor working as
 intended — it is defined for the default opponent.
 
 Mirror matches (`just depth`, 2 seeds x 3 terrains per ordered pairing, so
-every cell below is 12 matches from both sides of the planet), on the final
-opponent (`9d72024`). All 108 matches ran to 13:49 and were decided on the
-waves; none by sudden death.
+every cell below is 12 matches from both sides of the planet), on the rules
+of 2026-10-14 — levelling, the immune platform, fair and rough spawn land, the
+rush fix (`ebebf69`). All 108 matches ran to 13:49 and were decided on the
+waves; none by sudden death, and the longest quiet stretch in any pairing was
+15 s to 1:32.
 
 | row beats column | easy | normal | hard |
 |---|---|---|---|
-| easy | – | 0% | 0% |
-| normal | 100% | – | 0% |
+| easy | – | 25% | 0% |
+| normal | 75% | – | 0% |
 | hard | 100% | 100% | – |
 
 | row beats column (normal level) | balanced | turtle | rush | disaster |
 |---|---|---|---|---|
-| balanced | – | 50% | 91% | 58% |
-| turtle | 50% | – | 91% | 58% |
-| rush | 8% | 8% | – | 16% |
-| disaster | 41% | 41% | 83% | – |
+| balanced | – | 75% | 50% | 50% |
+| turtle | 25% | – | 41% | 8% |
+| rush | 50% | 58% | – | 50% |
+| disaster | 50% | 91% | 50% | – |
 
-Every level beats the one below it every time (gate: 75%). No style beats
-every other (gate: 65%) — but **rush is dominated**: a march needs land to
-walk on, and on two of the three terrains the spawns share none, so its
-magnet and champions are mana spent on nothing while the others terraform.
-It wins comebacks (4 of 6 against each style after losing the first wave)
-and loses the matches. Making the march conditional on a land path, or the
-rush style a pangaea specialist, is the obvious next step and is not done
-here.
+Every level beats the one below it at least as often as the gate asks (75%;
+normal over easy sits exactly on it). No style beats every other: rush is no
+longer dominated once it stops marching where there is no land, and turtle is
+now the weakest — it waits for the second wave to strike while everyone else
+spends from the first.
 
-Two earlier runs are worth keeping for what they caught: the first had every
-hard win as sudden death a minute after the second peak (digging too close
-to a home core, `ec0e3b7`); the second lost player 0 at 3:39 on one seed in
-every pairing, because both sides dug the same spot in the same tick and the
-second hand came up full of sea, which went onto a core (`9d72024`).
+The runs that got here, and what each caught:
+
+- the first had every hard win as sudden death a minute after the second
+  peak — digging too close to a home core (`ec0e3b7`);
+- the second lost player 0 at 3:39 on one seed in every pairing: both sides
+  dug the same spot in the same tick and the second hand came up full of
+  sea, which went onto a core (`9d72024`);
+- after the platform became immune to quakes, disaster won everything by
+  sudden death at five minutes — its vents were allowed as close as quakes,
+  and the platform is not immune to lava (`1cb29a9`);
+- after fair spawns, the side that had been *given* land won almost every
+  match: the land was one flat sheet of rock, a ready-made plateau
+  (`ebebf69`, now rough).
 
 ## Decisions for a human
 
