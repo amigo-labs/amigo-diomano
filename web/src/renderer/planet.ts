@@ -22,6 +22,7 @@
 import * as THREE from "three";
 import type { Sim } from "../main";
 import { CLOUD_NOISE_GLSL, SKY_GLSL } from "./atmosphere";
+import { TERRAIN_GOD } from "./palette";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./scale";
 import { SURF_GLSL } from "./surf";
 import type { View } from "./view";
@@ -74,6 +75,13 @@ export interface Planet {
   pick(dir: THREE.Vector3): { face: number; x: number; y: number };
 }
 
+/** `dio_next_peak_level` once no wave is left: i32::MIN. */
+const NO_PEAK = -2147483648;
+/** `TIDE.TELEGRAPH` and `TIDE.IMPACT` from main.ts, as values: importing the
+ * runtime object from there would close an import cycle. */
+const TIDE_TELEGRAPH = 1;
+const TIDE_IMPACT = 2;
+
 const VERTEX_SHADER = /* glsl */ `
   attribute vec4 attrib;   // material / 255, vegetation, influence + 128, depth
   attribute vec4 attrib2;  // lava, fertility, sediment, spare
@@ -85,8 +93,10 @@ const VERTEX_SHADER = /* glsl */ `
   varying vec4 vAttrib2;
   varying vec4 vAttrib3;
   varying float vAltitude;
+  varying float vPeakAltitude;
 
   uniform float uSeaRadius;
+  uniform float uPeakRadius;
 
   void main() {
     // World space, not normalMatrix. Three builds normalMatrix from the
@@ -103,6 +113,8 @@ const VERTEX_SHADER = /* glsl */ `
     // Metres above the current waterline, roughly. The wet-sand band and the
     // snowline both key off this, so both migrate as sea level moves.
     vAltitude = length(position) - uSeaRadius;
+    // The same, against the waterline the next wave peak will reach.
+    vPeakAltitude = length(position) - uPeakRadius;
     gl_Position = projectionMatrix * viewMatrix * world;
   }
 `;
@@ -127,6 +139,8 @@ const FRAGMENT_SHADER = /* glsl */ `
   uniform float uWarning;
   uniform float uTime;
   uniform float uSurge;
+  uniform float uPeakShow;
+  varying float vPeakAltitude;
 
   // CC0 surface textures (docs/ASSETS.md). uTexMix is 0 until every map has
   // arrived, so the purely procedural shading below is the fallback, not a
@@ -537,6 +551,22 @@ const FRAGMENT_SHADER = /* glsl */ `
     vec3 mood = mix(uGodB, uGodA, clamp(influence * 0.5 + 0.5, 0.0, 1.0));
     albedo = mix(albedo, albedo * mood, min(abs(influence) * 0.55, 0.16));
 
+    // The flood forecast: dry ground the next wave peak will put under water,
+    // hatched, with a bright line where that peak's shore will run. The score
+    // is counted at the peak, so this is the map every terraforming decision
+    // is made against — what the opponent reads from \`next_peak_level\`, the
+    // player reads here. Hatching rather than a tint keeps it legible over
+    // every material and both gods' territory colours.
+    if (uPeakShow > 0.0) {
+      float doomed = step(0.0, vAltitude) * (1.0 - step(0.0, vPeakAltitude));
+      float stripe = smoothstep(0.35, 0.5, abs(fract(dot(vWorld, vec3(1.0, 1.0, 1.0)) * 90.0) - 0.5));
+      float shore = 1.0 - smoothstep(0.0, 0.002, abs(vPeakAltitude));
+      vec3 warn = vec3(0.86, 0.24, 0.14);
+      albedo = mix(albedo, warn, doomed * stripe * 0.7 * uPeakShow);
+      // Orange rather than white: the beach and the surf are already pale.
+      albedo = mix(albedo, vec3(1.0, 0.52, 0.22), shore * step(0.0, vAltitude) * 0.8 * uPeakShow);
+    }
+
     // Ocean floor: dark, so the sea is a body rather than a window — but only
     // where there is actually water over this ground.
     //
@@ -701,8 +731,10 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
       uCloudFade: view.cloudFade,
       uWarning: view.warning,
       uSeaRadius: { value: BASE_RADIUS },
-      uGodA: { value: new THREE.Color(1.06, 0.93, 0.82) },
-      uGodB: { value: new THREE.Color(0.82, 0.9, 1.1) },
+      uPeakRadius: { value: BASE_RADIUS },
+      uPeakShow: { value: 0 },
+      uGodA: { value: new THREE.Color(...TERRAIN_GOD[0]) },
+      uGodB: { value: new THREE.Color(...TERRAIN_GOD[1]) },
       uTier: { value: 2 },
       uTexRock: { value: loadTex("rock.webp") },
       uTexGrass: { value: loadTex("grass.webp") },
@@ -763,6 +795,16 @@ export function createPlanet(sim: Sim, view: View, maxAnisotropy = 1): Planet {
       // re-meshed"). Uploading all 96 every frame would make the dirty tracking
       // pointless, so each rebuilt chunk contributes its own update range.
       material.uniforms.uSeaRadius!.value = BASE_RADIUS + seaLevel * HEIGHT_TO_RADIUS;
+      // The flood forecast. Quiet while the sea is calm or recovering, loud and
+      // pulsing through the telegraph, gone during the impact — the water
+      // itself shows the peak then — and gone once no wave is left.
+      const peak = sim.e.dio_next_peak_level();
+      const phase = sim.e.dio_tide_phase();
+      const pulse = 0.75 + 0.25 * Math.sin(performance.now() / 260);
+      material.uniforms.uPeakShow!.value =
+        peak === NO_PEAK ? 0 : phase === TIDE_TELEGRAPH ? pulse : phase === TIDE_IMPACT ? 0 : 0.4;
+      material.uniforms.uPeakRadius!.value =
+        BASE_RADIUS + (peak === NO_PEAK ? seaLevel : peak) * HEIGHT_TO_RADIUS;
       // A pending `refreshAll` is a whole-buffer upload, and ranges would narrow
       // it to this tick's chunks — see `refreshAll`.
       if (fullUploadPending) {

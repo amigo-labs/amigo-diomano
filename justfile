@@ -135,6 +135,15 @@ verify-cross: wasm
 verify-input: build-web
     cd web && node tools/verify-input.mjs
 
+# Play one match through, title card to end card, in the built client.
+#
+# Chooses a level on the card, follows the first hint, ticks to the first
+# wave's telegraph and peak and on to the end, and asserts what the HUD and the
+# end card say at each. Screenshots land in web/screenshots/ (gitignored). Not in
+# `check`: a whole match is minutes of simulation on a software renderer.
+play: build-web
+    cd web && node tools/play.mjs
+
 # Two simulations through the lockstep layer over a lossy, latent link.
 #
 # The Phase 7 DoD's network conditions — 120 ms RTT, 2% loss — without a network.
@@ -203,6 +212,12 @@ perf ticks="600":
 # no idle player beaten before the second, a mean of at least ten minutes.
 sweep seeds="8" profile="all" cap="":
     cargo run --release -p diomano-cli -- sweep --seeds {{seeds}} --profile {{profile}} {{ if cap == "" { "" } else { "--cap " + cap } }}
+
+# Not in `check` either: every ordered pair of opponent levels and styles,
+# both sides scripted, from both sides of the planet. Whether the better
+# player wins — docs/specs/depth.md.
+depth seeds="2" cap="":
+    cargo run --release -p diomano-cli -- sweep --seeds {{seeds}} --profile mirror {{ if cap == "" { "" } else { "--cap " + cap } }}
 
 # Per-tick state hashes, for diffing two runs by hand.
 hash ticks="1000" seed="0x5EED":

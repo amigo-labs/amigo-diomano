@@ -898,6 +898,94 @@ Found and deliberately not fixed here, each for a stated reason:
       opened until the pointer next moves over the canvas
 - [ ] Two simulation findings that would move the fixtures — decision 8 below
 
+### 23. Depth: an opponent worth losing to, a five-minute tide, a forecast ✅
+
+Measured first (`docs/specs/depth.md`): an idle player beat the scripted
+opponent 9 of 12 times, every match ran 33:49, mana sat at its cap from
+minute ten and whole recoveries passed with nothing happening.
+
+- [x] `ai.rs` rewritten: terraforms against `tide::next_peak_level`, digs
+  where it costs nobody's score, strikes and floods by forecast, armageddon
+  only to break a level score; 3 levels x 4 styles, per side in `MapConfig`,
+  hashes unchanged with the opponent off.
+- [x] `sweep --profile mirror` / `just depth`: level and style matrices,
+  gated (each level beats the one below >= 75%, no style beats all > 65%).
+  Final: 100% / 100%, best style 58-91% against single styles, none against
+  all; rush dominated (see depth.md).
+- [x] A wave every five minutes (user decision): matches of 13:49.
+- [x] Armageddon refunded once the final wave is under way (it could
+  postpone the end for ever); corpus asks for it once per cataclysm match.
+- [x] Flood forecast hatched on the planet; wasm `dio_set_ai`,
+  `dio_next_peak_level`, `dio_tide_scored`.
+- [x] Models: team masks, citadel, coloured villagers, pickups by power.
+- [x] Feel: shared world events, effects, in-scene off-screen pips, wave-peak
+  readout and tally, difficulty on the title card, end-card numbering fix,
+  onboarding hints, `just play`.
+- [ ] Decisions for a human, in depth.md: levelling (new plateaus barely
+  form), wide quakes beside a home core, spawn asymmetry, swamp.
+- [ ] Rush style: march only where a land path exists.
+
+### 24. The four decisions: levelling, an immune platform, fair spawns, a rush with somewhere to go ✅
+
+User decisions of 2026-10-14 on the open items of `docs/specs/depth.md`.
+
+- [x] Raise fills the brush's lowest ground first, lower cuts its highest
+  (`World::deform`): a held raise levels. 0 of 44 uneven sites founded a
+  settlement from a held raise before, 31 now (median 5 ticks).
+- [x] Earthquakes spare the whole home platform
+  (`settlements::is_home_platform`).
+- [x] `settlements::balance_spawns`: both spawns hold land above the last
+  wave's line within 95% of each other; given land is rough rock, very wide
+  gaps also sink the richer side's outer land.
+- [x] Rush marches only where the flow field finds a land path.
+- [x] Mirror sweep on the new rules: every gate holds (normal over easy 75%,
+  hard over both 100%, no dominant style), 108/108 matches to 13:49 on the
+  waves. Fixtures re-recorded.
+- [x] Turtle is the weakest style (8-41%); normal over easy sits on the gate
+  — step 25.
+- [x] Influence beyond the balanced radius (one pangaea seed) — step 25: it
+  was not the radius.
+
+### 25. A turtle worth playing, a dig that gives nothing away, a later volcano ✅
+
+User decisions of 2026-10-14 on the two items step 24 left open.
+
+- [x] Turtle strikes from the first wave at half the rate, holds its raises
+  half again as long with half the pause, and builds against the *last*
+  wave's line (`Tuning::builds_for_last`).
+- [x] The pangaea outlier was the opponent's own digs: with levelling, a dig
+  on enemy land that stayed above the line cut it flat and founded a town
+  for the enemy. Digs on enemy land now score only where they put it under
+  the line, and neutral ground beside enemy influence is left alone.
+  `balance_spawns` is unchanged. Normal beats an idle player 12 of 12.
+- [x] That made disaster dominant (75-83%). Half the vent pace, smaller
+  vents, no floods and no armageddon were each measured and moved nothing;
+  venting from the second wave did. Mirror sweep: turtle 41-50% against
+  every style, no style above 58%, levels 83/91/100%, no sudden deaths.
+  Corpus re-recorded.
+
+### 26. The swamp: aimed, a trap, undone by the hand ✅
+
+User decisions of 2026-10-14: trap and land denial both, one victim a cell by
+default, enabled if the gates hold. They held; it ships enabled.
+
+- [x] Forms only on the plateau aimed at (cells at the target's height), dry,
+  never on a home platform (`powers::swamp`).
+- [x] Passable, so armies march in; whoever enters sinks, champions too, and
+  one standing on swamped ground. The cell is ground again unless
+  `MapConfig::swamp_bottomless` (log key `swamp_bottomless`, manifest
+  `[powers.swamp] bottomless`).
+- [x] Raise or lower over it buries or digs it out (`World::deform`). Still
+  unbuildable and unscoring while it lies; pickups avoid it.
+- [x] The opponent swamps every other strike above easy (`Spot::Mire`).
+  `Census::swamp_victims`, unhashed; the sweep prints swamps and the sunk.
+- [x] Measured (`d995f78`): idle loses 12/12 to every level, all to 13:49;
+  mirror levels 91/100/75%, no style above 65% against all, no sudden
+  deaths, about 14 swamps and 14 drowned walkers a match. Corpus re-recorded;
+  `session.log` keeps swamp off in its own header.
+- [ ] Turtle is the weakest style again (33-50%): a defensive swamp is the
+  lever. Hard over normal sits on the gate. No sinking effect on screen yet.
+
 ## Next
 
 Phase 7's remaining half is transport and signalling, and it is gated on

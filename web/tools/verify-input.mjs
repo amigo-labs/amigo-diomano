@@ -674,16 +674,31 @@ async function main() {
     const startUp = await upY();
     const sidewaysHere = await wheelToward();
     const side = Math.sign(startUp) || 1;
-    // W always pitches `up.y` down and S up, so which key carries the camera
-    // over the pole depends on the branch it is on. Always pressing W only
-    // ever worked from the positive branch: from the negative one it pitched
-    // away from the pole until the guard ran out.
-    const over = side > 0 ? "w" : "s";
-    const back = side > 0 ? "s" : "w";
-    await page.keyboard.down(over);
-    guard = 0;
-    while ((await upY()) * side > -0.3 && guard++ < 60) await ticks(2);
-    await page.keyboard.up(over);
+    // Carried over the pole by right-dragging rather than by holding W or S.
+    // Keyboard pitch runs on frame time: a budget of sim ticks ran out short
+    // of the pole on a busy machine, and a real-time wait overshot it between
+    // two slow frames — the check measured the machine's load, on `main` as
+    // on any branch. A drag pitches by pixels, whatever the frame rate. Down
+    // pitches `up.y` up, as S does, so from the positive branch the way over
+    // is up. Bounded by pixels dragged, not time, and a camera that never
+    // pitches still fails below.
+    const dragUntil = async (dir, done) => {
+      for (let stroke = 0; stroke < 12; stroke++) {
+        const y0 = CENTRE.y - 120 * dir;
+        await page.mouse.move(CENTRE.x, y0);
+        await page.mouse.down({ button: "right" });
+        let reached = false;
+        for (let k = 1; k <= 12 && !reached; k++) {
+          await page.mouse.move(CENTRE.x, y0 + 20 * k * dir);
+          await ticks(2);
+          reached = done(await upY());
+        }
+        await page.mouse.up({ button: "right" });
+        await ensureMenuClosed();
+        if (reached) return;
+      }
+    };
+    await dragUntil(-side, (up) => up * side < -0.3);
     await ticks(10);
     const endUp = await upY();
     const crossed = endUp * side < 0;
@@ -695,10 +710,7 @@ async function main() {
         `up.y ${endUp.toFixed(2)}: ${sidewaysThere.toFixed(4)}${crossed ? "" : " (never crossed the pole)"}`,
     );
     // Back over the top, so the checks below see the planet as they did.
-    await page.keyboard.down(back);
-    guard = 0;
-    while ((await upY()) * side < 0.3 && guard++ < 60) await ticks(2);
-    await page.keyboard.up(back);
+    await dragUntil(side, (up) => up * side > 0.3);
     await ticks(4);
 
     // --- 14. an orbit whose release was never seen does not carry on -------

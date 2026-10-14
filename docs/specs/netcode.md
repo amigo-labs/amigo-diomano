@@ -164,12 +164,13 @@ of the verbs rather than of the harness:
    matches that issue flood and armageddon, and two `ai-war` matches that give
    the scripted opponent's both phases long cross-build coverage. Counts are met
    across the corpus, per-match numbers all printed.
-2. **The shipped §5.4 manifest disables swamp.** On that mask `VERB_SWAMP` is
-   inert and "every verb at least 20 times" is unreachable no matter how long a
-   match runs. The corpus therefore enables all eight powers and zeroes their
-   costs, and `fixtures/session.log` stays on the shipped manifest — so the
-   gating path and the effect paths are both covered, by different artifacts, on
-   purpose.
+2. **A manifest can withhold a power.** The shipped §5.4 manifest withheld
+   swamp until PLAN.md step 26, and on such a mask `VERB_SWAMP` is inert and
+   "every verb at least 20 times" is unreachable no matter how long a match
+   runs. The corpus therefore enables all eight powers and zeroes their costs,
+   and `fixtures/session.log` states a mask with swamp off (247) — so the
+   gating path and the effect paths are both covered, by different artifacts,
+   on purpose.
 
 ## Transport — WebRTC not implemented; static hosting is
 

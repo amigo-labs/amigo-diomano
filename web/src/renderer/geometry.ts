@@ -26,14 +26,14 @@ export function withTransform(
 }
 
 /**
- * Concatenate geometries into one: positions, normals, and colours if any part
- * has them.
+ * Concatenate geometries into one: positions, normals, and colours and team
+ * masks if any part has them.
  *
  * `three/examples/jsm/utils/BufferGeometryUtils` does this and more, but the
  * only non-core three.js imports in this project are the four post-processing
  * passes, and that is worth keeping: every one of them is a dependency on a
- * directory three explicitly does not treat as API. Twenty lines here buys the
- * two attributes an instanced Lambert mesh actually consumes.
+ * directory three explicitly does not treat as API. Thirty lines here buys the
+ * four attributes an instanced Lambert mesh in this project actually consumes.
  *
  * Non-indexed throughout. These are a few dozen triangles built once at load;
  * an index buffer would save nothing and would have to be rebased per part.
@@ -47,9 +47,14 @@ export function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeom
   // paints trunks and roofs with it. Parts without one come out white, which
   // under `vertexColors` multiplies to the material's own colour.
   const coloured = flat.some((g) => g.hasAttribute("color"));
+  // The same for `team`, the mask that says which parts take the owner's
+  // colour (`teamPart` in `models.ts`). Parts without one are 0: a roof or a
+  // wall stays the colour it was painted, and only the banner is the side's.
+  const teamed = flat.some((g) => g.hasAttribute("team"));
   const position = new Float32Array(total * 3);
   const normal = new Float32Array(total * 3);
   const color = coloured ? new Float32Array(total * 3).fill(1) : null;
+  const team = teamed ? new Float32Array(total) : null;
   let at = 0;
   for (const g of flat) {
     const p = g.getAttribute("position");
@@ -59,6 +64,9 @@ export function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeom
     if (color && g.hasAttribute("color")) {
       color.set(g.getAttribute("color").array as Float32Array, at * 3);
     }
+    if (team && g.hasAttribute("team")) {
+      team.set(g.getAttribute("team").array as Float32Array, at);
+    }
     at += p.count;
   }
 
@@ -66,6 +74,7 @@ export function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeom
   merged.setAttribute("position", new THREE.BufferAttribute(position, 3));
   merged.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
   if (color) merged.setAttribute("color", new THREE.BufferAttribute(color, 3));
+  if (team) merged.setAttribute("team", new THREE.BufferAttribute(team, 1));
   return merged;
 }
 
@@ -88,7 +97,8 @@ export function mergeGeometries(parts: THREE.BufferGeometry[]): THREE.BufferGeom
  *
  * A GLB with one mesh whose first primitive is an indexed or non-indexed
  * triangle list of `POSITION` and `NORMAL` accessors, both `VEC3` of floats, in
- * the binary chunk. That is what `scripts/build-figure.mjs` writes and what a
+ * the binary chunk — optionally with a float `COLOR_0` (`VEC3` or `VEC4`) and
+ * a float `_TEAM` scalar. That is what `scripts/build-figure.mjs` writes and what a
  * plain Blender or `gltf-transform` export produces. It is *not* the whole
  * format: no Draco, no KTX2, no sparse accessors, no node transforms. A
  * replacement model has to be one of the simple kind, and `docs/ASSETS.md` says
@@ -131,12 +141,20 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
     throw new Error(`GLB primitive mode ${primitive.mode} is not a triangle list`);
   }
 
-  const read = (accessorIndex: number, name: string): Float32Array => {
+  /** Float components per element, by glTF accessor type. */
+  const WIDTH: Record<string, number> = { SCALAR: 1, VEC3: 3, VEC4: 4 };
+  const read = (
+    accessorIndex: number,
+    name: string,
+    types: readonly string[] = ["VEC3"],
+  ): { data: Float32Array; width: number } => {
     const accessor = json.accessors?.[accessorIndex];
     if (!accessor) throw new Error(`GLB accessor ${accessorIndex} (${name}) is missing`);
-    // 5126 is FLOAT. Anything else would need a conversion this does not do.
-    if (accessor.componentType !== 5126 || accessor.type !== "VEC3") {
-      throw new Error(`GLB ${name} is not a float VEC3`);
+    // 5126 is FLOAT. Anything else — a colour as normalised bytes, say — would
+    // need a conversion this does not do.
+    const width = WIDTH[accessor.type];
+    if (accessor.componentType !== 5126 || !types.includes(accessor.type) || !width) {
+      throw new Error(`GLB ${name} is not a float ${types.join(" or ")}`);
     }
     const bufferView = json.bufferViews?.[accessor.bufferView ?? -1];
     if (!bufferView) throw new Error(`GLB ${name} has no buffer view`);
@@ -145,7 +163,7 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
     // sharing one buffer view at a 24-byte stride — would read every other
     // normal as a position with no error: the same silent scrambling the index
     // branch below exists to prevent.
-    if (bufferView.byteStride !== undefined && bufferView.byteStride !== 12) {
+    if (bufferView.byteStride !== undefined && bufferView.byteStride !== width * 4) {
       throw new Error(
         `GLB ${name} is interleaved (byteStride ${bufferView.byteStride}); only tightly packed attributes are read`,
       );
@@ -154,7 +172,8 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
     // Copied rather than viewed: the accessor's start need not be four-byte
     // aligned within the file, and `Float32Array` over a misaligned offset
     // throws.
-    return new Float32Array(buffer.slice(start, start + accessor.count * 12));
+    const data = new Float32Array(buffer.slice(start, start + accessor.count * width * 4));
+    return { data, width };
   };
 
   const positionAccessor = primitive.attributes.POSITION;
@@ -162,12 +181,40 @@ export function readGlb(buffer: ArrayBuffer): THREE.BufferGeometry {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute(
     "position",
-    new THREE.BufferAttribute(read(positionAccessor, "POSITION"), 3),
+    new THREE.BufferAttribute(read(positionAccessor, "POSITION").data, 3),
   );
   const normalAccessor = primitive.attributes.NORMAL;
   if (normalAccessor === undefined) geometry.computeVertexNormals();
   else
-    geometry.setAttribute("normal", new THREE.BufferAttribute(read(normalAccessor, "NORMAL"), 3));
+    geometry.setAttribute(
+      "normal",
+      new THREE.BufferAttribute(read(normalAccessor, "NORMAL").data, 3),
+    );
+
+  // Optional, both. `COLOR_0` is the standard vertex colour, linear like the
+  // `tint` of `models.ts`; an alpha channel is dropped, since nothing here is
+  // translucent per vertex. `_TEAM` is this project's own — the underscore is
+  // how glTF spells "application-specific" — and is the mask of `teamPart`:
+  // 1 where the owner's colour goes, 0 where the figure keeps its own. A file
+  // without them is still a valid figure; the caller decides what it lacks.
+  const colorAccessor = primitive.attributes.COLOR_0;
+  if (colorAccessor !== undefined) {
+    const { data, width } = read(colorAccessor, "COLOR_0", ["VEC3", "VEC4"]);
+    let rgb = data;
+    if (width === 4) {
+      const count = data.length / 4;
+      rgb = new Float32Array(count * 3);
+      for (let i = 0; i < count; i++) rgb.set(data.subarray(i * 4, i * 4 + 3), i * 3);
+    }
+    geometry.setAttribute("color", new THREE.BufferAttribute(rgb, 3));
+  }
+  const teamAccessor = primitive.attributes._TEAM;
+  if (teamAccessor !== undefined) {
+    geometry.setAttribute(
+      "team",
+      new THREE.BufferAttribute(read(teamAccessor, "_TEAM", ["SCALAR"]).data, 1),
+    );
+  }
 
   // An indexed primitive — what most exporters write, and what `docs/ASSETS.md`
   // names as the shape of a replacement model. Ignoring the index and drawing

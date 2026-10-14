@@ -130,17 +130,54 @@ pub fn wave_strength(w: &World, wave: u8) -> i16 {
     s.clamp(0, i64::from(i16::MAX) / 2) as i16
 }
 
+/// The sea level the *next* wave peak will reach, or `None` once no wave is
+/// left to come.
+///
+/// What the scoring at that peak will drown: every cell with `height` below
+/// this is under the pinned ocean when `score_wave` counts. Exact for the
+/// ocean pin, blind to lakes and to a flood cast between now and then — it is
+/// a forecast, which is all a player (and the opponent) ever gets.
+#[must_use]
+pub fn next_peak_level(w: &World) -> Option<i16> {
+    let strength = match w.tide.phase {
+        TIDE_DONE => return None,
+        TIDE_CALM | TIDE_TELEGRAPH => {
+            if w.tide.strength == 0 {
+                wave_strength(w, w.tide.wave)
+            } else {
+                w.tide.strength
+            }
+        }
+        TIDE_IMPACT if w.tide.scored == 0 => w.tide.strength,
+        _ => {
+            let next = w.tide.wave.saturating_add(1);
+            if next >= w.cfg.waves {
+                return None;
+            }
+            wave_strength(w, next)
+        }
+    };
+    Some(w.sea_base.saturating_add(strength))
+}
+
 /// Armageddon: immediately triggers the final tide wave at maximum strength
 /// (§5.1). The stalemate breaker, and deliberately awkward to invoke (§8).
-pub fn trigger_armageddon(w: &mut World) {
-    if w.tide.phase == TIDE_DONE {
-        return;
-    }
+///
+/// Returns whether it did anything. Once the final wave is under way —
+/// natural or summoned — there is nothing left to bring forward. It used to
+/// restart the final telegraph every time: a god casting it in the last
+/// recovery pushed the end of the match back another fifty seconds per cast,
+/// for ever, and the scripted opponent found that loop within a sweep.
+pub fn trigger_armageddon(w: &mut World) -> bool {
     let last = w.cfg.waves.saturating_sub(1);
+    if w.tide.phase == TIDE_DONE || (w.tide.wave >= last && w.tide.phase != TIDE_CALM) {
+        return false;
+    }
     w.tide.wave = last;
     w.tide.strength = wave_strength(w, last).saturating_mul(2);
     w.tide.scored = 0;
     enter(w, TIDE_TELEGRAPH);
+    true
 }
 
 /// Score per wave = habitable cells under own influence, sampled at wave peak.
@@ -374,32 +411,45 @@ mod tests {
     fn armageddon_jumps_straight_to_the_final_wave_at_double_strength() {
         let mut w = tidal_world();
         let natural_last = wave_strength(&w, w.cfg.waves - 1);
-        trigger_armageddon(&mut w);
+        assert!(trigger_armageddon(&mut w), "armageddon did nothing");
         assert_eq!(w.tide.phase, TIDE_TELEGRAPH, "armageddon skipped the warning");
         assert_eq!(w.tide.wave, w.cfg.waves - 1);
         assert!(w.tide.strength > natural_last, "armageddon is not the strongest wave");
     }
 
     #[test]
-    fn a_wave_lands_every_fifteen_minutes() {
-        // User decision, superseding §5.5's 45-second `[START]`: the cadence is
-        // a wave every fifteen minutes. The cadence *is* the wave cycle —
-        // telegraph, impact, recovery — because the next telegraph begins the
-        // moment the last recovery ends.
+    fn armageddon_cannot_postpone_the_end_once_the_final_wave_is_under_way() {
+        let mut w = tidal_world();
+        assert!(trigger_armageddon(&mut w));
+        for _ in 0..w.cfg.telegraph_ticks + w.cfg.impact_ticks + 10 {
+            step(&mut w);
+        }
+        assert_eq!(w.tide.phase, TIDE_RECOVERY);
+        let before = w.tide;
+        assert!(!trigger_armageddon(&mut w), "a second armageddon restarted the final wave");
+        assert_eq!(w.tide, before);
+    }
+
+    #[test]
+    fn a_wave_lands_every_five_minutes() {
+        // User decision, superseding the fifteen-minute cadence (and §5.5's
+        // 45-second `[START]` before it): a wave every five minutes. The
+        // cadence *is* the wave cycle — telegraph, impact, recovery — because
+        // the next telegraph begins the moment the last recovery ends.
         let cfg = MapConfig::DEFAULT;
         let cadence = cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks;
-        assert_eq!(cadence, 15 * 60 * 30, "a wave every {} s, not 900", cadence / 30);
+        assert_eq!(cadence, 5 * 60 * 30, "a wave every {} s, not 300", cadence / 30);
     }
 
     #[test]
     fn the_lulls_do_not_add_a_dead_quarter_hour_at_each_end() {
         // The whole reason `lull_ticks` exists. Running the opening and closing
-        // windows on `recovery_ticks` would put fourteen minutes of nothing
-        // before the first telegraph and another fourteen after the last wave
-        // had already decided the match.
+        // windows on `recovery_ticks` would put minutes of nothing before the
+        // first telegraph and again after the last wave had already decided
+        // the match.
         let cfg = MapConfig::DEFAULT;
         assert!(
-            cfg.lull_ticks * 4 < cfg.recovery_ticks,
+            cfg.lull_ticks * 2 < cfg.recovery_ticks,
             "a {}-second lull is not short against a {}-second recovery",
             cfg.lull_ticks / 30,
             cfg.recovery_ticks / 30
@@ -408,7 +458,8 @@ mod tests {
 
     #[test]
     fn a_match_is_roughly_the_target_length() {
-        // Three waves at the fifteen-minute cadence, plus a lull at each end.
+        // Three waves at the five-minute cadence, plus a lull at each end:
+        // §5.5's "roughly 15 minutes".
         let cfg = MapConfig::DEFAULT;
         let per_wave = cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks;
         // The last wave closes on a lull rather than a full recovery, so the
@@ -416,8 +467,8 @@ mod tests {
         let total = per_wave * u32::from(cfg.waves) - cfg.recovery_ticks + cfg.lull_ticks * 2;
         let minutes = total / 30 / 60;
         assert!(
-            (25..=45).contains(&minutes),
-            "a full cycle is {minutes} minutes; three waves fifteen minutes apart is ~34"
+            (12..=16).contains(&minutes),
+            "a full cycle is {minutes} minutes; three waves five minutes apart is ~14"
         );
     }
 

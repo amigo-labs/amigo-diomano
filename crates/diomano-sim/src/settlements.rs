@@ -310,6 +310,22 @@ pub fn is_home_core(c: usize) -> bool {
     STARTS.iter().any(|&(face, x, y)| crate::world::idx(face, x, y) == c)
 }
 
+/// Inside either spawn's 5x5 platform: the ring `SPAWN_SHELF_INNER` guards.
+///
+/// What an earthquake leaves alone. Sparing the core cell alone was not
+/// enough: a wide quake turned the platform around it to ash, the ash slid
+/// off the shelf into the sea, and the core followed it under within seconds
+/// — sudden death by one cast, the ending `docs/specs/pacing.md` rules out.
+#[must_use]
+pub fn is_home_platform(c: usize) -> bool {
+    let (face, x, y) = crate::world::decode(c);
+    STARTS.iter().any(|&(f, sx, sy)| {
+        f == face
+            && (x - sx as i32).abs() < SPAWN_SHELF_INNER
+            && (y - sy as i32).abs() < SPAWN_SHELF_INNER
+    })
+}
+
 /// Causeway crest band: every dry carved cell lands in
 /// `[CAUSEWAY_CREST_MIN - 2, CAUSEWAY_CREST_MAX]` = `[34, 45]`.
 ///
@@ -789,11 +805,195 @@ pub fn seed_starting_positions(w: &mut World) {
         w.settlement_count = w.settlement_count.saturating_add(1);
         carve_spawn_pedestal(w, face, cx as i32, cy as i32, platform);
     }
+    balance_spawns(w);
     if w.cfg.land_bridge != 0 {
         carve_contact_corridor(w);
     }
     w.ghost_copy_all();
     detect_plateaus(w);
+}
+
+/// How far round a spawn its first-wave land is counted: the home core's reach
+/// once it has grown to [`crate::flowfield::SANCTUARY_MAX`].
+pub const SPAWN_FAIR_RADIUS: i32 =
+    crate::flowfield::SANCTUARY_MAX * crate::flowfield::INFLUENCE_REACH;
+
+/// The poorer spawn is topped up until it holds at least this share, in
+/// percent, of what the richer one holds.
+pub const SPAWN_FAIR_PERCENT: i32 = 95;
+
+/// Salt for the roughness of given and sunk spawn land.
+const SPAWN_FAIR_SALT: u32 = 0xFA12_5EED;
+
+/// Most cells one spawn may be given, so a freak map cannot turn the sea round
+/// a spawn into a continent.
+const SPAWN_FAIR_MAX_CELLS: usize = 600;
+
+/// Ground round `STARTS[player]` that scores at every wave peak: soil or
+/// rock, dry, above the last wave's waterline (`fair_line`), within
+/// [`SPAWN_FAIR_RADIUS`].
+#[must_use]
+pub fn lasting_land(w: &World, player: usize) -> i32 {
+    let (face, cx, cy) = STARTS[player];
+    let line = fair_line(w);
+    let mut n = 0;
+    for dy in -SPAWN_FAIR_RADIUS..=SPAWN_FAIR_RADIUS {
+        for dx in -SPAWN_FAIR_RADIUS..=SPAWN_FAIR_RADIUS {
+            let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+            if scores_every_wave(w, c, line) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// The waterline spawn land is measured against: the last natural wave's
+/// peak. Land above it scores at every wave; land given just above the
+/// *first* peak drowned at the second, and an opponent handed 1,200 cells
+/// for the first wave held 130 at the next.
+fn fair_line(w: &World) -> i32 {
+    let last = w.cfg.waves.saturating_sub(1);
+    i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last))
+}
+
+/// Soil or rock, dry, molten-free and above `line`: what `lasting_land`
+/// counts.
+fn scores_every_wave(w: &World, c: usize, line: i32) -> bool {
+    let solid = w.material[c] == crate::world::MAT_SOIL || w.material[c] == crate::world::MAT_ROCK;
+    solid && w.water[c] == 0 && w.lava[c] == 0 && i32::from(w.height[c]) > line
+}
+
+/// Give the poorer spawn land until both start with about the same ground
+/// that scores at every wave.
+///
+/// User decision (decision 3 in `docs/specs/depth.md`). The generator places
+/// the spawns on whatever geology the seed drew, and on some seeds one spawn
+/// had twice the land of the other inside its core's reach — measured in the
+/// sweep as an idle player out-scoring an opponent at the first peak before
+/// anyone had touched anything.
+///
+/// Raise-only, like the pedestal: seabed, low ground and sand round the poorer
+/// spawn become rough bare rock one to three terraces above the last peak's waterline, ring by ring
+/// outward from the shelf in a fixed order (Chebyshev distance, then flat
+/// index), and only next to ground that is already high — so the new land is
+/// one piece with the spawn's island and the influence projected over
+/// passable ground reaches all of it. Rock, as on the shelf, because rock
+/// neither rots nor slides.
+///
+/// At most `SPAWN_FAIR_MAX_CELLS` are given, so the sea round a small island
+/// does not become a continent. A gap wider than that — measured: 869 cells
+/// against 223 on one archipelago seed — is closed from the other side too
+/// (`take_land`): the richer spawn's outermost land sinks into the first
+/// wave's flood band.
+fn balance_spawns(w: &mut World) {
+    let land = [lasting_land(w, 0), lasting_land(w, 1)];
+    let (poor, rich) = if land[0] < land[1] { (0, 1) } else { (1, 0) };
+    // Rounded up, so the test the docs state (`poor * 100 >= rich * 95`) holds.
+    let want = (land[rich] * SPAWN_FAIR_PERCENT + 99) / 100;
+    let mut have = land[poor];
+    if have >= want {
+        return;
+    }
+    have = give_land(w, poor, have, want);
+    if have < want {
+        take_land(w, rich, land[rich], have);
+    }
+}
+
+/// Raise ground round `player`'s spawn into first-wave land, ring by ring, until
+/// it holds `want` cells or has been given `SPAWN_FAIR_MAX_CELLS`. Returns what
+/// it holds afterwards.
+fn give_land(w: &mut World, player: usize, mut have: i32, want: i32) -> i32 {
+    let (face, cx, cy) = STARTS[player];
+    let line = fair_line(w);
+    let t = i32::from(crate::world::TERRACE);
+    let high = |w: &World, c: usize| i32::from(w.height[c]) > line && w.water[c] == 0;
+    let mut given = 0usize;
+    for ring in SPAWN_SHELF_INNER..=SPAWN_FAIR_RADIUS {
+        // One ring at a time, but swept until it stops growing: a cell whose
+        // only high neighbour is a cell given earlier in this same ring would
+        // otherwise wait for the next ring.
+        loop {
+            let mut grew = false;
+            for dy in -ring..=ring {
+                for dx in -ring..=ring {
+                    if dx.abs().max(dy.abs()) != ring
+                        || have >= want
+                        || given >= SPAWN_FAIR_MAX_CELLS
+                    {
+                        continue;
+                    }
+                    let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+                    // Anything that does not score yet — seabed, low ground, or a
+                    // sand beach above the line, which `habitable` never counts.
+                    if scores_every_wave(w, c, line) || w.lava[c] > 0 {
+                        continue;
+                    }
+                    if !(0..4).any(|d| high(w, crate::world::live_neighbour(c, d))) {
+                        continue;
+                    }
+                    // Rough, not level: one to three terraces above the line,
+                    // off the terrace grid. Given as one flat sheet of rock it
+                    // was a ready-made plateau — dozens of settlements founded
+                    // themselves on it, and in the mirror sweep the side that
+                    // was given land won almost every match. Rough ground has
+                    // to be levelled like any other.
+                    let jitter = crate::hash::hash3(dx, dy, 0, w.cfg.seed ^ SPAWN_FAIR_SALT);
+                    let rough =
+                        line + t + (jitter % 3) as i32 * t + ((jitter >> 8) % 11) as i32 + 1;
+                    w.height[c] = w.height[c].max(rough as i16);
+                    w.material[c] = crate::world::MAT_ROCK;
+                    w.water[c] = 0;
+                    w.sediment[c] = 0;
+                    w.vegetation[c] = 0;
+                    w.fertility[c] = 0;
+                    have += 1;
+                    given += 1;
+                    grew = true;
+                }
+            }
+            if !grew {
+                break;
+            }
+        }
+        if have >= want || given >= SPAWN_FAIR_MAX_CELLS {
+            break;
+        }
+    }
+    have
+}
+
+/// The other half of a gap too wide to fill: the richer spawn's outermost
+/// lasting land, from the edge of its core's reach inward, sinks to a terrace
+/// below the last peak's waterline — still dry ground through the first two
+/// waves, but under water when the last one scores — until the poorer one's
+/// `have` is within `SPAWN_FAIR_PERCENT` of it. Never the pedestal: only
+/// cells farther out than the widest apron.
+fn take_land(w: &mut World, player: usize, mut rich: i32, have: i32) {
+    let (face, cx, cy) = STARTS[player];
+    let line = fair_line(w);
+    let t = i32::from(crate::world::TERRACE);
+    let pedestal = (SPAWN_APRON_RADIUS_16 + SPAWN_APRON_WOBBLE_16) / 16 + 1;
+    for ring in (pedestal..=SPAWN_FAIR_RADIUS).rev() {
+        for dy in -ring..=ring {
+            for dx in -ring..=ring {
+                if dx.abs().max(dy.abs()) != ring || have * 100 >= rich * SPAWN_FAIR_PERCENT {
+                    continue;
+                }
+                let c = idx(face, (cx as i32 + dx) as usize, (cy as i32 + dy) as usize);
+                if !scores_every_wave(w, c, line) {
+                    continue;
+                }
+                // Rough too, for the same reason: a terrace or two below the
+                // line, off the grid, so the sunk band is no free plateau.
+                let jitter = crate::hash::hash3(dx, dy, 1, w.cfg.seed ^ SPAWN_FAIR_SALT);
+                let sunk = line - t - (jitter % 2) as i32 * t - ((jitter >> 8) % 11) as i32;
+                w.height[c] = w.height[c].min(sunk as i16);
+                rich -= 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1175,7 +1375,7 @@ mod tests {
     fn the_causeway_survives_the_early_game() {
         let mut w = World::boxed();
         // The corpus's tide as well as its bridge. The shipped cadence is a
-        // wave every fifteen minutes, so "two full tide cycles" on it is 54,000
+        // wave every five minutes, so "two full tide cycles" on it is 18,000
         // ticks of simulation to assert something about erosion — and the
         // bridge only exists in the corpus configuration anyway, so testing it
         // under the corpus's own tide is both faster and more honest.
@@ -1219,6 +1419,111 @@ mod tests {
 
     /// Cells each player influences right now — the quantity sudden death
     /// watches (tide.rs::check_sudden_death).
+    /// "Flatten land, the people build" (HANDOFF §4.6), as a player would do
+    /// it: a hand of earth, a held poured raise on uneven dry ground inside
+    /// their own influence, and a settlement on it within 45 seconds. Every
+    /// such site around the first spawn of twelve maps is tried. Before
+    /// raise levelled (`World::deform`) none of 44 sites across 12 maps
+    /// founded anything; now most do, and here at least two in three must.
+    #[test]
+    fn a_held_raise_on_uneven_ground_founds_a_settlement() {
+        use crate::world::{Command, CommandBuf, HAND_EARTH, TERRACE, VERB_RAISE};
+        let fresh = |cfg: &MapConfig| {
+            let mut w = World::boxed();
+            w.init(cfg);
+            for _ in 0..30 {
+                w.tick(&[]);
+            }
+            w
+        };
+        let (face, hx, hy) = STARTS[0];
+        let (mut tried, mut founded) = (0usize, 0usize);
+        for seed in [0x5EED_u32, 0x9E37_D8A6, 0x3C6F_525F, 0xDAA6_CC18] {
+            for terrain in
+                [crate::world::TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, crate::world::TERRAIN_VOLCANO]
+            {
+                let cfg = MapConfig { seed, terrain, ..MapConfig::DEFAULT };
+                let base = fresh(&cfg);
+                for cy in 2..N as i32 - 2 {
+                    for cx in 2..N as i32 - 2 {
+                        if (cx - hx as i32).abs().max((cy - hy as i32).abs()) > 14 {
+                            continue;
+                        }
+                        let at =
+                            |dx: i32, dy: i32| idx(face, (cx + dx) as usize, (cy + dy) as usize);
+                        let brush: std::vec::Vec<usize> =
+                            (-1..=1).flat_map(|dy| (-1..=1).map(move |dx| at(dx, dy))).collect();
+                        let own = brush.iter().all(|&c| base.habitable(c) && base.influence[c] > 0);
+                        let clear = (-2..=2).all(|dy| {
+                            (-2..=2).all(|dx| base.settle_of[at(dx, dy)] == NO_SETTLEMENT)
+                        });
+                        let lo = brush.iter().map(|&c| base.height[c]).min().unwrap_or(0);
+                        let hi = brush.iter().map(|&c| base.height[c]).max().unwrap_or(0);
+                        // Gentle, uneven ground — where a player would build,
+                        // not against the face of a cliff.
+                        if !(own && clear && hi != lo && hi - lo <= 4 * TERRACE) {
+                            continue;
+                        }
+                        tried += 1;
+                        let mut w = fresh(&cfg);
+                        w.hand[0].material = HAND_EARTH;
+                        w.hand[0].amount = crate::world::HAND_CAPACITY;
+                        for t in 0..45 * crate::TICK_HZ {
+                            let mut buf = CommandBuf::new();
+                            if t < 20 {
+                                buf.push(Command {
+                                    tick: w.tick,
+                                    x: cx as u16,
+                                    y: cy as u16,
+                                    player: 0,
+                                    verb: VERB_RAISE,
+                                    face: face as u8,
+                                    modifier: 0,
+                                });
+                            }
+                            w.tick(buf.as_slice());
+                            let slot = w.settle_of[at(0, 0)];
+                            if slot != NO_SETTLEMENT && w.settlements[slot as usize].owner == 0 {
+                                founded += 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(tried >= 5, "only {tried} gentle uneven sites to try");
+        assert!(
+            founded * 3 >= tried * 2,
+            "a held raise founded a settlement on {founded} of {tried} sites"
+        );
+    }
+
+    /// Both spawns start with about the same ground to score at the first
+    /// wave, on every terrain: within SPAWN_FAIR_PERCENT of each other.
+    #[test]
+    fn both_spawns_start_with_the_same_lasting_land() {
+        for terrain in
+            [crate::world::TERRAIN_ARCHIPELAGO, TERRAIN_PANGAEA, crate::world::TERRAIN_VOLCANO]
+        {
+            for i in 0..8u32 {
+                let seed = 0x5EED_u32.wrapping_add(i.wrapping_mul(0x9E37_79B9));
+                let mut w = World::boxed();
+                w.init(&MapConfig { seed, terrain, ..MapConfig::DEFAULT });
+                let (a, b) = (lasting_land(&w, 0), lasting_land(&w, 1));
+                let (lo, hi) = (a.min(b), a.max(b));
+                assert!(
+                    lo * 100 >= hi * SPAWN_FAIR_PERCENT,
+                    "terrain {terrain} seed {seed:#x}: the spawns start with {a} and {b} cells"
+                );
+                // The platforms are still the platforms.
+                for s in &w.settlements[..PLAYERS] {
+                    assert!(s.alive() && s.tier == 2, "a seed settlement did not survive");
+                }
+            }
+        }
+    }
+
     fn influence_held(w: &World) -> [u32; PLAYERS] {
         // Live cells only: the ghost ring mirrors the border rows, and counting
         // it double-counted 1,536 cells in every threshold below.
@@ -1264,7 +1569,7 @@ mod tests {
 
     /// The pacing regression (docs/specs/pacing.md): a player who opens the
     /// game and never touches it is not beaten before the second wave has
-    /// scored — about seventeen minutes on the shipped map. The opponent may
+    /// scored — about seven minutes on the shipped map. The opponent may
     /// win after that; a match nobody plays has to be losable.
     #[test]
     fn an_idle_player_survives_the_first_two_waves_against_the_scripted_opponent() {
@@ -1277,7 +1582,14 @@ mod tests {
             assert_eq!(w.outcome, 0, "an idle player's match was decided at tick {ticks}");
         }
         assert_eq!(crate::tide::waves_landed(&w), 2, "the second wave never landed");
-        assert!(ticks >= 30_000, "two waves landed by tick {ticks}");
+        // The second peak is a lull, a telegraph, half an impact and one whole
+        // cadence in: anything much sooner means the tide skipped ahead.
+        let cfg = MapConfig::DEFAULT;
+        let second_peak = cfg.lull_ticks
+            + cfg.telegraph_ticks
+            + cfg.impact_ticks / 2
+            + (cfg.telegraph_ticks + cfg.impact_ticks + cfg.recovery_ticks);
+        assert!(ticks + 2 >= second_peak, "two waves landed by tick {ticks}, not {second_peak}");
     }
 
     /// With no opponent and no input at all, the world alone must not dissolve

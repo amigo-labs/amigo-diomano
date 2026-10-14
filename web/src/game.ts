@@ -26,6 +26,7 @@ import { type QualityTier, type Sim, TIDE, type VerbEventView } from "./main";
 import { createRadial } from "./radial";
 import { createAtmosphere } from "./renderer/atmosphere";
 import { createEffects } from "./renderer/effects";
+import { createIndicators } from "./renderer/indicators";
 import { cellDirection, createPlanet } from "./renderer/planet";
 import { createPost } from "./renderer/post";
 import { BASE_RADIUS, HEIGHT_TO_RADIUS } from "./renderer/scale";
@@ -34,6 +35,7 @@ import { createView } from "./renderer/view";
 import { createWater } from "./renderer/water";
 import type { Ui } from "./ui";
 import { VERB } from "./verbs";
+import { createWorldEvents } from "./worldEvents";
 
 /** The god the local player is. Player 1 is the scripted opponent for now. */
 const LOCAL_PLAYER = 0;
@@ -52,8 +54,11 @@ export interface Game {
   /**
    * Start the match. Called from the title card's click, which is also the
    * activation gesture the browsers require before audio may make a sound.
+   *
+   * @param level The opponent's level from the title card (`dio_set_ai`):
+   *   0 easy, 1 normal, 2 hard. Kept for every restart.
    */
-  begin(): void;
+  begin(level: number): void;
 }
 
 export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOptions, ui: Ui): Game {
@@ -93,7 +98,19 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   const audio = createAudio(LOCAL_PLAYER);
   // The readouts §8 did not allow for, and the reason the deviation was worth
   // it — see the header of `hud.ts` and the note in PLAN.md.
-  const hud = createHud(sim, LOCAL_PLAYER);
+  const hud = createHud(sim, LOCAL_PLAYER, {
+    // A wave's result gets its own short sting, so a peak that lands while
+    // the player is looking elsewhere is still heard to have been decided.
+    onWaveScored: (result) =>
+      audio.sting(result === "won" ? "wave-won" : result === "lost" ? "wave-lost" : "wave-draw"),
+  });
+  /**
+   * What the population did since the last frame, diffed once and read by the
+   * sound, the particles, the off-screen pips and the readouts alike.
+   */
+  const worldEvents = createWorldEvents();
+  /** The opponent's level, set on the title card; see `begin` and `restart`. */
+  let currentLevel = 1;
 
   // Volume, finally reachable: a slider on the title card and three keys in
   // the match. The banner is the feedback — a level you cannot hear changing
@@ -143,7 +160,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     refuse,
   );
   const effects = createEffects(sim);
-  scene.add(hand.group, effects.group);
+  const indicators = createIndicators(sim, LOCAL_PLAYER);
+  scene.add(hand.group, effects.group, indicators.group);
   /** High-water mark in the simulation's verb-event ring. */
   let seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
   // The power menu replaces the gesture recogniser: a right-*click* (right-
@@ -248,18 +266,23 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     // never grows, so every view stays valid — and the AudioContext stays
     // unlocked, which a page reload would lose.
     sim.e.dio_init(nextSeed, terrain, ai ? 1 : 0);
+    // `dio_init` starts from the default config, which has the default
+    // opponent: the level chosen on the title card has to be put back before
+    // the new match's first tick, or every rematch is played against Normal.
+    sim.e.dio_set_ai(currentLevel, 0);
     seenVerbEvents = sim.e.dio_verb_events_written() >>> 0;
     pendingCasts.length = 0;
     handledOutcome = 0;
     // Everything that stamps state with the tick has to forget the old match,
     // or it waits for the new one to catch up with the old one's clock.
     vegetation.reset();
-    audio.reset();
+    worldEvents.reset();
     // And everything that holds a piece of the old match outright: particles
     // still fading over ground that no longer exists, sculpt steps banked
     // against it, and a power menu left open over the end card — which kept
     // its backdrop, its target cell and the hand's suppression.
     effects.reset();
+    indicators.reset();
     hand.reset();
     radial.close();
     menuWasOpen = false;
@@ -304,7 +327,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       wave: sim.e.dio_tide_wave(),
     };
     setTimeout(() => {
-      if (handledOutcome !== 0) ui.showGameOver(outcome, waves, cause, restart);
+      if (handledOutcome !== 0) ui.showGameOver(outcome, waves, cause, currentLevel, restart);
     }, 2500);
   };
 
@@ -401,10 +424,12 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     const fired = sim.verbEvents(seenVerbEvents);
     seenVerbEvents = fired.written;
     consumeVerbFeedback(fired.events);
-    camera.shake(effects.sync(sim, fired.events, dtMs));
+    const world = worldEvents.sync(sim);
+    camera.shake(effects.sync(sim, fired.events, world, dtMs));
+    indicators.sync(camera.camera, fired.events, world, dtMs);
     // The same applied-verb list the effects and the sounds read, so a
     // coaching hint retires on what the simulation did.
-    hud.sync(fired.events);
+    hud.sync(fired.events, world);
     if (radial.open && !menuWasOpen) hud.noteMenuOpened();
     menuWasOpen = radial.open;
     atmosphere.sync(
@@ -413,7 +438,7 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
       sim.e.dio_tide_offset(),
       sim.e.dio_tide_strength(),
     );
-    audio.sync(sim, camera.camera, dtMs);
+    audio.sync(sim, camera.camera, dtMs, world);
 
     // The match result, finally read by someone. The sim freezes itself
     // once the outcome is decided; the client's job is the presentation.
@@ -439,6 +464,8 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
     camera,
     view,
     effects,
+    indicators,
+    hud,
     radial,
     audio,
     keys,
@@ -488,11 +515,15 @@ export function startGame(canvas: HTMLCanvasElement, sim: Sim, options: GameOpti
   return {
     audio,
 
-    begin(): void {
+    begin(level: number): void {
       // The title click is the browsers' required activation gesture: unlock
       // audio here and nothing is lost.
       void audio.resume();
       camera.drift(0);
+      // The world behind the card was initialised before anyone chose an
+      // opponent; this is the last moment before its first tick.
+      currentLevel = level;
+      sim.e.dio_set_ai(currentLevel, 0);
       matchStarted = true;
       radial.attach();
       hud.setVisible(true);

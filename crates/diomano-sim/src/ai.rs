@@ -1,370 +1,559 @@
 //! A scripted opponent.
 //!
-//! Not in the HANDOFF plan; requested for this run as a stand-in for the second
-//! god until netcode exists. Its brief is narrow and worth stating, because it
-//! is the reason it is a *script* and not a planner:
-//!
-//! > it visibly performs the same verbs the player has, so the player learns
-//! > them by watching.
-//!
-//! Two consequences follow, and both are load-bearing:
+//! Not in the HANDOFF plan; a stand-in for the second god until netcode
+//! exists. Two rules from its first brief still hold, and both are
+//! load-bearing:
 //!
 //! - It emits [`Command`]s and nothing else. It has no privileged mutation path
 //!   into the world, so anything it does, the player can do — and pillar 3 holds
 //!   for it as much as for a human (it never issues an attack order, because
 //!   there is no such verb to issue).
-//! - It acts slowly and one lesson at a time. A competent opponent would
-//!   interleave everything and teach nothing.
+//! - It acts one move at a time, holds each verb long enough to watch and
+//!   pauses after it, so the player learns the verbs by watching it use them.
 //!
-//! It is fully deterministic: its only inputs are world state and tick count.
-//! Both peers running it would agree, so it survives the netcode phase unchanged.
+//! What changed is *why* it moves. The first version replayed a fixed table of
+//! lessons aimed at offsets from its own town, and measured over the sweep it
+//! lost to a player who never touched the controls: its digs drowned its own
+//! coast, its mana sat at the 9,999 cap from minute ten, and on the shipped
+//! archipelago its army never met anyone. This one plays the game the score
+//! is kept in (§5.5): every wave peak counts the habitable cells under each
+//! god's influence, so it
 //!
-//! It teaches once, then it fights. After a single pass through the curriculum
-//! the script switches to [`WAR_SCRIPT`]: grow the economy, march the army at
-//! the enemy's strongest settlement, strike it when affordable, wall up when
-//! the tide telegraphs. Still only ordinary commands — a war of terraforming
-//! and marching, which is the only war this game has.
+//! 1. lifts its own land clear of the **next peak's waterline**
+//!    ([`crate::tide::next_peak_level`]) with earth dug from ground nobody
+//!    scores on — the shallow shelf, neutral land, and above `LEVEL_EASY`
+//!    the enemy's own coast (never its home pedestal);
+//! 2. spends mana instead of hoarding it: earthquakes on the enemy's best
+//!    town, a flood only when the forecast says the enemy loses more land to
+//!    it than it does, armageddon only to break a level score;
+//! 3. marches when its style says so, over whatever land joins the two
+//!    peoples.
+//!
+//! How well it does each of those is the difficulty ([`LEVEL_EASY`] …
+//! [`LEVEL_HARD`]); which of them it prefers is the style ([`STYLE_TURTLE`] …).
+//! Both are per side in [`MapConfig`](crate::world::MapConfig), so a mirror
+//! match can pit one against another and `diomano-cli sweep --profile mirror`
+//! can measure whether the better player wins.
+//!
+//! Fully deterministic: its only inputs are world state and its own hashed
+//! bookkeeping, and every scan runs in a fixed order with fixed tie-breaks.
 
 use crate::world::{
-    Command, CommandBuf, MOD_THROWN, NO_SETTLEMENT, PLAYERS, TIDE_TELEGRAPH, VERB_EARTHQUAKE,
-    VERB_LOWER, VERB_MAGNET, VERB_RAISE, VERB_VOLCANO, World, idx, verb_power,
+    AiState, Command, CommandBuf, HAND_CAPACITY, HAND_EARTH, MOD_EXTREME, MOD_INCREASED, MOD_MASK,
+    N, NO_SETTLEMENT, PLAYERS, POWER_ARMAGEDDON, POWER_CHAMPION, POWER_EARTHQUAKE, POWER_FLOOD,
+    POWER_MAGNET, POWER_SWAMP, POWER_VOLCANO, TERRACE, TIDE_CALM, TIDE_DONE, TIDE_RECOVERY,
+    VERB_ARMAGEDDON, VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_NOP,
+    VERB_RAISE, VERB_SWAMP, VERB_VOLCANO, World, idx, live_neighbour,
 };
 
-/// `AiState::phase` value once the curriculum has been shown once.
-pub const PHASE_WAR: u8 = 1;
+/// Slow, generous, never steals and never floods. Thinks every four seconds.
+pub const LEVEL_EASY: u8 = 0;
+/// The default opponent.
+pub const LEVEL_NORMAL: u8 = 1;
+/// Fast, takes the enemy's land, times its armageddon.
+pub const LEVEL_HARD: u8 = 2;
+pub const LEVEL_COUNT: u8 = 3;
 
-/// Mana the war phase keeps in hand before it pays for a strike, so it can
-/// always afford the next magnet and never bankrupts its own march.
-const WAR_RESERVE: i32 = 200;
+/// No preference: terraform, strike, flood as the forecast says.
+pub const STYLE_BALANCED: u8 = 0;
+/// Builds for the last wave and builds more; strikes at half the rate, never
+/// floods, never ends the match early.
+pub const STYLE_TURTLE: u8 = 1;
+/// Marches on the enemy from the first wave and pays for champions.
+pub const STYLE_RUSH: u8 = 2;
+/// Spends on the sky: volcanoes instead of quakes, floods, armageddon.
+pub const STYLE_DISASTER: u8 = 3;
+pub const STYLE_COUNT: u8 = 4;
 
-/// Where a move points.
+/// Cells around a home core the opponent never strikes inside: the platform
+/// itself, which a quake leaves alone anyway (`settlements::is_home_platform`).
+/// It was seven while only the core cell was spared and a wide quake beside
+/// it could still shake the pedestal out from under it.
+const CORE_CLEARANCE: usize = 2;
+
+/// Cells around a home core the opponent never pours water or lava inside.
+/// Water on the core is the core under water — sudden death by one pour — and
+/// unlike a quake nothing in the rules stops it.
+const SPILL_CLEARANCE: usize = 7;
+
+/// Cells around a home core the opponent never digs inside, for the same
+/// reason.
+const CORE_DIG_CLEARANCE: usize = 5;
+
+/// Earth moved by one held tick of a poured raise or dig: nine cells, a
+/// terrace each.
+const BRUSH_LOAD: u16 = 9 * TERRACE as u16;
+
+/// The settings one (level, style) pair plays with.
+#[expect(clippy::struct_excessive_bools, reason = "a const table row of independent switches")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Aim {
-    /// The scripted player's own anchor settlement, plus the move's offset.
-    Home,
-    /// The *enemy's* strongest settlement, plus the move's offset.
-    EnemyBase,
+pub struct Tuning {
+    /// Ticks between decisions while idle.
+    pub think: u32,
+    /// Ticks a raise or dig is held.
+    pub hold: u32,
+    /// Ticks of stillness after every move, so it can be watched.
+    pub pause: u32,
+    /// Waves that must have landed before it strikes.
+    pub strike_after: u8,
+    /// Minimum ticks between two strikes.
+    pub strike_gap: u32,
+    /// Mana it keeps back after paying for any power.
+    pub reserve: i32,
+    /// Digs the enemy's land for its own earth: 0 never, 1 open ground,
+    /// 2 under its towns as well.
+    pub steals: u8,
+    /// Picks the best spot on the planet rather than the first good one.
+    pub thorough: bool,
+    pub floods: bool,
+    pub armageddon: bool,
+    /// Volcano rather than earthquake as its strike.
+    pub volcano: bool,
+    /// Sends the army at the enemy's strongest town, and buys champions.
+    pub marches: bool,
+    /// Brush modifier for strikes: how much of the enemy's land one quake
+    /// breaks. The same `B` key a player cycles.
+    pub strike_modifier: u8,
+    /// Builds against the *last* wave's waterline instead of the next one:
+    /// ground lifted once that never has to be lifted again.
+    pub builds_for_last: bool,
+    /// Every other strike is a swamp on the enemy's best plateau, when one
+    /// is worth it.
+    pub swamps: bool,
 }
 
-/// One step of a script — a lesson in the curriculum, a move in the war.
-#[derive(Clone, Copy, Debug)]
-struct Lesson {
-    /// What the player would press.
-    verb: u8,
-    /// How many ticks to hold it for.
-    hold: u32,
-    /// Ticks of stillness afterwards, so the effect is watchable.
-    pause: u32,
-    /// Offset from the aim point, in cells, for the target.
-    dx: i8,
-    dy: i8,
-    modifier: u8,
-    aim: Aim,
-    /// Emit only while `mana >= cost + WAR_RESERVE` — the strike gate.
-    needs_reserve: bool,
-    /// Emit only during a tide telegraph — the defensive-wall gate.
-    telegraph_only: bool,
-    /// Emit only once this many waves have landed (`tide::waves_landed`) —
-    /// the escalation gate. The war is paced by the sea, not by the script.
-    min_wave: u8,
-}
-
-const fn lesson(verb: u8, hold: u32, pause: u32, dx: i8, dy: i8, modifier: u8) -> Lesson {
-    Lesson {
-        verb,
-        hold,
-        pause,
-        dx,
-        dy,
-        modifier,
-        aim: Aim::Home,
-        needs_reserve: false,
-        telegraph_only: false,
-        min_wave: 0,
+/// The tuning for a level and a style. Out-of-range values clamp, so a
+/// malformed config plays as the nearest real opponent instead of panicking.
+#[must_use]
+pub const fn tuning(level: u8, style: u8) -> Tuning {
+    let mut t = match level {
+        LEVEL_EASY => Tuning {
+            think: 120,
+            hold: 12,
+            pause: 60,
+            strike_after: 2,
+            strike_gap: 1_800,
+            reserve: 400,
+            steals: 0,
+            thorough: false,
+            floods: false,
+            armageddon: false,
+            volcano: false,
+            marches: false,
+            strike_modifier: 0,
+            builds_for_last: false,
+            swamps: false,
+        },
+        LEVEL_NORMAL => Tuning {
+            think: 45,
+            hold: 24,
+            pause: 24,
+            strike_after: 1,
+            strike_gap: 900,
+            reserve: 200,
+            steals: 1,
+            thorough: true,
+            floods: true,
+            armageddon: false,
+            volcano: false,
+            marches: false,
+            strike_modifier: MOD_INCREASED,
+            builds_for_last: false,
+            swamps: true,
+        },
+        _ => Tuning {
+            think: 15,
+            hold: 30,
+            pause: 8,
+            strike_after: 1,
+            strike_gap: 450,
+            reserve: 120,
+            steals: 2,
+            thorough: true,
+            floods: true,
+            armageddon: true,
+            volcano: false,
+            marches: false,
+            strike_modifier: MOD_EXTREME,
+            builds_for_last: false,
+            swamps: true,
+        },
+    };
+    match style {
+        STYLE_TURTLE => {
+            // Builds for the finale and builds more of it, strikes at half the
+            // rate. It used to wait for the second wave to strike at all, and
+            // won 8-41% against every other style: everyone else was spending
+            // from the first wave on while it sat on a full purse.
+            t.strike_gap *= 2;
+            t.hold = t.hold * 3 / 2;
+            t.pause = if t.pause / 2 < 8 { 8 } else { t.pause / 2 };
+            t.builds_for_last = true;
+            t.armageddon = false;
+            t.floods = false;
+        }
+        STYLE_RUSH => {
+            t.marches = true;
+            t.strike_after = 0;
+            t.strike_gap = t.strike_gap * 2 / 3;
+        }
+        STYLE_DISASTER => {
+            // Volcanoes at the level's own pace, from the second wave. At
+            // twice the pace it beat every other style 66-83% of the time in
+            // the mirror sweep; venting from the first wave it still beat
+            // them 75-83%, at half the pace or with smaller vents, with or
+            // without floods and armageddon. The first vent is what decides:
+            // lava over the enemy's flat land before the second peak costs
+            // them about a hundred scoring cells.
+            t.volcano = true;
+            t.strike_after = 2;
+            t.floods = true;
+            t.armageddon = level != LEVEL_EASY;
+        }
+        _ => {}
     }
+    t
 }
 
-#[expect(clippy::too_many_arguments, reason = "a const table row, not an API")]
-const fn war_move(
-    verb: u8,
-    hold: u32,
-    pause: u32,
-    dx: i8,
-    dy: i8,
-    modifier: u8,
-    aim: Aim,
-    needs_reserve: bool,
-    telegraph_only: bool,
-) -> Lesson {
-    Lesson { verb, hold, pause, dx, dy, modifier, aim, needs_reserve, telegraph_only, min_wave: 0 }
-}
-
-impl Lesson {
-    /// The same move, held back until `waves` waves have landed.
-    const fn after_waves(self, waves: u8) -> Self {
-        Self { min_wave: waves, ..self }
-    }
-}
-
-/// Waves that must have landed before the opponent leaves school for war.
-///
-/// The first wave peaks at 2:10 on the shipped map. Until then the
-/// curriculum repeats — the part that teaches the verbs — and `reanchor` keeps
-/// it beside whatever the opponent has built. One pass used to be enough
-/// (~21 s), and a player who looked around for two minutes had lost.
-pub const WAR_AFTER_WAVES: u8 = 1;
-
-/// Waves that must have landed before the opponent strikes at the enemy.
-///
-/// The first recovery is economy and marching; strikes come with the second
-/// wave. At the shipped fifteen-minute cadence that is 17:10.
-pub const STRIKE_AFTER_WAVES: u8 = 2;
-
-/// The curriculum, in order. Each pass through it is one visible "turn".
-///
-/// Deliberately opens with dig-then-build: matter conservation (pillar 4) is the
-/// least obvious rule in the game and the easiest to show — the hand fills, then
-/// it empties.
-const SCRIPT: &[Lesson] = &[
-    // Dig a pit next door. The hand visibly fills.
-    lesson(VERB_LOWER, 24, 20, 8, 0, 0),
-    // Spend it flattening ground beside home. The hand visibly empties, and a
-    // settlement appears on the plateau a few seconds later with no order given.
-    lesson(VERB_RAISE, 24, 90, -6, 0, MOD_THROWN),
-    // Move the magnet: the only command in the game.
-    lesson(VERB_MAGNET, 1, 120, -10, 6, 0),
-    // Dig a channel towards the sea, so water has somewhere to go. Southward:
-    // the contact corridor approaches every spawn from the north, and the
-    // original (0, +9) target dug straight through it — the opponent was
-    // severing its own only road to the enemy in its fourth lesson.
-    lesson(VERB_LOWER, 30, 30, 0, -9, MOD_THROWN),
-    // Reclaim land with lava, which is the counter-play to the tide.
-    lesson(VERB_VOLCANO, 1, 150, 4, -9, 0),
-    // Raise a wall across the approach: the terrain response that saves a
-    // settlement under siege.
-    lesson(VERB_RAISE, 30, 120, -2, -7, MOD_THROWN),
-];
-
-/// The war, after one pass of teaching. Same interpreter, different table:
-/// grow the economy, march the army at the enemy over the causeway, strike
-/// the enemy base when affordable, wall up when the sea telegraphs.
-///
-/// One pass is ~19 s — under a tide cycle — so every wave sees a march. It
-/// still emits nothing but ordinary commands: contact and combat resolve
-/// autonomously (§4.7), because there is no attack order to issue.
-const WAR_SCRIPT: &[Lesson] = &[
-    // Refill the hand.
-    war_move(VERB_LOWER, 24, 12, 8, 0, 0, Aim::Home, false, false),
-    // Flatten ground beside home: settlements found themselves, and they are
-    // the economy — influence, mana and walkers all grow from them.
-    war_move(VERB_RAISE, 46, 30, -6, 2, MOD_THROWN, Aim::Home, false, false),
-    // The march: drop the magnet on the enemy's strongest settlement and give
-    // the army a tide cycle's recovery window to walk the causeway.
-    war_move(VERB_MAGNET, 1, 300, 0, 0, 0, Aim::EnemyBase, false, false),
-    // The strike, when affordable past the reserve. Earthquake, deliberately
-    // never volcano: a lava pool on the enemy plateau makes the AI's *own*
-    // magnet cell impassable, the flow field falls back, and the army walks
-    // home from its own siege — traced, both armies parked for a whole match.
-    // Broken ground starves the settlement (§5.2) and blocks nobody.
-    war_move(VERB_EARTHQUAKE, 1, 90, 1, -1, 0, Aim::EnemyBase, true, false)
-        .after_waves(STRIKE_AFTER_WAVES),
-    // The sea is coming: a wall across home's seaward approach.
-    war_move(VERB_RAISE, 30, 30, -2, -7, MOD_THROWN, Aim::Home, false, true),
-];
-
-/// Emit this tick's commands for the scripted player.
+/// Emit this tick's commands for every scripted player.
 ///
 /// Runs inside the tick (pass 2b in [`World::tick`]) and its output is applied
 /// through exactly the same path as a human's input.
 pub fn step(w: &mut World, out: &mut CommandBuf) {
-    let player = (w.cfg.ai_player as usize) % PLAYERS;
     // A decided match silences the opponent — except in endless worlds, where
     // the world itself keeps running (the §6.3 corpus) and a mute opponent
     // would halve the coverage of exactly the phase the corpus is there for.
     if w.outcome != 0 && w.cfg.endless == 0 {
         return;
     }
-
-    // Re-anchor on the scripted player's strongest settlement whenever the
-    // script wraps, so the demonstration follows the action instead of playing
-    // out next to a crater. After one full pass of teaching, the gloves come
-    // off: the curriculum hands over to the war table. Both tables are
-    // non-empty, so this settles in at most two rounds.
-    loop {
-        if (w.ai.script_pc as usize) < current_script(w).len() {
-            break;
+    let primary = (w.cfg.ai_player as usize) % PLAYERS;
+    for player in 0..PLAYERS {
+        if player == primary || w.cfg.ai_mirror != 0 {
+            step_player(w, player, out);
         }
-        w.ai.script_pc = 0;
-        w.ai.timer = 0;
-        w.ai.repeat = w.ai.repeat.wrapping_add(1);
-        if w.ai.phase != PHASE_WAR
-            && w.ai.repeat >= 1
-            && crate::tide::waves_landed(w) >= WAR_AFTER_WAVES
-        {
-            w.ai.phase = PHASE_WAR;
-            w.ai.repeat = 0;
-        }
-        reanchor(w, player);
     }
-    if w.ai.anchor_face == 0 && w.ai.anchor_x == 0 && w.ai.anchor_y == 0 {
-        reanchor(w, player);
-    }
+}
 
-    let l = current_script(w)[w.ai.script_pc as usize];
-    let t = w.ai.timer;
-    w.ai.timer = t.wrapping_add(1);
-    if t >= l.hold + l.pause {
-        w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
-        w.ai.timer = 0;
-        return;
-    }
-    if t >= l.hold {
-        return; // the pause: stand back and let the world respond
-    }
+fn step_player(w: &mut World, player: usize, out: &mut CommandBuf) {
+    let t = tuning(w.cfg.ai_level[player], w.cfg.ai_style[player]);
+    let a = w.ai[player];
 
-    // A wall is only worth raising while the sea telegraphs, and a strike only
-    // once the sea has escalated the war; otherwise the whole move is skipped
-    // rather than half-held.
-    if (l.telegraph_only && w.tide.phase != TIDE_TELEGRAPH)
-        || crate::tide::waves_landed(w) < l.min_wave
-    {
-        if t == 0 {
-            w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
-            w.ai.timer = 0;
-        }
-        return;
-    }
-
-    // The reserve gate: never spend down past the next magnet. Emitting
-    // nothing this tick is fine — the timer still advances, so an unaffordable
-    // strike is a skipped beat and not a stall.
-    let verb = l.verb;
-    if l.needs_reserve {
-        let cost = verb_power(verb).map_or(0, |p| i32::from(w.cfg.power_cost[p]));
-        if w.mana_units(player) < cost + WAR_RESERVE {
+    if a.verb != VERB_NOP && a.holding != 0 {
+        if a.timer == 0 || !still_worth_holding(w, player, &a) {
+            // Done: stand back and let the world respond.
+            w.ai[player].holding = 0;
+            w.ai[player].timer = t.pause;
             return;
         }
+        w.ai[player].timer = a.timer - 1;
+        // Only the sculpting verbs are held; a power is paid for once.
+        if a.verb == VERB_RAISE || a.verb == VERB_LOWER {
+            emit(w, player, out, a.verb, (a.face, a.x, a.y), a.modifier);
+        }
+        return;
+    }
+    if a.timer > 0 {
+        w.ai[player].timer = a.timer - 1;
+        return;
+    }
+    if a.verb != VERB_NOP {
+        // The pause is over.
+        w.ai[player].verb = VERB_NOP;
     }
 
-    // `target` has nothing only for an anchor that is itself off its face, which
-    // `reanchor` never produces, or for a move at home with nowhere to land that
-    // spares the opponent's own towns; skipping the beat is the honest fallback.
-    let Some((face, x, y)) = target(w, player, l) else {
+    w.ai[player].decisions = w.ai[player].decisions.wrapping_add(1);
+    let Some((verb, at, modifier)) = decide(w, player, &t) else {
+        w.ai[player].timer = t.think;
         return;
     };
+    let held = verb == VERB_RAISE || verb == VERB_LOWER;
+    if verb_power_cost(w, verb).is_some() && !held && verb != VERB_MAGNET {
+        w.ai[player].strikes = w.ai[player].strikes.wrapping_add(1);
+        w.ai[player].last_strike = w.tick;
+    }
+    w.ai[player] = AiState {
+        face: at.0,
+        x: at.1,
+        y: at.2,
+        verb,
+        modifier,
+        holding: 1,
+        timer: if held { t.hold - 1 } else { 0 },
+        ..w.ai[player]
+    };
+    emit(w, player, out, verb, at, modifier);
+}
+
+fn emit(w: &World, player: usize, out: &mut CommandBuf, verb: u8, at: (u8, u8, u8), modifier: u8) {
     out.push(Command {
         tick: w.tick,
-        x,
-        y,
+        x: u16::from(at.1),
+        y: u16::from(at.2),
         player: player as u8,
         verb,
-        face,
-        modifier: l.modifier,
+        face: at.0,
+        modifier: modifier & MOD_MASK,
     });
 }
 
-fn current_script(w: &World) -> &'static [Lesson] {
-    if w.ai.phase == PHASE_WAR { WAR_SCRIPT } else { SCRIPT }
+/// A raise stops when the hand is empty, a dig when it is full: holding on
+/// past that is a refused verb every tick, which the client reads as an error.
+/// Either stops the moment one of its own towns stands under the brush: a
+/// held raise levels ground (`World::deform`), a settlement founds itself on
+/// the level ground mid-hold, and the next tick of the same raise would break
+/// the plateau it just made.
+fn still_worth_holding(w: &World, player: usize, a: &AiState) -> bool {
+    let amount = w.hand[player].amount;
+    let sculpting = match a.verb {
+        VERB_RAISE => amount > 0,
+        VERB_LOWER => amount <= HAND_CAPACITY - BRUSH_LOAD,
+        _ => return true,
+    };
+    sculpting && !brush_covers_own_town(w, player, a)
 }
 
-fn target(w: &World, player: usize, l: Lesson) -> Option<(u8, u16, u16)> {
-    if l.aim == Aim::EnemyBase || !reshapes_ground(l.verb) {
-        return aim_at(w, player, l.dx, l.dy, l.aim);
-    }
-    // At home, a move that reshapes ground must not land on the opponent's own
-    // towns. A settlement is only as good as the flat plateau under it, and the
-    // offsets in the tables are relative to the *strongest* settlement, not to
-    // the satellites that found themselves around it — so the thrown raise six
-    // cells west of the anchor came down on a satellite's footprint, and every
-    // "flatten ground beside home" levelled a town instead. Traced on seed
-    // 0x9E37D8A6: the curriculum's first raise razed four of seven settlements
-    // and the anchor itself, and the opponent lost to an idle player by sudden
-    // death at tick 691. Two in three sweep seeds ended that way.
-    //
-    // The offset turns a quarter at a time, then reaches twice as far, and the
-    // first spot whose brush (plus the one-cell margin a slope needs) is clear
-    // of every own footprint wins. Fixed order, so a function of state only.
-    let radius = World::brush_radius(l.modifier) + 1;
-    let (dx, dy) = (l.dx, l.dy);
-    for reach in [1i8, 2] {
-        for (rx, ry) in [(dx, dy), (-dy, dx), (-dx, -dy), (dy, -dx)] {
-            let Some(spot) =
-                aim_at(w, player, rx.saturating_mul(reach), ry.saturating_mul(reach), l.aim)
+fn brush_covers_own_town(w: &World, player: usize, a: &AiState) -> bool {
+    let r = World::brush_radius(a.modifier);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let Some((f, x, y)) =
+                crate::world::walk(usize::from(a.face), i32::from(a.x), i32::from(a.y), dx, dy)
             else {
                 continue;
             };
-            if spares_own_towns(w, player, spot, radius) {
-                return Some(spot);
-            }
-        }
-    }
-    None
-}
-
-/// The verbs that change the height or the surface under them.
-const fn reshapes_ground(verb: u8) -> bool {
-    matches!(verb, VERB_RAISE | VERB_LOWER | VERB_VOLCANO)
-}
-
-/// No cell within `radius` of `spot` belongs to one of `player`'s settlements.
-fn spares_own_towns(w: &World, player: usize, spot: (u8, u16, u16), radius: i32) -> bool {
-    let (face, x, y) = spot;
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
-            let Some((f, cx, cy)) =
-                crate::world::walk(face as usize, i32::from(x), i32::from(y), dx, dy)
-            else {
-                continue;
-            };
-            let slot = w.settle_of[idx(f, cx, cy)];
+            let slot = w.settle_of[idx(f, x, y)];
             if slot != NO_SETTLEMENT
                 && w.settlements[slot as usize].alive()
                 && w.settlements[slot as usize].owner as usize == player
             {
-                return false;
+                return true;
             }
         }
     }
-    true
+    false
 }
 
-fn aim_at(w: &World, player: usize, dx: i8, dy: i8, aim: Aim) -> Option<(u8, u16, u16)> {
-    let (face, ax, ay) = match aim {
-        Aim::Home => (w.ai.anchor_face, w.ai.anchor_x, w.ai.anchor_y),
-        Aim::EnemyBase => {
-            let enemy = (player + 1) % PLAYERS;
-            strongest_settlement(w, enemy).unwrap_or_else(|| {
-                let (f, x, y) = crate::settlements::STARTS[enemy];
-                (f as u8, x as u8, y as u8)
-            })
-        }
+fn verb_power_cost(w: &World, verb: u8) -> Option<i32> {
+    crate::world::verb_power(verb).map(|p| i32::from(w.cfg.power_cost[p]))
+}
+
+/// What to do next, in priority order. `None` means: nothing worth doing,
+/// think again later.
+fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)> {
+    let enemy = (player + 1) % PLAYERS;
+    let mana = w.mana_units(player);
+    let landed = crate::tide::waves_landed(w);
+    let afford = |power: usize| -> bool {
+        w.cfg.power_enabled[power] != 0
+            && (w.free_uses[player][power] > 0
+                || mana >= i32::from(w.cfg.power_cost[power]) + t.reserve)
     };
-    // The offset walks across seams like everything else on the cube does. It
-    // used to clamp to the face instead, so a lesson aimed six cells west of a
-    // settlement four cells from the edge landed inside that settlement's own
-    // footprint — and the opponent spent the whole hold digging up its own town.
-    let (f, x, y) = crate::world::walk(
-        face as usize,
-        i32::from(ax),
-        i32::from(ay),
-        i32::from(dx),
-        i32::from(dy),
-    )?;
-    Some((f as u8, x as u16, y as u16))
+    let between_waves = w.tide.phase == TIDE_CALM || w.tide.phase == TIDE_RECOVERY;
+
+    // 1. Armageddon, as the stalemate breaker it is: waves level, one
+    // natural wave left, and a doubled final wave would go its way where the
+    // natural one would not. Cast whenever it was merely ahead, it ended
+    // matches at three minutes — a shortcut, not a breaker.
+    let finale = landed.saturating_add(1) >= w.cfg.waves;
+    if t.armageddon
+        && finale
+        && between_waves
+        && afford(POWER_ARMAGEDDON)
+        && armageddon_wins(w, player)
+    {
+        return Some((VERB_ARMAGEDDON, home(player), 0));
+    }
+
+    // 2. Flood, when the forecast says the enemy has more to lose.
+    if t.floods
+        && between_waves
+        && w.sea_base < crate::powers::FLOOD_CAP
+        && afford(POWER_FLOOD)
+        && flood_pays(w, player)
+    {
+        return Some((VERB_FLOOD, home(player), 0));
+    }
+
+    // 3. Strike the enemy's best town.
+    let spaced =
+        w.ai[player].strikes == 0 || w.tick.wrapping_sub(w.ai[player].last_strike) >= t.strike_gap;
+    if landed >= t.strike_after && spaced {
+        // Lava runs, so a vent keeps the clearance a spill does: the platform
+        // is immune to quakes, not to lava, and a vent beside it poured over
+        // the core — the disaster style won every mirror match by sudden
+        // death at five minutes once quakes were allowed that close.
+        let (verb, power, clearance, spot) = if t.volcano && afford(POWER_VOLCANO) {
+            (VERB_VOLCANO, POWER_VOLCANO, SPILL_CLEARANCE, Spot::Vent)
+        } else {
+            (VERB_EARTHQUAKE, POWER_EARTHQUAKE, CORE_CLEARANCE, Spot::Strike)
+        };
+        // Every other strike a swamp, where a plateau of theirs is worth one:
+        // it takes ground a quake only breaks, and whatever walks onto it.
+        if t.swamps
+            && w.ai[player].strikes % 2 == 1
+            && afford(POWER_SWAMP)
+            && let Some(at) = best_spot(w, player, t, Spot::Mire)
+        {
+            return Some((VERB_SWAMP, at, t.strike_modifier));
+        }
+        // A town if there is one; once there is none, the enemy's best
+        // remaining ground — a home core keeps scoring without a single town.
+        if afford(power)
+            && let Some(at) =
+                best_enemy_town(w, enemy, Some(clearance)).or_else(|| best_spot(w, player, t, spot))
+        {
+            return Some((verb, at, t.strike_modifier));
+        }
+    }
+
+    // 4. March — but only over land. With the magnet on the enemy and no
+    // path to it from home (the flow field's distance there is the fallback's,
+    // `FALLBACK_BASE` and up), a march is mana spent on nothing: on two of the
+    // three terrains the spawns share no land, and the rush style that kept
+    // paying for magnets and champions there won 8-16% of its matches. It
+    // falls through to terraforming until land joins the two peoples; the
+    // flow field notices within fifteen ticks when it does.
+    let m = w.magnet[player];
+    let (hf, hx, hy) = crate::settlements::STARTS[player];
+    let stranded =
+        m.active != 0 && w.dist[player][idx(hf, hx, hy)] >= crate::flowfield::FALLBACK_BASE;
+    if t.marches
+        && !stranded
+        && afford(POWER_MAGNET)
+        && let Some(at) = best_enemy_town(w, enemy, None)
+    {
+        if m.active == 0 || (m.face, m.x, m.y) != at {
+            return Some((VERB_MAGNET, at, 0));
+        }
+        if afford(POWER_CHAMPION) && walker_count(w, player) >= 4 {
+            return Some((VERB_CHAMPION, at, 0));
+        }
+    }
+
+    // 5. Terraform against the next waterline.
+    terraform(w, player, t)
 }
 
-/// A player's strongest settlement: tier descending, slot ascending — the
-/// exact mirror of `reanchor`'s scan, so both gods agree on what "strongest"
-/// means.
-fn strongest_settlement(w: &World, player: usize) -> Option<(u8, u8, u8)> {
-    let mut best: Option<(u8, usize)> = None;
+/// Where a power with no target of its own is "cast": over home.
+fn home(player: usize) -> (u8, u8, u8) {
+    let (f, x, y) = crate::settlements::STARTS[player];
+    (f as u8, x as u8, y as u8)
+}
+
+fn walker_count(w: &World, player: usize) -> usize {
+    w.walkers.iter().filter(|k| k.alive() && k.owner as usize == player).count()
+}
+
+/// Which god a cell's influence belongs to.
+#[inline]
+fn owner_of(w: &World, c: usize) -> Option<usize> {
+    match w.influence[c] {
+        0 => None,
+        v if v > 0 => Some(0),
+        _ => Some(1),
+    }
+}
+
+/// The sea level that matters next: the coming peak, or the calm sea once no
+/// wave is left.
+fn waterline(w: &World) -> i32 {
+    i32::from(crate::tide::next_peak_level(w).unwrap_or(w.sea_base))
+}
+
+/// The waterline of the last natural wave's peak, or the calm sea once the
+/// tide is done.
+fn last_waterline(w: &World) -> i32 {
+    if w.tide.phase == TIDE_DONE {
+        return i32::from(w.sea_base);
+    }
+    let last = w.cfg.waves.saturating_sub(1);
+    i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last))
+}
+
+/// Habitable cells each god holds that stand above `level`.
+fn held_above(w: &World, level: i32) -> [i32; PLAYERS] {
+    let mut held = [0i32; PLAYERS];
+    for face in 0..6usize {
+        for y in 0..N {
+            for x in 0..N {
+                let c = idx(face, x, y);
+                if i32::from(w.height[c]) <= level || !w.habitable(c) {
+                    continue;
+                }
+                if let Some(p) = owner_of(w, c) {
+                    held[p] += 1;
+                }
+            }
+        }
+    }
+    held
+}
+
+/// A flood raises the calm sea one terrace for good. Worth it only when the
+/// land it drowns at the next peak is mostly the enemy's.
+fn flood_pays(w: &World, player: usize) -> bool {
+    let enemy = (player + 1) % PLAYERS;
+    let line = waterline(w);
+    let now = held_above(w, line);
+    let after = held_above(w, line + i32::from(TERRACE));
+    let mine_lost = now[player] - after[player];
+    let theirs_lost = now[enemy] - after[enemy];
+    let margin = (now[enemy] / 20).max(8);
+    theirs_lost - mine_lost >= margin
+}
+
+/// Armageddon jumps to the last wave at double strength; the skipped waves
+/// score nobody. Worth it only when the waves stand level and the doubled
+/// final wave turns a loss into a win.
+fn armageddon_wins(w: &World, player: usize) -> bool {
+    let enemy = (player + 1) % PLAYERS;
+    if w.tide.phase == TIDE_DONE {
+        return false;
+    }
+    let mut won = [0i32; PLAYERS];
+    for wave in 0..usize::from(crate::tide::waves_landed(w)).min(crate::world::MAX_WAVES) {
+        let (a, b) = (w.score[0][wave], w.score[1][wave]);
+        if a > b {
+            won[0] += 1;
+        } else if b > a {
+            won[1] += 1;
+        }
+    }
+    // Only from level: ahead, the natural waves already win it; behind,
+    // one more wave cannot.
+    if won[player] != won[enemy] {
+        return false;
+    }
+    let last = w.cfg.waves.saturating_sub(1);
+    let natural = i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last));
+    let doubled =
+        i32::from(w.sea_base) + i32::from(crate::tide::wave_strength(w, last)).saturating_mul(2);
+    let calm = held_above(w, natural);
+    let storm = held_above(w, doubled);
+    let margin = (storm[enemy] / 8).max(8);
+    // The doubled wave wins it where the natural one would not: the god who
+    // built higher calls down the sea that only high ground survives.
+    calm[player] <= calm[enemy] && storm[player] > storm[enemy] + margin
+}
+
+/// The enemy settlement most worth breaking: highest tier, then one that
+/// would still score at the next peak, then the lowest slot. `strike` skips
+/// the ones within `clearance` of a home core; a march (`None`) may go anywhere.
+fn best_enemy_town(w: &World, enemy: usize, clearance: Option<usize>) -> Option<(u8, u8, u8)> {
+    let line = waterline(w);
+    let mut best: Option<(i32, usize)> = None;
     for (i, s) in w.settlements.iter().enumerate() {
-        if !s.alive() || s.owner as usize != player {
+        if !s.alive()
+            || s.owner as usize != enemy
+            || clearance
+                .is_some_and(|r| near_home_core(s.face as usize, s.x as usize, s.y as usize, r))
+        {
             continue;
         }
-        match best {
-            Some((tier, _)) if s.tier <= tier => {}
-            _ => best = Some((s.tier, i)),
+        let c = idx(s.face as usize, s.x as usize, s.y as usize);
+        let value = i32::from(s.tier) * 4 + if i32::from(w.height[c]) > line { 3 } else { 0 };
+        if best.is_none_or(|(v, _)| value > v) {
+            best = Some((value, i));
         }
     }
     best.map(|(_, i)| {
@@ -373,33 +562,254 @@ fn strongest_settlement(w: &World, player: usize) -> Option<(u8, u8, u8)> {
     })
 }
 
-/// Point the script at the scripted player's best settlement, or at their
-/// starting position if they have none left.
-fn reanchor(w: &mut World, player: usize) {
-    if let Some((face, x, y)) = strongest_settlement(w, player) {
-        w.ai.anchor_face = face;
-        w.ai.anchor_x = x;
-        w.ai.anchor_y = y;
-    } else {
-        let (face, x, y) = crate::settlements::STARTS[player];
-        w.ai.anchor_face = face as u8;
-        w.ai.anchor_x = x as u8;
-        w.ai.anchor_y = y as u8;
+/// Raise where the next peak would drown own land, or dig earth to do it with.
+fn terraform(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)> {
+    let hand = w.hand[player];
+    if hand.amount > 0 && hand.material != HAND_EARTH {
+        // Water or lava in the hand (picked up by a dig that started over the
+        // sea). Pour it where it hurts: on the enemy's land.
+        let at = best_spot(w, player, t, Spot::Spill)?;
+        return Some((VERB_RAISE, at, 0));
     }
-    let _ = idx(w.ai.anchor_face as usize, w.ai.anchor_x as usize, w.ai.anchor_y as usize);
+    if hand.amount >= BRUSH_LOAD
+        && let Some(at) = best_spot(w, player, t, Spot::Build)
+    {
+        return Some((VERB_RAISE, at, 0));
+    }
+    if hand.amount <= HAND_CAPACITY - BRUSH_LOAD
+        && let Some(at) = best_spot(w, player, t, Spot::Dig)
+    {
+        return Some((VERB_LOWER, at, 0));
+    }
+    // A hand too full to dig and nothing worth building: empty it where it
+    // costs nobody, or the opponent stands frozen with a full hand for the
+    // rest of the match (traced, at LEVEL_HARD, from 2:25 on).
+    if hand.amount > HAND_CAPACITY - BRUSH_LOAD
+        && let Some(at) = best_spot(w, player, t, Spot::Dump)
+    {
+        return Some((VERB_RAISE, at, 0));
+    }
+    None
 }
 
-/// The full length of one pass through the script, in ticks. Used by tests and
-/// by the docs to state how long a "turn" takes.
-#[must_use]
-pub fn script_ticks() -> u32 {
-    SCRIPT.iter().map(|l| l.hold + l.pause).sum()
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spot {
+    /// Where a poured raise saves the most own land from the next peak.
+    Build,
+    /// Where a dig costs the opponent's own score least.
+    Dig,
+    /// Where a hand of water or lava does the enemy most harm.
+    Spill,
+    /// Where a strike breaks the most enemy ground that would score.
+    Strike,
+    /// The same, for a vent: kept as far from a home core as a spill.
+    Vent,
+    /// Where a swamp takes the most enemy ground that would score: their
+    /// land at the height of the cell aimed at, since that is all a swamp
+    /// forms on (`powers::swamp`).
+    Mire,
+    /// A full hand with nothing worth saving: the deep shelf off its own
+    /// coast, which is new land one day and harms nobody now.
+    Dump,
+}
+
+/// Scan every brush centre on the planet (interior cells, so the poured brush
+/// never crosses a seam) and score it. Thorough players take the best; easy
+/// ones take the first good one from a start point that walks with their
+/// decision count, which reads as a player who notices *a* problem rather
+/// than the worst one.
+fn best_spot(w: &World, player: usize, t: &Tuning, kind: Spot) -> Option<(u8, u8, u8)> {
+    let building = matches!(kind, Spot::Build | Spot::Dump);
+    let line = if building && t.builds_for_last { last_waterline(w) } else { waterline(w) };
+    let threshold = match kind {
+        Spot::Build => 4,
+        Spot::Dig => 3,
+        Spot::Spill => 1,
+        Spot::Strike | Spot::Vent | Spot::Mire => 5,
+        Spot::Dump => 1,
+    };
+    let span = 6 * (N - 2) * (N - 2);
+    let start = if t.thorough { 0 } else { (usize::from(w.ai[player].decisions) * 7_919) % span };
+    let mut best: Option<(i32, usize)> = None;
+    for k in 0..span {
+        let i = (start + k) % span;
+        let face = i / ((N - 2) * (N - 2));
+        let rest = i % ((N - 2) * (N - 2));
+        let (x, y) = (1 + rest % (N - 2), 1 + rest / (N - 2));
+        let Some(score) = score_spot(w, player, t, kind, line, face, x, y) else { continue };
+        if score < threshold {
+            continue;
+        }
+        if !t.thorough {
+            return Some((face as u8, x as u8, y as u8));
+        }
+        if best.is_none_or(|(s, _)| score > s) {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| {
+        let face = i / ((N - 2) * (N - 2));
+        let rest = i % ((N - 2) * (N - 2));
+        (face as u8, (1 + rest % (N - 2)) as u8, (1 + rest / (N - 2)) as u8)
+    })
+}
+
+/// The 3x3 brush at `(face, x, y)`, scored for `kind`. `None` is a veto.
+#[expect(clippy::too_many_arguments, reason = "one scan's fixed inputs")]
+fn score_spot(
+    w: &World,
+    player: usize,
+    t: &Tuning,
+    kind: Spot,
+    line: i32,
+    face: usize,
+    x: usize,
+    y: usize,
+) -> Option<i32> {
+    let centre = idx(face, x, y);
+    if kind == Spot::Dig && w.material_under(centre) != HAND_EARTH {
+        return None; // an empty hand would come up with water or lava
+    }
+    let terrace = i32::from(TERRACE);
+    let sea = i32::from(w.sea_level);
+    let level = i32::from(w.height[centre]);
+    let mut score = 0i32;
+    for dy in 0..3usize {
+        for dx in 0..3usize {
+            let c = idx(face, x + dx - 1, y + dy - 1);
+            let h = i32::from(w.height[c]);
+            let owner = owner_of(w, c);
+            let mine = owner == Some(player);
+            let theirs = owner.is_some() && !mine;
+            let slot = w.settle_of[c];
+            let town = slot != NO_SETTLEMENT && w.settlements[slot as usize].alive();
+            let town_mine = town && w.settlements[slot as usize].owner as usize == player;
+            if w.lava[c] > 0 && kind != Spot::Spill {
+                return None;
+            }
+            match kind {
+                Spot::Build | Spot::Dump => {
+                    // Never on a footprint: a settlement is only as good as
+                    // the exact flatness under it.
+                    if town {
+                        return None;
+                    }
+                    let shore = !mine
+                        && owner.is_none()
+                        && (0..4).any(|d| owner_of(w, live_neighbour(c, d)) == Some(player));
+                    if !(mine || shore) || h >= line + terrace {
+                        continue;
+                    }
+                    if h >= line - 2 * terrace {
+                        score += 3; // one or two raises lift it clear
+                    } else if h > sea - 8 * terrace {
+                        score += 2; // the shelf off its own coast: new land
+                    } else if kind == Spot::Dump {
+                        score += 1;
+                    }
+                }
+                Spot::Dig => {
+                    // Never the enemy's home pedestal: sudden death is meant
+                    // to be "my land drowned" (docs/specs/pacing.md), and a
+                    // quake already leaves the core alone. Digging it out from
+                    // under an idle player by hand was the fastest win in the
+                    // sweep, and the least interesting one.
+                    if town_mine || near_home_core(face, x + dx - 1, y + dy - 1, CORE_DIG_CLEARANCE)
+                    {
+                        return None;
+                    }
+                    if town {
+                        if t.steals < 2 {
+                            return None;
+                        }
+                        score += 4;
+                        continue;
+                    }
+                    if mine {
+                        score -= if h >= line + terrace { 6 } else { 1 };
+                    } else if theirs {
+                        if t.steals == 0 {
+                            return None;
+                        }
+                        // A dig levels what it cuts (`World::deform`), so
+                        // taking the enemy's ground is only taking it when it
+                        // ends up under the next peak's water. Cut it down to a
+                        // flat patch still above the line and it is a building
+                        // site handed to them: traced on a pangaea seed, an
+                        // idle player whose coast the opponent kept digging
+                        // held 697 cells at the first peak against 265
+                        // without it.
+                        score += if h - terrace <= line {
+                            3
+                        } else if h >= line {
+                            -2
+                        } else {
+                            0
+                        };
+                    } else if w.passable(c) {
+                        // Nobody's land — unless it borders the enemy's, where
+                        // the levelled patch is theirs to found on next.
+                        let borders_enemy = (0..4).any(|d| {
+                            owner_of(w, live_neighbour(c, d)).is_some_and(|o| o != player)
+                        });
+                        score += if borders_enemy { -1 } else { 1 };
+                    } else if h < line - 4 * terrace {
+                        score += 2; // the shelf: earth nobody will miss
+                    }
+                }
+                Spot::Spill => {
+                    // Water on a home core is the core under water: sudden
+                    // death by one pour. Traced in a mirror match — both sides
+                    // dug the same spot in the same tick, the second hand came
+                    // up full of the sea the first had just let in, and it
+                    // went onto the other side's core.
+                    if town_mine
+                        || mine
+                        || near_home_core(face, x + dx - 1, y + dy - 1, SPILL_CLEARANCE)
+                    {
+                        return None;
+                    }
+                    if theirs {
+                        score += if town { 4 } else { 1 };
+                    }
+                }
+                Spot::Strike | Spot::Vent => {
+                    let clearance =
+                        if kind == Spot::Vent { SPILL_CLEARANCE } else { CORE_CLEARANCE };
+                    if mine || near_home_core(face, x, y, clearance) {
+                        return None;
+                    }
+                    if theirs && h > line && w.habitable(c) {
+                        score += 1;
+                    }
+                }
+                Spot::Mire => {
+                    // Never its own ground, never beside a home core: a swamp
+                    // is anyone's, and walkers going home walk into it.
+                    if mine || near_home_core(face, x, y, CORE_CLEARANCE) {
+                        return None;
+                    }
+                    if theirs && h == level && h > line && w.habitable(c) {
+                        score += if town { 2 } else { 1 };
+                    }
+                }
+            }
+        }
+    }
+    Some(score)
+}
+
+/// Within `r` cells of either spawn cell.
+fn near_home_core(face: usize, x: usize, y: usize, r: usize) -> bool {
+    crate::settlements::STARTS
+        .iter()
+        .any(|&(f, sx, sy)| f == face && x.abs_diff(sx) <= r && y.abs_diff(sy) <= r)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{MapConfig, TERRAIN_PANGAEA, VERB_COUNT, verb_power};
+    use crate::world::{MapConfig, TERRAIN_PANGAEA, VERB_CHAMPION, VERB_COUNT, verb_power};
 
     fn ai_world() -> alloc::boxed::Box<World> {
         let mut cfg = MapConfig::DEFAULT;
@@ -412,22 +822,36 @@ mod tests {
         w
     }
 
+    /// The commands `step` emits over `ticks` real ticks of a world.
+    fn emitted(w: &mut World, ticks: u32) -> std::vec::Vec<Command> {
+        let mut all = std::vec::Vec::new();
+        for _ in 0..ticks {
+            let mut buf = CommandBuf::new();
+            let saved = w.ai;
+            step(w, &mut buf);
+            w.ai = saved;
+            all.extend_from_slice(buf.as_slice());
+            w.tick(&[]);
+        }
+        all
+    }
+
     #[test]
     fn the_opponent_only_uses_verbs_the_player_also_has() {
         // The teaching claim is only true if this holds. A verb the AI can use
-        // and the player cannot would be a tutorial for something that is not in
-        // the game. The war table is held to the same rule: pillar 3 has no
-        // phase exemption.
-        for l in SCRIPT.iter().chain(WAR_SCRIPT) {
-            assert!(l.verb < VERB_COUNT, "unknown verb {} in the script", l.verb);
-            assert!(verb_power(l.verb).is_some(), "verb {} is not a player-facing power", l.verb);
+        // and the player cannot would be a tutorial for something that is not
+        // in the game.
+        let mut w = ai_world();
+        for c in emitted(&mut w, 3_000) {
+            assert!(c.verb < VERB_COUNT, "unknown verb {}", c.verb);
+            assert!(verb_power(c.verb).is_some(), "verb {} is not a player-facing power", c.verb);
         }
     }
 
     #[test]
     fn the_opponent_never_touches_the_world_directly() {
-        // `step` may only write to its own bookkeeping. Anything else would be a
-        // privileged mutation path, and pillar 3 would stop being enforceable.
+        // `step` may only write to its own bookkeeping. Anything else would be
+        // a privileged mutation path, and pillar 3 would stop being enforceable.
         let mut w = ai_world();
         let mut buf = CommandBuf::new();
         let before = w.state_hash();
@@ -436,9 +860,6 @@ mod tests {
             buf.clear();
             step(&mut w, &mut buf);
         }
-        // Its bookkeeping *is* hashed — it decides the commands it emits, and it
-        // runs on both peers — so put that back before comparing: what must be
-        // untouched is everything else.
         assert_ne!(w.ai, ai_before, "500 steps did not advance the opponent's own state");
         w.ai = ai_before;
         assert_eq!(
@@ -449,35 +870,25 @@ mod tests {
     }
 
     #[test]
-    fn it_actually_emits_commands() {
+    fn it_actually_emits_commands_and_holds_them_long_enough_to_watch() {
         let mut w = ai_world();
-        let mut emitted = 0usize;
-        let mut verbs = std::collections::BTreeSet::new();
-        for _ in 0..script_ticks() * 2 {
-            let mut buf = CommandBuf::new();
-            step(&mut w, &mut buf);
-            for c in buf.as_slice() {
-                emitted += 1;
-                verbs.insert(c.verb);
-                assert_eq!(c.player, w.cfg.ai_player);
+        let cmds = emitted(&mut w, 3_000);
+        let digs = cmds.iter().filter(|c| c.verb == VERB_LOWER).count();
+        let raises = cmds.iter().filter(|c| c.verb == VERB_RAISE).count();
+        assert!(digs > 20, "the opponent barely dug ({digs} commands)");
+        assert!(raises > 20, "the opponent barely built ({raises} commands)");
+        for c in &cmds {
+            assert_eq!(usize::from(c.player), usize::from(w.cfg.ai_player));
+        }
+        // Pauses exist at every level: a move is never followed by another
+        // the very next tick unless it is the same held verb.
+        for level in 0..LEVEL_COUNT {
+            for style in 0..STYLE_COUNT {
+                let t = tuning(level, style);
+                assert!(t.pause >= 8, "level {level} style {style} pauses {} ticks", t.pause);
+                assert!(t.hold >= 10, "level {level} style {style} holds {} ticks", t.hold);
             }
         }
-        assert!(emitted > 50, "the opponent barely acted ({emitted} commands)");
-        assert!(verbs.len() >= 4, "the opponent only demonstrated {} verbs", verbs.len());
-    }
-
-    #[test]
-    fn each_lesson_has_a_pause_long_enough_to_watch() {
-        for (i, l) in SCRIPT.iter().enumerate() {
-            assert!(
-                l.pause >= 20,
-                "lesson {i} pauses for {} ticks ({} s) — too fast to read",
-                l.pause,
-                l.pause / 30
-            );
-        }
-        let seconds = script_ticks() / 30;
-        assert!((10..=120).contains(&seconds), "a full turn takes {seconds} s");
     }
 
     #[test]
@@ -485,239 +896,311 @@ mod tests {
         let run = || {
             let mut w = ai_world();
             let mut acc = std::vec::Vec::new();
-            for _ in 0..1200 {
+            for _ in 0..1_200 {
                 let mut buf = CommandBuf::new();
                 step(&mut w, &mut buf);
                 acc.extend_from_slice(buf.as_slice());
+                w.tick(&[]);
             }
-            acc
+            (acc, w.state_hash())
         };
         assert_eq!(run(), run());
     }
 
     #[test]
-    fn a_full_tick_loop_with_the_opponent_enabled_stays_reproducible() {
-        // Long enough to cross the tutorial→war transition, so the war phase
-        // is covered by the same reproducibility guarantee.
-        let ticks = script_ticks() + 600;
+    fn a_mirror_match_runs_both_sides_and_stays_reproducible() {
         let run = || {
-            let mut w = ai_world();
-            for _ in 0..ticks {
+            let mut cfg = MapConfig::DEFAULT;
+            cfg.ai_enabled = 1;
+            cfg.ai_mirror = 1;
+            cfg.ai_level = [LEVEL_HARD, LEVEL_EASY];
+            cfg.ai_style = [STYLE_DISASTER, STYLE_TURTLE];
+            let mut w = World::boxed();
+            w.init(&cfg);
+            for _ in 0..4_000 {
+                w.tick(&[]);
+            }
+            (w.state_hash(), w.ai)
+        };
+        let (h, ai) = run();
+        assert_eq!(run().0, h);
+        assert!(ai[0].decisions > 0 && ai[1].decisions > 0, "a mirror match left a side idle");
+    }
+
+    #[test]
+    fn the_hash_without_an_opponent_ignores_its_configuration() {
+        // Level, style and mirror are configuration, not state: a world with
+        // the opponent off hashes the same whatever they say, which is what
+        // keeps every recorded fixture without an opponent valid.
+        let make = |level: u8| {
+            let mut cfg = MapConfig::DEFAULT;
+            cfg.ai_level = [level; PLAYERS];
+            let mut w = World::boxed();
+            w.init(&cfg);
+            for _ in 0..300 {
                 w.tick(&[]);
             }
             w.state_hash()
         };
-        assert_eq!(run(), run());
+        assert_eq!(make(LEVEL_EASY), make(LEVEL_HARD));
     }
 
     #[test]
-    fn the_anchor_follows_the_opponents_best_settlement() {
-        let mut w = ai_world();
-        let mut buf = CommandBuf::new();
-        step(&mut w, &mut buf);
-        assert_eq!(w.ai.anchor_face, w.settlements[1].face);
-        assert_eq!(w.ai.anchor_x, w.settlements[1].x);
+    fn the_opponent_never_reshapes_ground_under_its_own_towns() {
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.ai_enabled = 1;
+        cfg.ai_level = [LEVEL_HARD; PLAYERS];
+        cfg.seed = 0x9E37_D8A6;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        let mut checked = 0;
+        for _ in 0..4_000 {
+            let mut buf = CommandBuf::new();
+            let saved = w.ai;
+            step(&mut w, &mut buf);
+            w.ai = saved;
+            for c in buf.as_slice().iter().filter(|c| c.verb == VERB_RAISE || c.verb == VERB_LOWER)
+            {
+                let r = World::brush_radius(c.modifier);
+                for dy in -r..=r {
+                    for dx in -r..=r {
+                        let Some((f, x, y)) = crate::world::walk(
+                            c.face as usize,
+                            i32::from(c.x),
+                            i32::from(c.y),
+                            dx,
+                            dy,
+                        ) else {
+                            continue;
+                        };
+                        let slot = w.settle_of[idx(f, x, y)];
+                        assert!(
+                            slot == NO_SETTLEMENT
+                                || !w.settlements[slot as usize].alive()
+                                || w.settlements[slot as usize].owner != 1,
+                            "tick {}: verb {} at f{} {},{} lands on the opponent's own town",
+                            w.tick,
+                            c.verb,
+                            c.face,
+                            c.x,
+                            c.y
+                        );
+                    }
+                }
+                checked += 1;
+            }
+            w.tick(&[]);
+        }
+        assert!(checked > 20, "only {checked} sculpting moves were checked");
     }
 
-    /// Steps to drive `step` through one full curriculum pass and into the
-    /// wrap check: each lesson costs `hold + pause` ticks plus one advancing
-    /// call, plus one call to trigger the wrap itself.
-    fn one_pass_steps() -> u32 {
-        script_ticks() + SCRIPT.len() as u32 + 1
+    #[test]
+    fn an_easy_opponent_never_digs_the_enemys_land() {
+        for (level, may) in [(LEVEL_EASY, false), (LEVEL_NORMAL, true), (LEVEL_HARD, true)] {
+            let mut cfg = MapConfig::DEFAULT;
+            cfg.ai_enabled = 1;
+            cfg.ai_level = [level; PLAYERS];
+            cfg.terrain = TERRAIN_PANGAEA;
+            let mut w = World::boxed();
+            w.init(&cfg);
+            let mut stole = false;
+            for _ in 0..3_000 {
+                let mut buf = CommandBuf::new();
+                let saved = w.ai;
+                step(&mut w, &mut buf);
+                w.ai = saved;
+                for c in buf.as_slice().iter().filter(|c| c.verb == VERB_LOWER) {
+                    let cell = idx(c.face as usize, c.x as usize, c.y as usize);
+                    if owner_of(&w, cell) == Some(0) {
+                        stole = true;
+                    }
+                }
+                w.tick(&[]);
+            }
+            if !may {
+                assert!(!stole, "level {level} dug the enemy's land");
+            }
+        }
     }
 
     /// The sea's clock moved on to `waves` waves landed, nothing else touched.
     fn after_waves(w: &mut World, waves: u8) {
         w.tide.wave = waves;
         w.tide.scored = 0;
+        w.tide.phase = TIDE_RECOVERY;
+        w.tide.wave = waves.saturating_sub(1);
         assert_eq!(crate::tide::waves_landed(w), waves);
     }
 
-    #[test]
-    fn the_opponent_stays_in_school_until_the_first_wave_has_landed() {
-        let mut w = ai_world();
+    fn strikes(w: &mut World, mana: i32, ticks: u32) -> usize {
+        let mut n = 0;
         let mut buf = CommandBuf::new();
-        for _ in 0..one_pass_steps() * 4 {
+        for _ in 0..ticks {
+            w.mana[1] = mana << 16;
             buf.clear();
-            step(&mut w, &mut buf);
+            step(w, &mut buf);
+            n += buf
+                .as_slice()
+                .iter()
+                .filter(|c| matches!(c.verb, VERB_EARTHQUAKE | VERB_VOLCANO | VERB_SWAMP))
+                .count();
+            w.tick = w.tick.wrapping_add(1);
         }
-        assert_ne!(w.ai.phase, PHASE_WAR, "the opponent went to war before the sea had spoken");
-        assert!(!buf.as_slice().is_empty() || w.ai.repeat > 0, "the curriculum stopped repeating");
+        n
     }
 
     #[test]
-    fn the_strike_waits_for_the_second_wave() {
+    fn strikes_wait_for_their_wave_and_never_overdraw_the_reserve() {
         let mut w = ai_world();
+        w.cfg.ai_level = [LEVEL_EASY; PLAYERS];
         after_waves(&mut w, 1);
-        let mut buf = CommandBuf::new();
-        for _ in 0..one_pass_steps() {
-            buf.clear();
-            step(&mut w, &mut buf);
-        }
-        assert_eq!(w.ai.phase, PHASE_WAR);
-        let strikes = |w: &mut World| {
+        assert_eq!(
+            strikes(&mut w, 9_999, 2_000),
+            0,
+            "an easy opponent struck before the second wave"
+        );
+        after_waves(&mut w, 2);
+        assert_eq!(strikes(&mut w, 0, 2_000), 0, "a broke opponent still paid for a strike");
+        assert!(strikes(&mut w, 9_999, 2_000) > 0, "a rich opponent never strikes");
+    }
+
+    #[test]
+    fn a_normal_opponent_swamps_between_its_quakes_and_an_easy_one_never_does() {
+        let run = |level: u8| {
+            let mut w = ai_world();
+            w.cfg.ai_level = [level; PLAYERS];
+            after_waves(&mut w, 2);
+            let mut verbs = std::vec::Vec::new();
             let mut buf = CommandBuf::new();
-            let mut n = 0;
-            for _ in 0..2_000 {
+            for _ in 0..20_000 {
                 w.mana[1] = 9_999 << 16;
                 buf.clear();
-                step(w, &mut buf);
-                n += buf.as_slice().iter().filter(|c| c.verb == VERB_EARTHQUAKE).count();
+                step(&mut w, &mut buf);
+                verbs.extend(buf.as_slice().iter().map(|c| c.verb));
+                w.tick = w.tick.wrapping_add(1);
             }
-            n
+            verbs
         };
-        assert_eq!(strikes(&mut w), 0, "a rich opponent struck in the first recovery");
-        after_waves(&mut w, 2);
-        assert!(strikes(&mut w) > 0, "the opponent never strikes once the second wave has landed");
+        let normal = run(LEVEL_NORMAL);
+        assert!(normal.contains(&VERB_SWAMP), "a normal opponent never swamped");
+        assert!(normal.contains(&VERB_EARTHQUAKE), "a normal opponent only swamped");
+        assert!(!run(LEVEL_EASY).contains(&VERB_SWAMP), "an easy opponent swamped");
     }
 
     #[test]
-    fn after_one_curriculum_pass_the_opponent_goes_to_war() {
+    fn strikes_are_spaced() {
+        // After the first wave, not the second: on this map the fair-spawn
+        // pass sank the richer side's outer land below the last wave's line,
+        // so after the second wave there is nothing left worth striking.
         let mut w = ai_world();
         after_waves(&mut w, 1);
-        let mut buf = CommandBuf::new();
-        for _ in 0..one_pass_steps() {
-            buf.clear();
-            step(&mut w, &mut buf);
-        }
-        assert_eq!(w.ai.phase, PHASE_WAR, "the opponent is still stuck in the tutorial");
+        let t = tuning(LEVEL_NORMAL, STYLE_BALANCED);
+        let n = strikes(&mut w, 9_999, t.strike_gap * 3);
+        assert!((1..=4).contains(&n), "{n} strikes in three strike gaps");
     }
 
     #[test]
-    fn the_war_phase_marches_on_the_enemy() {
-        // Full tick loop: the magnet command has to travel the real path
-        // (pass 2b → apply_commands) to move the magnet. The enemy is player
-        // 0, whose settlements live around STARTS[0].
+    fn a_rush_opponent_marches_on_the_enemy() {
         let mut w = ai_world();
-        after_waves(&mut w, 1);
+        w.cfg.ai_style = [STYLE_RUSH; PLAYERS];
         let mut marched = false;
-        for _ in 0..script_ticks() + 1200 {
+        for _ in 0..3_000 {
             w.tick(&[]);
             if w.magnet[1].active == 0 {
                 continue;
             }
-            let on_enemy = w.settlements.iter().any(|s| {
+            marched |= w.settlements.iter().any(|s| {
                 s.alive()
                     && s.owner == 0
-                    && s.face == w.magnet[1].face
-                    && s.x == w.magnet[1].x
-                    && s.y == w.magnet[1].y
+                    && (s.face, s.x, s.y) == (w.magnet[1].face, w.magnet[1].x, w.magnet[1].y)
             });
-            if on_enemy {
-                marched = true;
+            if marched {
                 break;
             }
         }
-        assert!(marched, "the war phase never sent the army at the enemy");
+        assert!(marched, "a rush opponent never sent the army at the enemy");
     }
 
     #[test]
-    fn a_lesson_aimed_past_the_face_edge_crosses_the_seam_instead_of_clamping() {
-        let mut w = ai_world();
-        w.ai.anchor_face = 4;
-        w.ai.anchor_x = 2;
-        w.ai.anchor_y = 30;
-        let l = lesson(VERB_RAISE, 1, 0, -6, 2, 0);
-        let (face, x, y) = target(&w, 1, l).expect("an anchor on its face always has a target");
-        let walked = crate::world::walk(4, 2, 30, -6, 2).expect("the anchor is on the face");
-        assert_eq!((face as usize, x as usize, y as usize), walked);
-        assert_ne!(
-            face, 4,
-            "six cells west of x = 2 is on the neighbouring face, not clamped to x = 0"
-        );
-    }
-
-    #[test]
-    fn the_war_phase_never_overdraws_its_reserve() {
-        // Drive `step` directly with mana pinned at zero: past the tutorial,
-        // no strike may be emitted at all — the reserve gate holds.
-        let mut w = ai_world();
-        after_waves(&mut w, STRIKE_AFTER_WAVES);
-        let mut buf = CommandBuf::new();
-        for _ in 0..one_pass_steps() {
-            buf.clear();
-            step(&mut w, &mut buf);
-        }
-        assert_eq!(w.ai.phase, PHASE_WAR);
-        for _ in 0..2000 {
-            w.mana[1] = 0;
-            buf.clear();
-            step(&mut w, &mut buf);
-            for c in buf.as_slice() {
-                assert!(
-                    c.verb != VERB_VOLCANO && c.verb != VERB_EARTHQUAKE,
-                    "a broke opponent still paid for a strike"
-                );
-            }
-        }
-        // And with a full purse the strike does happen.
-        let mut struck = false;
-        for _ in 0..2000 {
-            w.mana[1] = 9_999 << 16;
-            buf.clear();
-            step(&mut w, &mut buf);
-            if buf.as_slice().iter().any(|c| c.verb == VERB_VOLCANO || c.verb == VERB_EARTHQUAKE) {
-                struck = true;
-                break;
-            }
-        }
-        assert!(struck, "a rich opponent never strikes");
-    }
-
-    #[test]
-    fn the_opponent_never_reshapes_ground_under_its_own_towns() {
-        // Every raise, dig and vent it emits at home lands clear of its own
-        // footprints, margin included — through both tables, on the shipped map.
+    fn a_rush_with_no_land_to_march_on_buys_no_champions() {
+        // The shipped archipelago: no land joins the spawns. After the first
+        // magnet shows there is no path, not one champion is bought.
         let mut cfg = MapConfig::DEFAULT;
         cfg.ai_enabled = 1;
-        cfg.seed = 0x9E37_D8A6;
+        cfg.ai_style = [STYLE_RUSH; PLAYERS];
         let mut w = World::boxed();
         w.init(&cfg);
-        let mut checked = 0;
-        for _ in 0..script_ticks() * 3 {
+        let mut champions = 0;
+        for _ in 0..6_000 {
+            w.mana[1] = 9_999 << 16;
             let mut buf = CommandBuf::new();
-            // What this tick's step emits, without advancing the script: the
-            // real tick below runs the same step again.
             let saved = w.ai;
             step(&mut w, &mut buf);
             w.ai = saved;
-            // Every ground-shaping move in both tables is aimed at home; the
-            // strike is an earthquake, which is not one of them.
-            for c in buf.as_slice().iter().filter(|c| reshapes_ground(c.verb)) {
-                let radius = World::brush_radius(c.modifier) + 1;
-                assert!(
-                    spares_own_towns(&w, 1, (c.face, c.x, c.y), radius),
-                    "tick {}: verb {} at f{} {},{} lands on the opponent's own town",
-                    w.tick,
-                    c.verb,
-                    c.face,
-                    c.x,
-                    c.y
-                );
-                checked += 1;
-            }
+            champions += buf.as_slice().iter().filter(|c| c.verb == VERB_CHAMPION).count();
             w.tick(&[]);
         }
-        assert!(checked > 20, "only {checked} moves at home were checked");
+        let (f, x, y) = crate::settlements::STARTS[1];
+        assert!(
+            w.dist[1][idx(f, x, y)] >= crate::flowfield::FALLBACK_BASE,
+            "this map was supposed to have no land path"
+        );
+        assert!(champions <= 1, "a stranded rush bought {champions} champions");
     }
 
     #[test]
     fn the_opponent_does_not_level_its_own_economy_in_the_opening() {
-        // Seed 0x9E37D8A6, shipped map, nobody at the other controls: the
-        // curriculum's first thrown raise used to raze four of the opponent's
-        // seven settlements and its anchor, and an idle player won by sudden
-        // death at tick 691.
+        // Seed 0x9E37D8A6, shipped map, nobody at the other controls: the old
+        // curriculum's first thrown raise razed four of the opponent's seven
+        // settlements, and an idle player won by sudden death at tick 691.
+        for level in 0..LEVEL_COUNT {
+            let mut cfg = MapConfig::DEFAULT;
+            cfg.ai_enabled = 1;
+            cfg.ai_level = [level; PLAYERS];
+            cfg.seed = 0x9E37_D8A6;
+            let mut w = World::boxed();
+            w.init(&cfg);
+            for _ in 0..1_500 {
+                w.tick(&[]);
+            }
+            assert_ne!(w.outcome, 1, "level {level} lost to an idle player in the opening");
+            let towns =
+                w.settlements.iter().filter(|s| s.alive() && s.owner == 1 && s.tier > 0).count();
+            assert!(towns >= 3, "level {level} has {towns} standing towns after its opening");
+        }
+    }
+
+    #[test]
+    fn the_opponent_lifts_its_land_above_the_coming_wave() {
+        // The whole point of the terraforming: more of its own land clears the
+        // next peak after a few minutes of play than at the start.
         let mut cfg = MapConfig::DEFAULT;
         cfg.ai_enabled = 1;
-        cfg.seed = 0x9E37_D8A6;
+        cfg.seed = 0x5EED;
         let mut w = World::boxed();
         w.init(&cfg);
-        for _ in 0..1_500 {
+        for _ in 0..30 {
             w.tick(&[]);
         }
-        assert_ne!(w.outcome, 1, "the opponent lost to an idle player by levelling its own towns");
-        let towns =
-            w.settlements.iter().filter(|s| s.alive() && s.owner == 1 && s.tier > 0).count();
-        assert!(towns >= 3, "the opponent has {towns} standing towns after its opening");
+        let line = waterline(&w);
+        let before = held_above(&w, line)[1];
+        for _ in 0..2_400 {
+            w.tick(&[]);
+        }
+        let after = held_above(&w, line)[1];
+        assert!(after > before, "the opponent held {before} cells above the line, then {after}");
+    }
+
+    #[test]
+    fn every_tuning_is_well_formed() {
+        for level in 0..=LEVEL_COUNT {
+            for style in 0..=STYLE_COUNT {
+                let t = tuning(level, style);
+                assert!(t.think > 0 && t.hold > 1 && t.strike_gap > 0 && t.reserve >= 0);
+            }
+        }
+        // Better levels think faster.
+        assert!(tuning(LEVEL_HARD, 0).think < tuning(LEVEL_NORMAL, 0).think);
+        assert!(tuning(LEVEL_NORMAL, 0).think < tuning(LEVEL_EASY, 0).think);
     }
 }

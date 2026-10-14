@@ -21,7 +21,13 @@ Split from `docs/HANDOFF.md` §5 and §8 (Phase 0). Implemented by
   repair tool for volcano damage, and the only build tool at all on maps where
   raise/lower is disabled. It is the one verb that moves earth without
   conserving it; the mana cost is what pays for that.
-- **Swamp** — created on flat ground; swallows walkers that enter.
+- **Swamp** — created on flat ground; swallows walkers that enter. Flat means
+  the height of the cell aimed at: only that plateau inside the brush turns,
+  never a home platform. It is passable, so armies march into it, and every
+  walker that does sinks — either side's, a champion's too. By default the
+  cell that took one is ground again; `bottomless = true` keeps it. Raising or
+  lowering a swamp cell buries or digs it out. Until then nobody builds on it
+  and it scores for nobody.
 - **Volcano** — opens a lava vent. Its real function is generative. Do not
   balance it as damage.
 - **Flood** — raises global sea level one terrace. **Damages both players**, and
@@ -82,7 +88,8 @@ enabled = true
 cost = 120
 
 [powers.swamp]
-enabled = false              # deliberately withheld, as in later Populous worlds
+enabled = true               # withheld until PLAN.md step 26; see depth.md
+bottomless = false           # true: a swamp cell takes every walker, not one
 
 [powers.raise_lower]
 enabled = true               # false makes earthquake the only build tool
@@ -129,7 +136,7 @@ communicated diegetically:
 | left click | place papal magnet |
 | right drag | orbit the planet |
 | right click (no drag), or `Space` | open the radial power menu |
-| menu slice | magnet · earthquake · (swamp) · volcano · flood · champion · armageddon |
+| menu slice | magnet · earthquake · swamp · volcano · flood · champion · armageddon |
 | shift | thrown |
 | `B` | cycle the brush: normal → increased → extreme |
 | `F` over water / lava | the empty hand takes what is under it: water or lava instead of earth |

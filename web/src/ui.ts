@@ -32,6 +32,25 @@ export interface VolumeControl {
 }
 
 /**
+ * The opponent's strength, chosen on the title card. Same arrangement as
+ * `VolumeControl`: the card renders the buttons and reports the choice, and
+ * `main.ts` owns remembering it and handing it to the simulation.
+ */
+export interface LevelControl {
+  /** 0 easy, 1 normal, 2 hard — `dio_set_ai`'s levels. */
+  get(): number;
+  set(level: number): void;
+}
+
+/** What each level is called on the card and on the end card. */
+export const LEVEL_NAMES = ["Leicht", "Normal", "Schwer"] as const;
+
+/** The level's name, clamped so a stray value still reads as something. */
+export function levelName(level: number): string {
+  return LEVEL_NAMES[Math.min(Math.max(Math.round(level), 0), LEVEL_NAMES.length - 1)] ?? "Normal";
+}
+
+/**
  * The title card, once it is on screen.
  *
  * Two-step because the card is up long before the match can start: the click
@@ -47,12 +66,16 @@ export interface TitleCard {
 
 export interface Ui {
   /** Adopt the card already in the document and fill in what comes from code. */
-  showTitle(volume: VolumeControl): TitleCard;
-  /** Show the end card: outcome, why it ended, per-wave score rows, restart buttons. */
+  showTitle(volume: VolumeControl, opponent: LevelControl): TitleCard;
+  /**
+   * Show the end card: outcome, why it ended, per-wave score rows, the
+   * opponent's level, restart buttons.
+   */
   showGameOver(
     outcome: number,
     waves: { mine: number; theirs: number }[],
     cause: EndCause,
+    level: number,
     onRestart: (newSeed: boolean) => void,
   ): void;
   hide(): void;
@@ -88,7 +111,7 @@ export function createUi(): Ui {
   };
 
   return {
-    showTitle(volume: VolumeControl): TitleCard {
+    showTitle(volume: VolumeControl, opponent: LevelControl): TitleCard {
       const el = document.querySelector<HTMLDivElement>("#title");
       if (!el) throw new Error("page is missing its title card");
       overlay = el;
@@ -125,6 +148,33 @@ export function createUi(): Ui {
         });
       }
 
+      // The opponent's level. The whole row stops the card's start gesture, not
+      // just the buttons: a click that misses a button by a few pixels is
+      // still somebody choosing a level, and starting the match on it would
+      // take the choice away mid-thought.
+      const levelRow = el.querySelector<HTMLElement>("#title-level");
+      if (levelRow) {
+        for (const kind of ["pointerdown", "pointerup", "click"] as const) {
+          levelRow.addEventListener(kind, (ev) => ev.stopPropagation());
+        }
+        const buttons = [...levelRow.querySelectorAll<HTMLButtonElement>("button[data-level]")];
+        const mark = (): void => {
+          const chosen = opponent.get();
+          for (const b of buttons) {
+            const on = Number(b.dataset.level) === chosen;
+            b.classList.toggle("chosen", on);
+            b.setAttribute("aria-pressed", on ? "true" : "false");
+          }
+        };
+        for (const b of buttons) {
+          b.addEventListener("click", () => {
+            opponent.set(Number(b.dataset.level));
+            mark();
+          });
+        }
+        mark();
+      }
+
       // A click before the world is standing is not queued and replayed later:
       // it does nothing, and the card still says "Lädt …" so the player can see
       // why. Spending the activation gesture on a game that cannot start yet
@@ -153,6 +203,7 @@ export function createUi(): Ui {
       outcome: number,
       waves: { mine: number; theirs: number }[],
       cause: EndCause,
+      level: number,
       onRestart: (newSeed: boolean) => void,
     ): void {
       const el = make();
@@ -167,23 +218,36 @@ export function createUi(): Ui {
       // Only waves that were actually scored; a match decided by sudden death
       // before the first wave peak has nothing to tabulate, and seven rows of
       // "0 · 0" would say less than one honest sentence.
-      const scored = waves.filter((w) => w.mine > 0 || w.theirs > 0);
+      //
+      // Numbered by the wave's own index, taken *before* filtering: armageddon
+      // skips straight to the last wave, and numbering the survivors 1, 2, …
+      // after the filter called the third wave "Welle 2".
+      const scored = waves
+        .map((w, wave) => ({ ...w, wave }))
+        .filter((w) => w.mine > 0 || w.theirs > 0);
       const rows = scored
-        .map((w, i) => {
-          const winner = w.mine > w.theirs ? "◂" : w.theirs > w.mine ? "▸" : "·";
-          return `<tr><td>Welle ${i + 1}</td><td>${w.mine} ${winner} ${w.theirs}</td></tr>`;
+        .map((w) => {
+          const [mark, verdict] =
+            w.mine > w.theirs
+              ? ["won", "gewonnen"]
+              : w.theirs > w.mine
+                ? ["lost", "verloren"]
+                : ["draw", "unentschieden"];
+          // Numbers and fixed literals only: nothing a player typed reaches this.
+          return `<tr class="${mark}"><td>Welle ${w.wave + 1}</td><td>${w.mine} : ${w.theirs}</td><td>${verdict}</td></tr>`;
         })
         .join("");
       const summary =
         scored.length > 0
-          ? `<p class="premise">Gehaltenes Land am Höhepunkt jeder Welle — du ◂ · ▸ Gegner</p>
-             <table>${rows}</table>`
+          ? `<p class="premise">Gehaltenes Land am Höhepunkt jeder Welle — du : Gegner</p>
+             <table class="waves">${rows}</table>`
           : `<p class="premise">Kein Wellenhöhepunkt wurde erreicht — nichts zu zählen.</p>`;
       el.innerHTML = `
         <div>
           <h1>${headline}</h1>
           <p class="premise">${causeLine}</p>
           ${summary}
+          <p class="premise opponent">Gegner: ${levelName(level)}</p>
           <p>
             <button data-restart="same">Nochmal spielen</button>
             <button data-restart="new">Neue Welt</button>

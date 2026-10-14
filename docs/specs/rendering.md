@@ -583,8 +583,8 @@ whose other caller passes CSS pixels, counting DPR twice.
 **7 at tier 2, measured** (terrain, water, cloud shell, atmosphere shell,
 starfield, settlements, walkers; vegetation makes 8 once anything has grown),
 against a `[START]` ceiling of 150. Plus three post passes. With the tier-2
-models (see *Models* below) the flora is eight meshes and the buildings four, so
-a grown planet draws **19**.
+models (see *Models* below) the flora is eight meshes and the buildings five, so
+a grown planet draws **20**.
 
 It was ~197 before, which is what the ceiling exists to catch. The fix is not
 culling — on an archipelago map every 16×16 chunk touches ocean, so per-chunk
@@ -608,19 +608,25 @@ Everything that stands on the planet is built in `renderer/models.ts` from
 three's primitives and `mergeGeometries`; nothing is downloaded (§7.5). Two
 tiers, chosen once at start-up like the effects (§7.3):
 
-- **Tier 1** is the set the game shipped with — a cone is a conifer, a box is a
-  house, the population is the 204-triangle `villager-low.glb` — because the
-  §7.6 floor is integrated graphics and a forest is up to 8,700 instances. They
-  are unchanged, byte for byte where a file is involved.
+- **Tier 1** is the set the game shipped with — a cone is a conifer, a block is
+  a house, the population is boxes (`villager-low.glb`) — because the §7.6
+  floor is integrated graphics and a forest is up to 8,700 instances. Two
+  additions since: every building block wears a pyramid roof in its owner's
+  colour (16 Δ, the citadel's two blocks 28, the wall a 12-Δ slab), and the
+  figure has a larger head, a cap of hair and its colours (216 Δ).
 - **Tier 2** is the same silhouettes with their parts: conifers with a trunk and
   stacked tiers (~40 Δ), broadleaves with a root flare, branches and a lobed
   crown (~170 Δ), palms whose trunk curves and carries fronds and coconuts
-  (~100 Δ), scrub in lumps (40 Δ); a hut under thatch, a house with a pitched
-  roof, door and chimney, an eight-sided keep with merlons, and a wall around a
-  citadel; a crystal for pickups, an obelisk for the magnet; and a 464-triangle
-  villager with a jaw, shoulders, a belt and boots from the same generator
-  (`scripts/build-figure.mjs`, which writes both files). Fingers with knuckles
-  and nails on the hand at either tier — it is two meshes.
+  (~100 Δ), scrub in lumps (40 Δ); a round hut under thatch with a pennant
+  (60 Δ), a timber-framed house with a gable roof, chimney, ridge board and
+  banner (144 Δ), a square keep with battlements, a team roof and a flag
+  (160 Δ), a citadel — keep, four corner towers, curtain walls, flags — for the
+  tier-4 centre (264 Δ), and a crenellated wall segment around it (36 Δ); a
+  crystal for pickups (16 Δ), an obelisk with banners for the magnet (172 Δ);
+  and a slightly chibi 476-triangle villager with a jaw, hair, shoulders, a
+  tabard, a belt and boots from the same generator (`scripts/build-figure.mjs`,
+  which writes both files). Rounded fingers with knuckles and nails on the hand
+  at either tier — it is two meshes.
 
 Each model carries its triangle budget in its comment. A fully grown planet at
 every cap is around **0.6 M triangles at tier 2**, which integrated graphics
@@ -635,15 +641,34 @@ attribute, where three's generic value is zero. With it, `vColor` is the
 part's colour times the instance tint: brown trunks, terracotta roofs and the
 species' green in one draw call.
 
+**The side's colour is a mask.** For buildings, the magnet and the figure the
+instance tint is the owner's colour, and stock three multiplies it into every
+vertex — the thatch, the door and the villager's face all came out pastel
+amber or sky. Those models carry a second attribute, `team` (0..1, `teamPart`
+in `models.ts`; `_TEAM` in the figure's GLB), and the settlement and walker
+materials replace three's `color_vertex` chunk with `TEAM_MASK_GLSL`
+(`palette.ts`): the owner's colour at full strength where the mask is 1 — a
+pennant, a banner, a flag, a roof cap, a tabard — and a 15 % wash elsewhere.
+Every model carries the side twice, once on something that flies for the
+oblique view and once on something that faces the sky for the view straight
+down. Rank is drawn on top of the side, never instead of it: a champion keeps
+its tabard and gains an ember rim and glow, a leader a warm rim (`rank`, a
+per-instance attribute next to the walk phase). Pickup crystals take the
+colour of the power they grant (`PICKUP_POWER`). All the per-player colours
+live in `renderer/palette.ts`.
+
 **Variants.** A forest of one model is a forest of clones however it is
 jittered. Each species has two geometries, one instanced mesh each, chosen per
 cell by hash so a stand is a mix and a reload grows the same mix. Buildings are
-four meshes (hut, house, tower, wall) chosen by the settlement's tier and the
-block's place in the cluster. Draw calls at tier 2: 7 as before, plus 8 flora
-and 4 building meshes — 19, against the ceiling of 150.
+five meshes (hut, house, keep, wall, citadel) chosen by the settlement's tier
+and the block's place in the cluster: the centre is a hut, a house at tier 2, a
+keep at tier 3 and the citadel at tier 4, ringed by huts and, from tier 3, by
+houses. Draw calls at tier 2: 7 as before, plus 8 flora and 5 building meshes —
+20, against the ceiling of 150.
 
-`web/tools/gallery/` lays every model of both tiers out under the game's light,
-for looking at a change without growing a forest first.
+`web/tools/gallery/` lays every model of both tiers out under the game's light
+and team mask, one row per side, for looking at a change without growing a
+forest first.
 
 ## Audio
 

@@ -265,6 +265,8 @@ pub struct Census {
     pub verb_events: [VerbEvent; VERB_EVENTS],
     /// Total events ever written. The ring index is this modulo its length.
     pub verb_events_written: u32,
+    /// Walkers a swamp swallowed, by their owner.
+    pub swamp_victims: [u32; PLAYERS],
 }
 
 /// Capacity of the verb-event ring. At most one command per verb per player per
@@ -307,6 +309,7 @@ impl Census {
         verb_applied: [0; VERB_COUNT as usize],
         verb_events: [VerbEvent::ZEROED; VERB_EVENTS],
         verb_events_written: 0,
+        swamp_victims: [0; PLAYERS],
     };
 }
 
@@ -553,11 +556,11 @@ pub struct MapConfig {
     ///
     /// Separate from `recovery_ticks` because the two windows do different
     /// jobs. The recovery between waves is playing time — rebuild, replant,
-    /// reclaim — and at a fifteen-minute cadence it is fourteen minutes long.
+    /// reclaim — and at a five-minute cadence it is four minutes ten long.
     /// The opening and closing windows are not: nothing has happened yet at the
     /// start, and after the last wave recedes the match is only waiting for
     /// `decide_match` to fire. Running those on `recovery_ticks` would put
-    /// fourteen minutes of nothing at each end of a match.
+    /// four minutes of nothing at each end of a match.
     pub lull_ticks: u32,
     /// Percent per wave, integer (§5.4).
     pub escalation: u16,
@@ -568,6 +571,17 @@ pub struct MapConfig {
     /// Scripted opponent (this run only; not part of the shipped ruleset).
     pub ai_enabled: u8,
     pub ai_player: u8,
+    /// How well each side's opponent plays: `ai::LEVEL_EASY`, `LEVEL_NORMAL`
+    /// or `LEVEL_HARD`. Indexed by player, so a mirror match can pit two
+    /// levels against each other.
+    pub ai_level: [u8; PLAYERS],
+    /// How each side's opponent prefers to win: `ai::STYLE_BALANCED`,
+    /// `STYLE_TURTLE`, `STYLE_RUSH` or `STYLE_DISASTER`.
+    pub ai_style: [u8; PLAYERS],
+    /// Both sides scripted: the opponent plays itself. Measurement only
+    /// (`diomano-cli sweep --profile mirror`) — it is how "a better player
+    /// beats a worse one" becomes a number instead of a hope.
+    pub ai_mirror: u8,
     /// Carve the contact corridor between the two spawns.
     ///
     /// **Off in real matches, by user decision.** A ridge running half the
@@ -582,6 +596,10 @@ pub struct MapConfig {
     /// meet resolve none. A corpus log states `land_bridge 1` for itself, the
     /// same way it states its own tide.
     pub land_bridge: u8,
+    /// A swamp swallows every walker that enters it (§5.2's "bottomless"),
+    /// instead of the default: a swamp cell takes one walker and is ground
+    /// again. Either way raising or lowering over it buries or digs it out.
+    pub swamp_bottomless: u8,
     /// Keep simulating after the outcome is decided. Off for real matches —
     /// an ended world freezes — but the §6.3 corpus needs 20,000 ticks of
     /// activity from matches whose outcome lands around tick 10,000.
@@ -600,11 +618,15 @@ impl MapConfig {
         n: N as u16,
         seed: 0x5EED,
         terrain: TERRAIN_ARCHIPELAGO,
-        // A wave every fifteen minutes, three of them (user decision). The
-        // cadence is `telegraph + impact + recovery` = 27,000 ticks at 30 Hz,
-        // exactly 15:00, so the waves land at 1:30, 16:30 and 31:30 and a match
-        // is about 34 minutes. §5.5's `[START]` was seven waves 45 seconds
-        // apart, which put a whole match inside six minutes.
+        // A wave every five minutes, three of them (user decision, 2026-10-13,
+        // superseding the fifteen-minute cadence). The cadence is
+        // `telegraph + impact + recovery` = 9,000 ticks at 30 Hz, exactly 5:00,
+        // so the waves peak at 2:10, 7:10 and 12:10 and a match is about
+        // fourteen minutes — §5.5's "roughly 15 minutes". At fifteen minutes
+        // apart a match ran 34 minutes, two thirds of it a recovery in which a
+        // sweep could not find a single event for a quarter of an hour. §5.5's
+        // `[START]` was seven waves 45 seconds apart, which put a whole match
+        // inside six minutes.
         //
         // Escalation rises with the cadence: over three waves rather than seven
         // it has to reach a comparable finale in a third of the steps, and 150%
@@ -612,11 +634,11 @@ impl MapConfig {
         waves: 3,
         telegraph_ticks: 900,
         impact_ticks: 600,
-        recovery_ticks: 25_500,
+        recovery_ticks: 7_500,
         lull_ticks: 2_700,
         escalation: 150,
         wave_strength: 48,
-        power_enabled: [1, 1, 1, 0, 1, 1, 1, 1],
+        power_enabled: [1; POWER_COUNT],
         // Armageddon at 2,500 is roughly a minute of late-game accrual — see
         // `armageddon_is_earnable_in_a_match` — so the stalemate breaker is
         // reachable exactly when a stalemate exists and not before. At the
@@ -626,7 +648,11 @@ impl MapConfig {
         power_cost: [0, 20, 120, 200, 260, 600, 700, 2500],
         ai_enabled: 0,
         ai_player: 1,
+        ai_level: [1; PLAYERS],
+        ai_style: [0; PLAYERS],
+        ai_mirror: 0,
         land_bridge: 0,
+        swamp_bottomless: 0,
         endless: 0,
     };
 }
@@ -656,19 +682,34 @@ pub struct TideState {
     pub offset: i16,
 }
 
-/// Scripted-opponent bookkeeping. See `ai.rs`.
+/// Scripted-opponent bookkeeping for one side. See `ai.rs`.
+///
+/// All zero until the opponent first thinks, and the first four fields are
+/// hashed in the same fourteen bytes the old curriculum's state used, so a
+/// world with the opponent switched off hashes exactly as it always did.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AiState {
-    pub script_pc: u16,
-    /// Completed passes through the current script.
-    pub repeat: u16,
+    /// Decisions taken so far.
+    pub decisions: u16,
+    /// Strikes paid for so far.
+    pub strikes: u16,
+    /// Ticks left in the current move (hold or pause), or until the next
+    /// decision while idle.
     pub timer: u32,
-    pub anchor_face: u8,
-    pub anchor_x: u8,
-    pub anchor_y: u8,
-    /// 0 = tutorial curriculum, 1 = war. See `ai::PHASE_WAR`.
-    pub phase: u8,
+    /// Where the current move aims.
+    pub face: u8,
+    pub x: u8,
+    pub y: u8,
+    /// The verb being held, or `VERB_NOP` between moves.
+    pub verb: u8,
+    /// The current move's modifier.
+    pub modifier: u8,
+    /// 1 while the current move is held, 0 while it pauses afterwards.
+    pub holding: u8,
+    pub _pad: u16,
+    /// Tick of the last strike, for the spacing between them.
+    pub last_strike: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +777,7 @@ pub struct World {
     // --- scalars ---
     pub cfg: MapConfig,
     pub tide: TideState,
-    pub ai: AiState,
+    pub ai: [AiState; PLAYERS],
     pub magnet: [Magnet; PLAYERS],
     pub hand: [Hand; PLAYERS],
     /// Q16.16.
@@ -828,15 +869,19 @@ impl World {
                 strength: 0,
                 offset: 0,
             },
-            ai: AiState {
-                script_pc: 0,
-                repeat: 0,
+            ai: [AiState {
+                decisions: 0,
+                strikes: 0,
                 timer: 0,
-                anchor_face: 0,
-                anchor_x: 0,
-                anchor_y: 0,
-                phase: 0,
-            },
+                face: 0,
+                x: 0,
+                y: 0,
+                verb: 0,
+                modifier: 0,
+                holding: 0,
+                _pad: 0,
+                last_strike: 0,
+            }; PLAYERS],
             magnet: [Magnet { face: 0, x: 0, y: 0, active: 0, leader: u16::MAX, _pad: 0 }; PLAYERS],
             hand: [Hand { material: HAND_EARTH, _pad: 0, amount: 0 }; PLAYERS],
             mana: [0; PLAYERS],
@@ -1165,6 +1210,22 @@ impl World {
     /// cannot build**, which is the anti-griefing rule stated as a mechanic
     /// rather than as a cost.
     ///
+    /// **Raise fills the lowest ground first; lower cuts the highest.** A raise
+    /// lifts every brush cell below the next terrace line above the brush's
+    /// *lowest* cell up to that line (at most a terrace each), and leaves the
+    /// rest alone; a lower cuts every cell above the terrace line below the
+    /// brush's *highest* cell down to it. Held, a raise therefore fills the
+    /// hollows of the brush until every cell sits on one terrace line, and from
+    /// then on lifts the whole patch together: it levels. That is what makes
+    /// "flatten land, the people build" (HANDOFF §4.6) a thing a player can
+    /// do on purpose.
+    ///
+    /// It used to move every cell a whole terrace from wherever it was, which
+    /// preserves every difference it starts with: on the 44 uneven dry sites
+    /// around the spawns of 4 seeds x 3 terrains, holding a raise founded a
+    /// settlement in 45 s on none of them (`docs/specs/depth.md`). On ground
+    /// that is already level the two rules are the same.
+    ///
     /// Returns the number of height units actually moved.
     pub fn deform(
         &mut self,
@@ -1178,21 +1239,50 @@ impl World {
         if self.hand[player].material != HAND_EARTH {
             return 0;
         }
+        let in_brush = |dx: i32, dy: i32| dx * dx + dy * dy <= radius * radius + radius;
+
+        // The terrace line this stroke works towards, from the brush's lowest
+        // cell for a raise and its highest for a lower.
+        let mut extreme: Option<i16> = None;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if !in_brush(dx, dy) {
+                    continue;
+                }
+                let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
+                let h = self.height[idx(f, x, y)];
+                extreme = Some(match extreme {
+                    None => h,
+                    Some(e) if raise => e.min(h),
+                    Some(e) => e.max(h),
+                });
+            }
+        }
+        let Some(extreme) = extreme else { return 0 };
+        let line = if raise {
+            i32::from(extreme) + terrace_step_up(extreme)
+        } else {
+            i32::from(extreme) - terrace_step_down(extreme)
+        };
+
         let mut moved = 0i32;
         // Fixed traversal order (row-major within the brush) so the order in
         // which the hand fills or empties is not a function of anything else.
         for dy in -radius..=radius {
             for dx in -radius..=radius {
-                if dx * dx + dy * dy > radius * radius + radius {
+                if !in_brush(dx, dy) {
                     continue;
                 }
                 let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
                 let c = idx(f, x, y);
                 let was_sea = self.is_seabed(c);
+                let h = i32::from(self.height[c]);
                 if raise {
-                    let room = i32::from(HEIGHT_MAX) - i32::from(self.height[c]);
-                    let take =
-                        i32::from(TERRACE).min(room).min(i32::from(self.hand[player].amount));
+                    let room = i32::from(HEIGHT_MAX) - h;
+                    let take = (line - h)
+                        .min(i32::from(TERRACE))
+                        .min(room)
+                        .min(i32::from(self.hand[player].amount));
                     if take <= 0 {
                         continue;
                     }
@@ -1201,14 +1291,19 @@ impl World {
                     moved += take;
                 } else {
                     let room = i32::from(HAND_CAPACITY) - i32::from(self.hand[player].amount);
-                    let avail = i32::from(self.height[c]) - i32::from(HEIGHT_MIN);
-                    let take = i32::from(TERRACE).min(room).min(avail);
+                    let avail = h - i32::from(HEIGHT_MIN);
+                    let take = (h - line).min(i32::from(TERRACE)).min(room).min(avail);
                     if take <= 0 {
                         continue;
                     }
                     self.height[c] = self.height[c].saturating_sub(take as i16);
                     self.hand[player].amount += take as u16;
                     moved += take;
+                }
+                // Buried by a raise or dug out by a lower (§5.2): the only way
+                // to be rid of a swamp, and the victim's answer to one.
+                if self.material[c] == MAT_SWAMP {
+                    self.material[c] = MAT_SOIL;
                 }
                 self.refresh_cell_water(c, was_sea);
             }
@@ -1253,12 +1348,16 @@ impl World {
     // Queries
     // -----------------------------------------------------------------------
 
-    /// Above the waterline, not molten, not swamp: somewhere a walker can stand.
+    /// Above the waterline, not molten: somewhere a walker can stand.
+    ///
+    /// Swamp is passable on purpose. It used to be a wall the flow field
+    /// routed around, so the walkers §5.2 says it swallows never entered it;
+    /// now armies march into it and it takes them (`walkers::step_walker`).
+    /// What it still denies is building and scoring (`habitable`).
     #[inline]
     #[must_use]
     pub fn passable(&self, c: usize) -> bool {
         self.lava[c] == 0
-            && self.material[c] != MAT_SWAMP
             && i32::from(self.height[c]) > i32::from(self.sea_level)
             && i32::from(self.water[c]) < i32::from(TERRACE)
     }
@@ -1412,13 +1511,40 @@ impl World {
         // The scripted opponent's bookkeeping decides which commands it emits,
         // and it runs on both peers, so it is as much lockstep state as the
         // walkers it commands.
-        h.write_u16(self.ai.script_pc);
-        h.write_u16(self.ai.repeat);
-        h.write_u32(self.ai.timer);
-        h.write_u8(self.ai.anchor_face);
-        h.write_u8(self.ai.anchor_x);
-        h.write_u8(self.ai.anchor_y);
-        h.write_u8(self.ai.phase);
+        //
+        // The scripted side's first fourteen bytes go in unconditionally, in
+        // the layout the old curriculum hashed, so a world without an opponent
+        // (all zero) keeps every hash it ever had. The rest only once one is
+        // switched on, and the other side's only in a mirror match.
+        let primary = (self.cfg.ai_player as usize) % PLAYERS;
+        let a = &self.ai[primary];
+        h.write_u16(a.decisions);
+        h.write_u16(a.strikes);
+        h.write_u32(a.timer);
+        h.write_u8(a.face);
+        h.write_u8(a.x);
+        h.write_u8(a.y);
+        h.write_u8(a.verb);
+        if self.cfg.ai_enabled != 0 {
+            for p in 0..PLAYERS {
+                if p != primary && self.cfg.ai_mirror == 0 {
+                    continue;
+                }
+                let a = &self.ai[p];
+                if p != primary {
+                    h.write_u16(a.decisions);
+                    h.write_u16(a.strikes);
+                    h.write_u32(a.timer);
+                    h.write_u8(a.face);
+                    h.write_u8(a.x);
+                    h.write_u8(a.y);
+                    h.write_u8(a.verb);
+                }
+                h.write_u8(a.modifier);
+                h.write_u8(a.holding);
+                h.write_u32(a.last_strike);
+            }
+        }
         // A countdown that diverged outside the hash would be invisible until
         // it landed as an outcome — the desync class determinism.md rules out.
         for &d in &self.doom {
@@ -1828,9 +1954,61 @@ const fn widen(h: i32) -> i32 {
     smooth((h - 16384) * 2)
 }
 
+/// Height units from `h` up to the next terrace line: a whole terrace from a
+/// line, the remainder from between two.
+#[must_use]
+pub const fn terrace_step_up(h: i16) -> i32 {
+    let t = TERRACE as i32;
+    t - (h as i32).rem_euclid(t)
+}
+
+/// Height units from `h` down to the previous terrace line: a whole terrace
+/// from a line, the remainder from between two.
+#[must_use]
+pub const fn terrace_step_down(h: i16) -> i32 {
+    let t = TERRACE as i32;
+    let r = (h as i32).rem_euclid(t);
+    if r == 0 { t } else { r }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_swamp_is_walked_into_but_neither_built_on_nor_scored() {
+        let mut w = World::boxed();
+        w.init(&MapConfig::DEFAULT);
+        let c = idx(4, 20, 20);
+        w.height[c] = 400;
+        w.water[c] = 0;
+        w.lava[c] = 0;
+        w.material[c] = MAT_SWAMP;
+        assert!(w.passable(c), "the flow field would route armies around the swamp");
+        assert!(!w.habitable(c), "a swamp scores");
+    }
+
+    #[test]
+    fn raising_or_lowering_over_a_swamp_does_away_with_it() {
+        for raise in [true, false] {
+            let mut w = World::boxed();
+            w.init(&MapConfig::DEFAULT);
+            for y in 16..25 {
+                for x in 16..25 {
+                    let c = idx(4, x, y);
+                    w.height[c] = 400;
+                    w.water[c] = 0;
+                    w.lava[c] = 0;
+                    w.material[c] = MAT_SWAMP;
+                }
+            }
+            w.hand[0] =
+                Hand { material: HAND_EARTH, _pad: 0, amount: if raise { 2_000 } else { 0 } };
+            assert!(w.deform(0, 4, 20, 20, 1, raise) > 0, "the stroke moved nothing");
+            assert_eq!(w.material[idx(4, 20, 20)], MAT_SOIL, "raise {raise}: the swamp survived");
+            assert_eq!(w.material[idx(4, 23, 20)], MAT_SWAMP, "raise {raise}: outside the brush");
+        }
+    }
 
     #[test]
     fn a_brush_footprint_never_visits_a_cell_twice_away_from_the_cube_corners() {
@@ -2084,7 +2262,16 @@ mod tests {
             .sum();
         assert_eq!(before - after, i64::from(moved), "matter was not conserved");
 
-        let raised = w.deform(0, 0, 32, 32, 2, true);
+        // A raise levels rather than retracing the dig, so it can take more
+        // than one stroke to empty the hand — but every unit comes back.
+        let mut raised = 0;
+        for _ in 0..64 {
+            let r = w.deform(0, 0, 32, 32, 2, true);
+            if r == 0 {
+                break;
+            }
+            raised += r;
+        }
         assert_eq!(raised, moved, "the hand did not give back what it took");
         assert_eq!(w.hand[0].amount, 0);
     }
@@ -2102,8 +2289,9 @@ mod tests {
     #[test]
     fn raising_the_seabed_above_the_sea_leaves_it_dry() {
         // A shelf 40 units under the sea, wide enough that the brush's interior
-        // cells have neighbours that rise with them. Three raises of a terrace
-        // each bring the footprint clear of the water. Then the water pass runs:
+        // cells have neighbours that rise with them. Four raises bring the
+        // footprint clear of the water: the first only up to the terrace line
+        // above it (-40 -> -32), then a terrace each. Then the water pass runs:
         // it is what used to be relied on to drain the land, and what could not,
         // because `(surface difference) / 4` is zero below four units — the
         // interior kept a film for the rest of the match and was never
@@ -2123,7 +2311,7 @@ mod tests {
             }
         }
         w.hand[0] = Hand { material: HAND_EARTH, _pad: 0, amount: HAND_CAPACITY };
-        for _ in 0..3 {
+        for _ in 0..4 {
             assert!(w.deform(0, face, cx, cy, 2, true) > 0, "the raise moved nothing");
         }
         for _ in 0..30 {
@@ -2209,9 +2397,9 @@ mod tests {
         assert_ne!(w.state_hash(), base, "the sudden-death countdown is not hashed");
         w.doom[1] = w.doom[1].wrapping_sub(1);
 
-        w.ai.script_pc = w.ai.script_pc.wrapping_add(1);
+        w.ai[1].decisions = w.ai[1].decisions.wrapping_add(1);
         assert_ne!(w.state_hash(), base, "the scripted opponent's state is not hashed");
-        w.ai.script_pc = w.ai.script_pc.wrapping_sub(1);
+        w.ai[1].decisions = w.ai[1].decisions.wrapping_sub(1);
         assert_eq!(w.state_hash(), base);
 
         w.lava[c] = 7;
