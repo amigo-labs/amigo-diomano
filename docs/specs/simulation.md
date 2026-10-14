@@ -122,6 +122,17 @@ The core free verb is raise/lower land in discrete terrace steps within a brush
 footprint. Terrain change is the *only* mechanism that alters the pathfinding
 graph.
 
+**Raise fills the lowest ground first; lower cuts the highest.** A raise lifts
+every brush cell below the next terrace line above the brush's lowest cell up
+to that line, at most a terrace each; a lower cuts every cell above the line
+below the brush's highest cell down to it. Held, a raise fills the hollows
+until the patch sits on one terrace line and then lifts it together — it
+levels, which is what makes "flatten land, the people build" something a
+player can do on purpose (`World::deform`, `docs/specs/depth.md`). Moving
+every cell a whole terrace from wherever it was preserved every difference it
+started with: on 44 uneven sites, a held raise founded nothing in 45 s; now
+31 of them found a settlement, the median after 5 ticks.
+
 Terrain smoothness is the central strategic axis: rolling terrain yields small
 settlements that spread fast but are weak; flat terrain yields large fortified
 settlements that grow slowly and produce strong walkers. This emerges from one

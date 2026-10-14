@@ -173,12 +173,24 @@ second hand came up full of sea, which went onto a core (`9d72024`).
 
 ## Decisions for a human
 
-1. **Levelling.** Settlements need exactly flat ground and the verbs cannot
-   make it on purpose. Snap raise/lower to terrace lines, give the poured brush
-   a "level to centre" mode, or relax founding to a height tolerance — each
-   moves every fixture and changes what the core verb feels like.
-2. **Wide quakes beside a home core.** Exempt a radius around the core, not
-   just the cell, or accept "shake out the pedestal" as a legitimate kill.
-3. **Spawn asymmetry.** On some seeds one spawn has far more land; the first
-   wave is decided before anyone acts. Mirror the map, or balance the shelves.
-4. **Swamp** stays disabled (§5.4). Nothing measured here argues for it.
+Decided on 2026-10-14 and implemented:
+
+1. **Levelling** — raise fills the brush's lowest ground first, lower cuts its
+   highest (`World::deform`). 0 of 44 uneven sites founded a settlement from
+   a held raise before; 31 of 44 now, the median after 5 ticks.
+2. **Wide quakes beside a home core** — an earthquake spares the whole 5x5
+   platform (`settlements::is_home_platform`), not just the core cell; the
+   opponent's strike clearance shrinks to the platform.
+3. **Spawn asymmetry** — `settlements::balance_spawns` gives the poorer spawn
+   rock above the last wave's line, and for very wide gaps sinks the richer
+   one's outermost land into the last wave's flood band, until both hold
+   within 95% of each other inside the grown core's reach.
+4. **Rush** marches only where the flow field finds a land path from home.
+
+Still open:
+
+5. **Swamp** stays disabled (§5.4). Nothing measured here argues for it.
+6. **Influence beyond the balanced radius.** On one pangaea seed the idle
+   side's settlements on natural plateaus outside the 18-cell window still
+   out-score the normal opponent; fairness is measured inside the core's
+   reach only.

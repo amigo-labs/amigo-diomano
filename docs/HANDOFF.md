@@ -224,6 +224,8 @@ Tick pass order is fixed and load-bearing for determinism:
 
 The core free verb is raise/lower land in discrete terrace steps within a brush
 footprint. Terrain change is the *only* mechanism that alters the pathfinding graph.
+A raise fills the brush's lowest ground first and a lower cuts its highest, so a
+held stroke levels the patch onto one terrace line (`docs/specs/simulation.md`).
 
 Terrain smoothness is the central strategic axis: rolling terrain yields small
 settlements that spread fast but are weak; flat terrain yields large fortified
