@@ -353,16 +353,20 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
     let spaced =
         w.ai[player].strikes == 0 || w.tick.wrapping_sub(w.ai[player].last_strike) >= t.strike_gap;
     if landed >= t.strike_after && spaced {
-        let (verb, power) = if t.volcano && afford(POWER_VOLCANO) {
-            (VERB_VOLCANO, POWER_VOLCANO)
+        // Lava runs, so a vent keeps the clearance a spill does: the platform
+        // is immune to quakes, not to lava, and a vent beside it poured over
+        // the core — the disaster style won every mirror match by sudden
+        // death at five minutes once quakes were allowed that close.
+        let (verb, power, clearance, spot) = if t.volcano && afford(POWER_VOLCANO) {
+            (VERB_VOLCANO, POWER_VOLCANO, SPILL_CLEARANCE, Spot::Vent)
         } else {
-            (VERB_EARTHQUAKE, POWER_EARTHQUAKE)
+            (VERB_EARTHQUAKE, POWER_EARTHQUAKE, CORE_CLEARANCE, Spot::Strike)
         };
         // A town if there is one; once there is none, the enemy's best
         // remaining ground — a home core keeps scoring without a single town.
         if afford(power)
             && let Some(at) =
-                best_enemy_town(w, enemy, true).or_else(|| best_spot(w, player, t, Spot::Strike))
+                best_enemy_town(w, enemy, Some(clearance)).or_else(|| best_spot(w, player, t, spot))
         {
             return Some((verb, at, t.strike_modifier));
         }
@@ -382,7 +386,7 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
     if t.marches
         && !stranded
         && afford(POWER_MAGNET)
-        && let Some(at) = best_enemy_town(w, enemy, false)
+        && let Some(at) = best_enemy_town(w, enemy, None)
     {
         if m.active == 0 || (m.face, m.x, m.y) != at {
             return Some((VERB_MAGNET, at, 0));
@@ -490,15 +494,15 @@ fn armageddon_wins(w: &World, player: usize) -> bool {
 
 /// The enemy settlement most worth breaking: highest tier, then one that
 /// would still score at the next peak, then the lowest slot. `strike` skips
-/// the ones beside a home core (`CORE_CLEARANCE`); a march may go anywhere.
-fn best_enemy_town(w: &World, enemy: usize, strike: bool) -> Option<(u8, u8, u8)> {
+/// the ones within `clearance` of a home core; a march (`None`) may go anywhere.
+fn best_enemy_town(w: &World, enemy: usize, clearance: Option<usize>) -> Option<(u8, u8, u8)> {
     let line = waterline(w);
     let mut best: Option<(i32, usize)> = None;
     for (i, s) in w.settlements.iter().enumerate() {
         if !s.alive()
             || s.owner as usize != enemy
-            || (strike
-                && near_home_core(s.face as usize, s.x as usize, s.y as usize, CORE_CLEARANCE))
+            || clearance
+                .is_some_and(|r| near_home_core(s.face as usize, s.x as usize, s.y as usize, r))
         {
             continue;
         }
@@ -554,6 +558,8 @@ enum Spot {
     Spill,
     /// Where a strike breaks the most enemy ground that would score.
     Strike,
+    /// The same, for a vent: kept as far from a home core as a spill.
+    Vent,
     /// A full hand with nothing worth saving: the deep shelf off its own
     /// coast, which is new land one day and harms nobody now.
     Dump,
@@ -570,7 +576,7 @@ fn best_spot(w: &World, player: usize, t: &Tuning, kind: Spot) -> Option<(u8, u8
         Spot::Build => 4,
         Spot::Dig => 3,
         Spot::Spill => 1,
-        Spot::Strike => 5,
+        Spot::Strike | Spot::Vent => 5,
         Spot::Dump => 1,
     };
     let span = 6 * (N - 2) * (N - 2);
@@ -698,8 +704,10 @@ fn score_spot(
                         score += if town { 4 } else { 1 };
                     }
                 }
-                Spot::Strike => {
-                    if mine || near_home_core(face, x, y, CORE_CLEARANCE) {
+                Spot::Strike | Spot::Vent => {
+                    let clearance =
+                        if kind == Spot::Vent { SPILL_CLEARANCE } else { CORE_CLEARANCE };
+                    if mine || near_home_core(face, x, y, clearance) {
                         return None;
                     }
                     if theirs && h > line && w.habitable(c) {
