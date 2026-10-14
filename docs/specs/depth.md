@@ -129,19 +129,20 @@ the summary counts comebacks (lost the first wave, won the match).
 
 ### Results
 
-Idle player vs. each level, 4 seeds x 3 terrains, five-minute cadence:
+Idle player vs. each level, 4 seeds x 3 terrains, five-minute cadence, on
+`4043797`:
 
 | Opponent | Opponent wins | Decided by | Mean length |
 |---|---|---|---|
-| easy | 8 / 12 | waves | 13:49 |
+| easy | 12 / 12 | waves, every match to 13:49 | 13:49 |
 | normal | 12 / 12 | waves, every match to 13:49 | 13:49 |
-| hard | 12 / 12 | 9 by sudden death after wave 2, 3 by waves | 9:57 |
+| hard | 12 / 12 | waves, every match to 13:49 | 13:49 |
 
-Easy losing a third of its matches to an idle player is the map: on those
-seeds player 0's spawn starts with more land than the opponent's, and an
-opponent that never takes land cannot close that gap. Hard falling under the
-ten-minute floor against a player who does nothing is the floor working as
-intended — it is defined for the default opponent.
+Before the spawn balance, easy lost a third of these to the idle player — the
+map gave player 0 more land than an opponent that never takes land could
+close — and hard won 9 by sudden death after the second wave. Both are gone:
+the spawns start level, and the opponent's digs and strikes keep their
+distance from a home core.
 
 Mirror matches (`just depth`, 2 seeds x 3 terrains per ordered pairing, so
 every cell below is 12 matches from both sides of the planet), on the rules
