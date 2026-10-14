@@ -83,9 +83,12 @@ long enough to watch and followed by a pause. Each decision, in order:
    champions.
 5. **Terraform** — with earth in hand, raise where the most own land (and the
    shelf off its own coast) sits just below the forecast line; otherwise dig
-   where it costs nobody's score: neutral land, the shallows, and — above easy
-   — the enemy's coast. A full hand with nothing to build empties onto its own
-   deep shelf.
+   where it costs nobody's score: the shallows, neutral land away from the
+   enemy's influence, and — above easy — enemy land that one terrace of
+   digging puts under the line. Enemy land that would stay above it is left
+   alone: a held dig levels, and levelled ground founds a town for whoever
+   holds it. A full hand with nothing to build empties onto its own deep
+   shelf.
 
 | | easy | normal | hard |
 |---|---|---|---|
@@ -99,9 +102,11 @@ long enough to watch and followed by a pause. Each decision, in order:
 | Picks | the first good spot | the best spot | the best spot |
 | Floods / armageddon | no / no | yes / no | yes / yes |
 
-Styles modify a level: **turtle** strikes from wave 2 at half the rate and
-never floods or calls armageddon; **rush** marches and strikes from the start;
-**disaster** strikes with volcanoes instead of quakes and floods.
+Styles modify a level: **turtle** strikes at half the rate, holds its raises
+half again as long with half the pause, builds against the *last* wave's line
+instead of the next, and never floods or calls armageddon; **rush** marches
+and strikes from the start; **disaster** strikes with volcanoes instead of
+quakes, from the second wave, floods, and calls armageddon above easy.
 
 ## Measuring it
 
@@ -141,28 +146,27 @@ intended — it is defined for the default opponent.
 Mirror matches (`just depth`, 2 seeds x 3 terrains per ordered pairing, so
 every cell below is 12 matches from both sides of the planet), on the rules
 of 2026-10-14 — levelling, the immune platform, fair and rough spawn land, the
-rush fix (`ebebf69`). All 108 matches ran to 13:49 and were decided on the
-waves; none by sudden death, and the longest quiet stretch in any pairing was
-15 s to 1:32.
+rush fix, the turtle and dig changes and the later volcano (`4043797`). All
+108 matches were decided on the waves, none by sudden death; 104 ran to 13:49
+and 4 ended at 9:40, where hard or disaster called armageddon for the finale.
+The longest quiet stretch in any match was 15 s to 2:08.
 
 | row beats column | easy | normal | hard |
 |---|---|---|---|
-| easy | – | 25% | 0% |
-| normal | 75% | – | 0% |
-| hard | 100% | 100% | – |
+| easy | – | 16% | 0% |
+| normal | 83% | – | 8% |
+| hard | 100% | 91% | – |
 
 | row beats column (normal level) | balanced | turtle | rush | disaster |
 |---|---|---|---|---|
-| balanced | – | 75% | 50% | 50% |
-| turtle | 25% | – | 41% | 8% |
-| rush | 50% | 58% | – | 50% |
-| disaster | 50% | 91% | 50% | – |
+| balanced | – | 50% | 41% | 50% |
+| turtle | 50% | – | 41% | 50% |
+| rush | 58% | 58% | – | 41% |
+| disaster | 50% | 50% | 58% | – |
 
-Every level beats the one below it at least as often as the gate asks (75%;
-normal over easy sits exactly on it). No style beats every other: rush is no
-longer dominated once it stops marching where there is no land, and turtle is
-now the weakest — it waits for the second wave to strike while everyone else
-spends from the first.
+Every level beats the one below it more often than the gate asks (75%). No
+style beats every other, and none is beaten by every other: the widest margin
+is 58%, and turtle, the weakest before, wins 41-50% against each.
 
 The runs that got here, and what each caught:
 
@@ -176,7 +180,17 @@ The runs that got here, and what each caught:
   and the platform is not immune to lava (`1cb29a9`);
 - after fair spawns, the side that had been *given* land won almost every
   match: the land was one flat sheet of rock, a ready-made plateau
-  (`ebebf69`, now rough).
+  (`ebebf69`, now rough);
+- after levelling, an idle player still out-scored the normal opponent on one
+  pangaea seed. Not the spawn balance's radius, as suspected: the opponent's
+  own digs on enemy land above the line cut it level, and the enemy founded
+  towns on it (`29ac721`);
+- once turtle struck from the first wave and digs gave nothing away, disaster
+  beat every style 75-83%. Half the vent pace, vents a size smaller, no
+  floods, no armageddon: each measured, none below 66%. The first vent was
+  what decided — lava over flat land before the second peak cost the enemy
+  about a hundred scoring cells — so it now waits for that peak
+  (`4043797`).
 
 ## Decisions for a human
 
@@ -193,11 +207,11 @@ Decided on 2026-10-14 and implemented:
    one's outermost land into the last wave's flood band, until both hold
    within 95% of each other inside the grown core's reach.
 4. **Rush** marches only where the flow field finds a land path from home.
+5. **Turtle**, the weakest style, builds for the finale and strikes from the
+   first wave at half the rate.
+6. **The pangaea outlier** was the opponent's digs, not the spawn balance's
+   radius; fixed in the opponent.
 
 Still open:
 
-5. **Swamp** stays disabled (§5.4). Nothing measured here argues for it.
-6. **Influence beyond the balanced radius.** On one pangaea seed the idle
-   side's settlements on natural plateaus outside the 18-cell window still
-   out-score the normal opponent; fairness is measured inside the core's
-   reach only.
+7. **Swamp** stays disabled (§5.4). Nothing measured here argues for it.

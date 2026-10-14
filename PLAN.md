@@ -941,8 +941,28 @@ User decisions of 2026-10-14 on the open items of `docs/specs/depth.md`.
 - [x] Mirror sweep on the new rules: every gate holds (normal over easy 75%,
   hard over both 100%, no dominant style), 108/108 matches to 13:49 on the
   waves. Fixtures re-recorded.
-- [ ] Turtle is the weakest style (8-41%); normal over easy sits on the gate.
-- [ ] Influence beyond the balanced radius (one pangaea seed).
+- [x] Turtle is the weakest style (8-41%); normal over easy sits on the gate
+  — step 25.
+- [x] Influence beyond the balanced radius (one pangaea seed) — step 25: it
+  was not the radius.
+
+### 25. A turtle worth playing, a dig that gives nothing away, a later volcano ✅
+
+User decisions of 2026-10-14 on the two items step 24 left open.
+
+- [x] Turtle strikes from the first wave at half the rate, holds its raises
+  half again as long with half the pause, and builds against the *last*
+  wave's line (`Tuning::builds_for_last`).
+- [x] The pangaea outlier was the opponent's own digs: with levelling, a dig
+  on enemy land that stayed above the line cut it flat and founded a town
+  for the enemy. Digs on enemy land now score only where they put it under
+  the line, and neutral ground beside enemy influence is left alone.
+  `balance_spawns` is unchanged. Normal beats an idle player 12 of 12.
+- [x] That made disaster dominant (75-83%). Half the vent pace, smaller
+  vents, no floods and no armageddon were each measured and moved nothing;
+  venting from the second wave did. Mirror sweep: turtle 41-50% against
+  every style, no style above 58%, levels 83/91/100%, no sudden deaths.
+  Corpus re-recorded.
 
 ## Next
 
