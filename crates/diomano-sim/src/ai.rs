@@ -65,13 +65,16 @@ pub const STYLE_RUSH: u8 = 2;
 pub const STYLE_DISASTER: u8 = 3;
 pub const STYLE_COUNT: u8 = 4;
 
-/// Cells around a home core the opponent never strikes inside. Even the core
-/// cell, which a quake leaves standing (`powers::earthquake`), drowns within
-/// seconds once the pedestal around it is broken: the ash slides into the sea
-/// and takes the soil with it. Traced: one quake beside an idle player's core
-/// was sudden death a grace window later — the "my last cell was shaken"
-/// ending docs/specs/pacing.md rules out.
-const CORE_CLEARANCE: usize = 7;
+/// Cells around a home core the opponent never strikes inside: the platform
+/// itself, which a quake leaves alone anyway (`settlements::is_home_platform`).
+/// It was seven while only the core cell was spared and a wide quake beside
+/// it could still shake the pedestal out from under it.
+const CORE_CLEARANCE: usize = 2;
+
+/// Cells around a home core the opponent never pours water or lava inside.
+/// Water on the core is the core under water — sudden death by one pour — and
+/// unlike a quake nothing in the rules stops it.
+const SPILL_CLEARANCE: usize = 7;
 
 /// Cells around a home core the opponent never digs inside, for the same
 /// reason.
@@ -651,7 +654,7 @@ fn score_spot(
                     // went onto the other side's core.
                     if town_mine
                         || mine
-                        || near_home_core(face, x + dx - 1, y + dy - 1, CORE_CLEARANCE)
+                        || near_home_core(face, x + dx - 1, y + dy - 1, SPILL_CLEARANCE)
                     {
                         return None;
                     }

@@ -291,9 +291,12 @@ fn earthquake(w: &mut World, face: usize, cx: i32, cy: i32, radius: i32) {
             }
             let Some((f, x, y)) = walk(face, cx, cy, dx, dy) else { continue };
             let c = idx(f, x, y);
-            // The home cores stand through any quake: sudden death is "my land
-            // drowned", never "my last cell was shaken" (docs/specs/pacing.md).
-            if crate::settlements::is_home_core(c) {
+            // The home platforms stand through any quake: sudden death is "my
+            // land drowned", never "my last cell was shaken"
+            // (docs/specs/pacing.md). The whole 5x5, not the core cell alone —
+            // see `settlements::is_home_platform` for what sparing one cell
+            // still allowed.
+            if crate::settlements::is_home_platform(c) {
                 continue;
             }
             // Alternating dent so the result is broken ground, not a smooth bowl:
@@ -1496,6 +1499,38 @@ enabled = true
         let h_next = w.height[next];
         earthquake(&mut w, face, x as i32, y as i32, 3);
         assert_eq!((w.height[core], w.material[core]), (h, m), "the quake moved the home core");
-        assert_ne!(w.height[next], h_next, "the quake did nothing around the core either");
+        assert_eq!(w.height[next], h_next, "the quake moved the home platform");
+        let outside = idx(face, x + 3, y);
+        assert_ne!(w.height[outside], h_next, "the quake did nothing around the platform either");
+    }
+
+    /// The widest quake there is, centred on the core and on its corner,
+    /// then a minute of physics: the core still stands and the platform is
+    /// what it was. Sparing the core cell alone, this drowned it inside
+    /// fifteen seconds.
+    #[test]
+    fn the_widest_quake_cannot_shake_out_a_home_core() {
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.seed = 0x5EED;
+        let mut w = World::boxed();
+        w.init(&cfg);
+        let (face, x, y) = crate::settlements::STARTS[0];
+        let platform: std::vec::Vec<(usize, i16, u8)> = (-2..=2i32)
+            .flat_map(|dy| (-2..=2i32).map(move |dx| (dx, dy)))
+            .map(|(dx, dy)| {
+                let c = idx(face, (x as i32 + dx) as usize, (y as i32 + dy) as usize);
+                (c, w.height[c], w.material[c])
+            })
+            .collect();
+        let radius = World::brush_radius(crate::world::MOD_THROWN | crate::world::MOD_EXTREME);
+        earthquake(&mut w, face, x as i32, y as i32, radius);
+        earthquake(&mut w, face, x as i32 + 3, y as i32 + 3, radius);
+        for _ in 0..1_800 {
+            w.tick(&[]);
+        }
+        assert!(crate::flowfield::home_core_stands(&w, 0), "the core drowned after two quakes");
+        for (c, h, m) in platform {
+            assert_eq!((w.height[c], w.material[c]), (h, m), "platform cell {c} moved");
+        }
     }
 }

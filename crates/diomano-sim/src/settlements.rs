@@ -310,6 +310,22 @@ pub fn is_home_core(c: usize) -> bool {
     STARTS.iter().any(|&(face, x, y)| crate::world::idx(face, x, y) == c)
 }
 
+/// Inside either spawn's 5x5 platform: the ring `SPAWN_SHELF_INNER` guards.
+///
+/// What an earthquake leaves alone. Sparing the core cell alone was not
+/// enough: a wide quake turned the platform around it to ash, the ash slid
+/// off the shelf into the sea, and the core followed it under within seconds
+/// — sudden death by one cast, the ending `docs/specs/pacing.md` rules out.
+#[must_use]
+pub fn is_home_platform(c: usize) -> bool {
+    let (face, x, y) = crate::world::decode(c);
+    STARTS.iter().any(|&(f, sx, sy)| {
+        f == face
+            && (x - sx as i32).abs() < SPAWN_SHELF_INNER
+            && (y - sy as i32).abs() < SPAWN_SHELF_INNER
+    })
+}
+
 /// Causeway crest band: every dry carved cell lands in
 /// `[CAUSEWAY_CREST_MIN - 2, CAUSEWAY_CREST_MAX]` = `[34, 45]`.
 ///
