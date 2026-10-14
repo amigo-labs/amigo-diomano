@@ -794,12 +794,11 @@ pub fn parse_log_header(src: &str) -> Result<LogHeader, ParseError> {
             // Bitmask over the power ids: bit `i` enables power `i`.
             //
             // Here because §6.3 asks a corpus to cover every verb at least 20
-            // times and the shipped manifest cannot deliver that: §5.4 ships with
-            // swamp disabled, so on the default config `VERB_SWAMP` is inert and
-            // that criterion is unreachable by construction rather than by
-            // accident. A corpus match can enable everything; keeping other
-            // matches on the shipped mask is what keeps the *gating* path covered
-            // too.
+            // times, and a manifest that withholds a power makes that
+            // unreachable by construction: §5.4 shipped with swamp disabled
+            // until step 26 of PLAN.md. A corpus match enables everything;
+            // `fixtures/session.log` states a mask with swamp off (247), which
+            // is what keeps the *gating* path covered too.
             "powers" => {
                 for p in 0..POWER_COUNT {
                     cfg.power_enabled[p] = u8::from((v >> p) & 1 != 0);

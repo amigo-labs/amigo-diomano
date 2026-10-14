@@ -67,12 +67,13 @@ const ALL_VERBS: [u8; 10] = [
 
 /// All eight powers enabled.
 ///
-/// The corpus runs with this rather than the shipped §5.4 manifest, which
-/// disables swamp — on the shipped mask `VERB_SWAMP` is inert, and §6.3's "every
-/// verb at least 20 times" is then unreachable no matter how long the match runs.
-/// Coverage of the *disabled* path is not lost: `fixtures/session.log` is still
-/// recorded on the shipped manifest, so both sides of the gate are exercised, by
-/// different artifacts, on purpose.
+/// The corpus states this rather than inheriting the shipped §5.4 manifest: a
+/// manifest that withholds a power — the shipped one did swamp, until step 26
+/// of PLAN.md — leaves that verb inert, and §6.3's "every verb at least 20
+/// times" is then unreachable no matter how long the match runs. Coverage of
+/// the *disabled* path is not lost: `fixtures/session.log` states a mask with
+/// swamp off (247), so both sides of the gate are exercised, by different
+/// artifacts, on purpose.
 const CORPUS_POWERS: u32 = (1 << POWER_COUNT) - 1;
 
 fn verb_name(verb: u8) -> &'static str {
@@ -975,6 +976,9 @@ struct SweepMatch {
     tiers: [u32; 2],
     /// Combat resolutions over the whole match.
     combat: u32,
+    /// Swamps cast, and the walkers they swallowed per owner.
+    swamps: u32,
+    sunk: [u32; 2],
     /// Longest stretch, in ticks, with nothing a spectator would notice: no
     /// combat, no settlement founded, raised or lost, no power cast (raise
     /// and lower excluded — they never stop), no wave peak.
@@ -1080,6 +1084,8 @@ fn sweep_one(seed: u32, terrain: u8, profile: Profile, level: u8, cap: Option<u3
         settlements,
         tiers,
         combat: w.census.combat_resolutions,
+        swamps: w.census.verb_applied[usize::from(VERB_SWAMP)],
+        sunk: w.census.swamp_victims,
         quiet,
     }
 }
@@ -1131,7 +1137,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
     };
 
     println!(
-        "profile          terrain      seed        end       mm:ss  cause    winner  settle  tiers   combat quiet  peaks (p0/p1 habitable cells held)"
+        "profile          terrain      seed        end       mm:ss  cause    winner  settle  tiers   combat swamp sunk     quiet  peaks (p0/p1 habitable cells held)"
     );
     let mut failures = Vec::new();
     for (_, m) in &results {
@@ -1150,7 +1156,7 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
         let peaks: Vec<String> =
             m.peaks.iter().map(|(t, a, b)| format!("{}@{a}/{b}", mmss(*t))).collect();
         println!(
-            "{:<16} {:<12} {:#010x}  {:<9} {:<6} {:<8} {:<7} {}/{:<5} {}/{:<5} {:<6} {:<6} {}",
+            "{:<16} {:<12} {:#010x}  {:<9} {:<6} {:<8} {:<7} {}/{:<5} {}/{:<5} {:<6} {:<5} {:<8} {:<6} {}",
             m.profile.name(),
             terrain_name(m.terrain),
             m.seed,
@@ -1163,6 +1169,8 @@ fn cmd_sweep(o: &Opts) -> Result<(), String> {
             m.tiers[0],
             m.tiers[1],
             m.combat,
+            m.swamps,
+            format!("{}/{}", m.sunk[0], m.sunk[1]),
             mmss(m.quiet),
             peaks.join(" ")
         );

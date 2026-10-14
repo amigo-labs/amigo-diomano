@@ -41,9 +41,9 @@
 use crate::world::{
     AiState, Command, CommandBuf, HAND_CAPACITY, HAND_EARTH, MOD_EXTREME, MOD_INCREASED, MOD_MASK,
     N, NO_SETTLEMENT, PLAYERS, POWER_ARMAGEDDON, POWER_CHAMPION, POWER_EARTHQUAKE, POWER_FLOOD,
-    POWER_MAGNET, POWER_VOLCANO, TERRACE, TIDE_CALM, TIDE_DONE, TIDE_RECOVERY, VERB_ARMAGEDDON,
-    VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_NOP, VERB_RAISE,
-    VERB_VOLCANO, World, idx, live_neighbour,
+    POWER_MAGNET, POWER_SWAMP, POWER_VOLCANO, TERRACE, TIDE_CALM, TIDE_DONE, TIDE_RECOVERY,
+    VERB_ARMAGEDDON, VERB_CHAMPION, VERB_EARTHQUAKE, VERB_FLOOD, VERB_LOWER, VERB_MAGNET, VERB_NOP,
+    VERB_RAISE, VERB_SWAMP, VERB_VOLCANO, World, idx, live_neighbour,
 };
 
 /// Slow, generous, never steals and never floods. Thinks every four seconds.
@@ -117,6 +117,9 @@ pub struct Tuning {
     /// Builds against the *last* wave's waterline instead of the next one:
     /// ground lifted once that never has to be lifted again.
     pub builds_for_last: bool,
+    /// Every other strike is a swamp on the enemy's best plateau, when one
+    /// is worth it.
+    pub swamps: bool,
 }
 
 /// The tuning for a level and a style. Out-of-range values clamp, so a
@@ -139,6 +142,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             marches: false,
             strike_modifier: 0,
             builds_for_last: false,
+            swamps: false,
         },
         LEVEL_NORMAL => Tuning {
             think: 45,
@@ -155,6 +159,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             marches: false,
             strike_modifier: MOD_INCREASED,
             builds_for_last: false,
+            swamps: true,
         },
         _ => Tuning {
             think: 15,
@@ -171,6 +176,7 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             marches: false,
             strike_modifier: MOD_EXTREME,
             builds_for_last: false,
+            swamps: true,
         },
     };
     match style {
@@ -381,6 +387,15 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
         } else {
             (VERB_EARTHQUAKE, POWER_EARTHQUAKE, CORE_CLEARANCE, Spot::Strike)
         };
+        // Every other strike a swamp, where a plateau of theirs is worth one:
+        // it takes ground a quake only breaks, and whatever walks onto it.
+        if t.swamps
+            && w.ai[player].strikes % 2 == 1
+            && afford(POWER_SWAMP)
+            && let Some(at) = best_spot(w, player, t, Spot::Mire)
+        {
+            return Some((VERB_SWAMP, at, t.strike_modifier));
+        }
         // A town if there is one; once there is none, the enemy's best
         // remaining ground — a home core keeps scoring without a single town.
         if afford(power)
@@ -589,6 +604,10 @@ enum Spot {
     Strike,
     /// The same, for a vent: kept as far from a home core as a spill.
     Vent,
+    /// Where a swamp takes the most enemy ground that would score: their
+    /// land at the height of the cell aimed at, since that is all a swamp
+    /// forms on (`powers::swamp`).
+    Mire,
     /// A full hand with nothing worth saving: the deep shelf off its own
     /// coast, which is new land one day and harms nobody now.
     Dump,
@@ -606,7 +625,7 @@ fn best_spot(w: &World, player: usize, t: &Tuning, kind: Spot) -> Option<(u8, u8
         Spot::Build => 4,
         Spot::Dig => 3,
         Spot::Spill => 1,
-        Spot::Strike | Spot::Vent => 5,
+        Spot::Strike | Spot::Vent | Spot::Mire => 5,
         Spot::Dump => 1,
     };
     let span = 6 * (N - 2) * (N - 2);
@@ -653,6 +672,7 @@ fn score_spot(
     }
     let terrace = i32::from(TERRACE);
     let sea = i32::from(w.sea_level);
+    let level = i32::from(w.height[centre]);
     let mut score = 0i32;
     for dy in 0..3usize {
         for dx in 0..3usize {
@@ -761,6 +781,16 @@ fn score_spot(
                     }
                     if theirs && h > line && w.habitable(c) {
                         score += 1;
+                    }
+                }
+                Spot::Mire => {
+                    // Never its own ground, never beside a home core: a swamp
+                    // is anyone's, and walkers going home walk into it.
+                    if mine || near_home_core(face, x, y, CORE_CLEARANCE) {
+                        return None;
+                    }
+                    if theirs && h == level && h > line && w.habitable(c) {
+                        score += if town { 2 } else { 1 };
                     }
                 }
             }
@@ -1012,7 +1042,7 @@ mod tests {
             n += buf
                 .as_slice()
                 .iter()
-                .filter(|c| c.verb == VERB_EARTHQUAKE || c.verb == VERB_VOLCANO)
+                .filter(|c| matches!(c.verb, VERB_EARTHQUAKE | VERB_VOLCANO | VERB_SWAMP))
                 .count();
             w.tick = w.tick.wrapping_add(1);
         }
@@ -1032,6 +1062,29 @@ mod tests {
         after_waves(&mut w, 2);
         assert_eq!(strikes(&mut w, 0, 2_000), 0, "a broke opponent still paid for a strike");
         assert!(strikes(&mut w, 9_999, 2_000) > 0, "a rich opponent never strikes");
+    }
+
+    #[test]
+    fn a_normal_opponent_swamps_between_its_quakes_and_an_easy_one_never_does() {
+        let run = |level: u8| {
+            let mut w = ai_world();
+            w.cfg.ai_level = [level; PLAYERS];
+            after_waves(&mut w, 2);
+            let mut verbs = std::vec::Vec::new();
+            let mut buf = CommandBuf::new();
+            for _ in 0..20_000 {
+                w.mana[1] = 9_999 << 16;
+                buf.clear();
+                step(&mut w, &mut buf);
+                verbs.extend(buf.as_slice().iter().map(|c| c.verb));
+                w.tick = w.tick.wrapping_add(1);
+            }
+            verbs
+        };
+        let normal = run(LEVEL_NORMAL);
+        assert!(normal.contains(&VERB_SWAMP), "a normal opponent never swamped");
+        assert!(normal.contains(&VERB_EARTHQUAKE), "a normal opponent only swamped");
+        assert!(!run(LEVEL_EASY).contains(&VERB_SWAMP), "an easy opponent swamped");
     }
 
     #[test]
