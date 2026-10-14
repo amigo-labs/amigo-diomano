@@ -822,6 +822,9 @@ pub const SPAWN_FAIR_RADIUS: i32 =
 /// percent, of what the richer one holds.
 pub const SPAWN_FAIR_PERCENT: i32 = 95;
 
+/// Salt for the roughness of given and sunk spawn land.
+const SPAWN_FAIR_SALT: u32 = 0xFA12_5EED;
+
 /// Most cells one spawn may be given, so a freak map cannot turn the sea round
 /// a spawn into a continent.
 const SPAWN_FAIR_MAX_CELLS: usize = 600;
@@ -871,7 +874,7 @@ fn scores_every_wave(w: &World, c: usize, line: i32) -> bool {
 /// anyone had touched anything.
 ///
 /// Raise-only, like the pedestal: seabed, low ground and sand round the poorer
-/// spawn become bare rock at least a terrace above the last peak's waterline, ring by ring
+/// spawn become rough bare rock one to three terraces above the last peak's waterline, ring by ring
 /// outward from the shelf in a fixed order (Chebyshev distance, then flat
 /// index), and only next to ground that is already high — so the new land is
 /// one piece with the spawn's island and the influence projected over
@@ -904,7 +907,7 @@ fn balance_spawns(w: &mut World) {
 fn give_land(w: &mut World, player: usize, mut have: i32, want: i32) -> i32 {
     let (face, cx, cy) = STARTS[player];
     let line = fair_line(w);
-    let new_height = (line + i32::from(crate::world::TERRACE)) as i16;
+    let t = i32::from(crate::world::TERRACE);
     let high = |w: &World, c: usize| i32::from(w.height[c]) > line && w.water[c] == 0;
     let mut given = 0usize;
     for ring in SPAWN_SHELF_INNER..=SPAWN_FAIR_RADIUS {
@@ -930,7 +933,16 @@ fn give_land(w: &mut World, player: usize, mut have: i32, want: i32) -> i32 {
                     if !(0..4).any(|d| high(w, crate::world::live_neighbour(c, d))) {
                         continue;
                     }
-                    w.height[c] = w.height[c].max(new_height);
+                    // Rough, not level: one to three terraces above the line,
+                    // off the terrace grid. Given as one flat sheet of rock it
+                    // was a ready-made plateau — dozens of settlements founded
+                    // themselves on it, and in the mirror sweep the side that
+                    // was given land won almost every match. Rough ground has
+                    // to be levelled like any other.
+                    let jitter = crate::hash::hash3(dx, dy, 0, w.cfg.seed ^ SPAWN_FAIR_SALT);
+                    let rough =
+                        line + t + (jitter % 3) as i32 * t + ((jitter >> 8) % 11) as i32 + 1;
+                    w.height[c] = w.height[c].max(rough as i16);
                     w.material[c] = crate::world::MAT_ROCK;
                     w.water[c] = 0;
                     w.sediment[c] = 0;
@@ -961,7 +973,7 @@ fn give_land(w: &mut World, player: usize, mut have: i32, want: i32) -> i32 {
 fn take_land(w: &mut World, player: usize, mut rich: i32, have: i32) {
     let (face, cx, cy) = STARTS[player];
     let line = fair_line(w);
-    let sunk = (line - i32::from(crate::world::TERRACE)) as i16;
+    let t = i32::from(crate::world::TERRACE);
     let pedestal = (SPAWN_APRON_RADIUS_16 + SPAWN_APRON_WOBBLE_16) / 16 + 1;
     for ring in (pedestal..=SPAWN_FAIR_RADIUS).rev() {
         for dy in -ring..=ring {
@@ -973,7 +985,11 @@ fn take_land(w: &mut World, player: usize, mut rich: i32, have: i32) {
                 if !scores_every_wave(w, c, line) {
                     continue;
                 }
-                w.height[c] = w.height[c].min(sunk);
+                // Rough too, for the same reason: a terrace or two below the
+                // line, off the grid, so the sunk band is no free plateau.
+                let jitter = crate::hash::hash3(dx, dy, 1, w.cfg.seed ^ SPAWN_FAIR_SALT);
+                let sunk = line - t - (jitter % 2) as i32 * t - ((jitter >> 8) % 11) as i32;
+                w.height[c] = w.height[c].min(sunk as i16);
                 rich -= 1;
             }
         }

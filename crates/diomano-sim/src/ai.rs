@@ -61,7 +61,7 @@ pub const STYLE_BALANCED: u8 = 0;
 pub const STYLE_TURTLE: u8 = 1;
 /// Marches on the enemy from the first wave and pays for champions.
 pub const STYLE_RUSH: u8 = 2;
-/// Spends on the sky: volcanoes, floods, armageddon, strikes twice as often.
+/// Spends on the sky: volcanoes instead of quakes, floods, armageddon.
 pub const STYLE_DISASTER: u8 = 3;
 pub const STYLE_COUNT: u8 = 4;
 
@@ -180,8 +180,9 @@ pub const fn tuning(level: u8, style: u8) -> Tuning {
             t.strike_gap = t.strike_gap * 2 / 3;
         }
         STYLE_DISASTER => {
+            // Volcanoes at the level's own pace. At twice the pace it beat
+            // every other style 66-83% of the time in the mirror sweep.
             t.volcano = true;
-            t.strike_gap /= 2;
             t.floods = true;
             t.armageddon = level != LEVEL_EASY;
         }
