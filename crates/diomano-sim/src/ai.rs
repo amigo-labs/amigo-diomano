@@ -368,12 +368,22 @@ fn decide(w: &World, player: usize, t: &Tuning) -> Option<(u8, (u8, u8, u8), u8)
         }
     }
 
-    // 4. March.
+    // 4. March — but only over land. With the magnet on the enemy and no
+    // path to it from home (the flow field's distance there is the fallback's,
+    // `FALLBACK_BASE` and up), a march is mana spent on nothing: on two of the
+    // three terrains the spawns share no land, and the rush style that kept
+    // paying for magnets and champions there won 8-16% of its matches. It
+    // falls through to terraforming until land joins the two peoples; the
+    // flow field notices within fifteen ticks when it does.
+    let m = w.magnet[player];
+    let (hf, hx, hy) = crate::settlements::STARTS[player];
+    let stranded =
+        m.active != 0 && w.dist[player][idx(hf, hx, hy)] >= crate::flowfield::FALLBACK_BASE;
     if t.marches
+        && !stranded
         && afford(POWER_MAGNET)
         && let Some(at) = best_enemy_town(w, enemy, false)
     {
-        let m = w.magnet[player];
         if m.active == 0 || (m.face, m.x, m.y) != at {
             return Some((VERB_MAGNET, at, 0));
         }
@@ -712,7 +722,7 @@ fn near_home_core(face: usize, x: usize, y: usize, r: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::{MapConfig, TERRAIN_PANGAEA, VERB_COUNT, verb_power};
+    use crate::world::{MapConfig, TERRAIN_PANGAEA, VERB_CHAMPION, VERB_COUNT, verb_power};
 
     fn ai_world() -> alloc::boxed::Box<World> {
         let mut cfg = MapConfig::DEFAULT;
@@ -965,8 +975,11 @@ mod tests {
 
     #[test]
     fn strikes_are_spaced() {
+        // After the first wave, not the second: on this map the fair-spawn
+        // pass sank the richer side's outer land below the last wave's line,
+        // so after the second wave there is nothing left worth striking.
         let mut w = ai_world();
-        after_waves(&mut w, 2);
+        after_waves(&mut w, 1);
         let t = tuning(LEVEL_NORMAL, STYLE_BALANCED);
         let n = strikes(&mut w, 9_999, t.strike_gap * 3);
         assert!((1..=4).contains(&n), "{n} strikes in three strike gaps");
@@ -992,6 +1005,33 @@ mod tests {
             }
         }
         assert!(marched, "a rush opponent never sent the army at the enemy");
+    }
+
+    #[test]
+    fn a_rush_with_no_land_to_march_on_buys_no_champions() {
+        // The shipped archipelago: no land joins the spawns. After the first
+        // magnet shows there is no path, not one champion is bought.
+        let mut cfg = MapConfig::DEFAULT;
+        cfg.ai_enabled = 1;
+        cfg.ai_style = [STYLE_RUSH; PLAYERS];
+        let mut w = World::boxed();
+        w.init(&cfg);
+        let mut champions = 0;
+        for _ in 0..6_000 {
+            w.mana[1] = 9_999 << 16;
+            let mut buf = CommandBuf::new();
+            let saved = w.ai;
+            step(&mut w, &mut buf);
+            w.ai = saved;
+            champions += buf.as_slice().iter().filter(|c| c.verb == VERB_CHAMPION).count();
+            w.tick(&[]);
+        }
+        let (f, x, y) = crate::settlements::STARTS[1];
+        assert!(
+            w.dist[1][idx(f, x, y)] >= crate::flowfield::FALLBACK_BASE,
+            "this map was supposed to have no land path"
+        );
+        assert!(champions <= 1, "a stranded rush bought {champions} champions");
     }
 
     #[test]
