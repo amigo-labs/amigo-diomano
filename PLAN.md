@@ -983,8 +983,28 @@ default, enabled if the gates hold. They held; it ships enabled.
   mirror levels 91/100/75%, no style above 65% against all, no sudden
   deaths, about 14 swamps and 14 drowned walkers a match. Corpus re-recorded;
   `session.log` keeps swamp off in its own header.
-- [ ] Turtle is the weakest style again (33-50%): a defensive swamp is the
-  lever. Hard over normal sits on the gate. No sinking effect on screen yet.
+- [x] Turtle is the weakest style again (33-50%): a defensive swamp is the
+  lever — built in step 27, and it was not.
+
+### 27. A turtle that defends with the swamp ✅
+
+User decisions of 2026-10-14/18: a defensive swamp for the turtle, then
+clearing its own; kept although it moves no number, with the measurement
+written down.
+
+- [x] Moats above easy (`Tuning::moats`): `threat` sees three enemy walkers
+  within 12 cells of a town of its own, `moat_spot` swamps their road three
+  to six steps ahead of the front, on the field that walker actually follows
+  (`walkers::movement_field`: a champion walks the other god's), never where
+  the swamp's footprint would reach a town of its own.
+- [x] Clearing (`Tuning::clears_swamps`): its own swamp scores for both raise
+  and dig, and `AiState::clearing` ends the stroke once the swamp under the
+  brush is gone (hashed in `holding`'s byte; the corpus replays unchanged).
+- [x] Measured (`d761a63`): both tables unchanged, turtle 33-50%, idle 12/12,
+  no sudden deaths. Armies only march on pangaea; the turtle loses on
+  archipelago and volcano.
+- [ ] Turtle on the terrains without a land path. Hard over normal sits on
+  the gate. No sinking effect on screen yet.
 
 ## Next
 

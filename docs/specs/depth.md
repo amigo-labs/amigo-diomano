@@ -108,7 +108,12 @@ long enough to watch and followed by a pause. Each decision, in order:
 
 Styles modify a level: **turtle** strikes at half the rate, holds its raises
 half again as long with half the pause, builds against the *last* wave's line
-instead of the next, and never floods or calls armageddon; **rush** marches
+instead of the next, and never floods or calls armageddon; above easy it
+swamps the road an army marches up (a *moat*: three enemy walkers within 12
+cells of one of its towns, a narrow swamp three to six steps ahead of the
+front on the field that walker follows, never where the swamp would reach a
+town of its own) and clears swamp off its own land with the hand, stopping
+the stroke once the swamp is gone; **rush** marches
 and strikes from the start; **disaster** strikes with volcanoes instead of
 quakes, from the second wave, floods, and calls armageddon above easy.
 
@@ -228,7 +233,15 @@ The runs that got here, and what each caught:
   (`4043797`);
 - with the swamp enabled the gates held on the first run (`d995f78`), but
   the margins moved: hard over normal fell to the gate, rush rose from
-  41-58% to 58-66%, and turtle fell back to 33-50%.
+  41-58% to 58-66%, and turtle fell back to 33-50%;
+- turtle's moats (`fb39361`), then moats and clearing its own swamp
+  (`cfafeaa`, and `d761a63` after review), left every cell of both tables
+  exactly where it was — idle 12/12 at every level, 1,578 swamps and 1,498
+  sunk walkers in 108 matches, one 9:40 armageddon, no sudden deaths. The
+  match lines changed (fewer of the turtle's own walkers sank) but not one
+  outcome did. Armies only meet on pangaea, which the turtle already won
+  against rush; it loses on archipelago and volcano, where no army marches
+  and the score falls behind from the second wave on.
 
 ## Decisions for a human
 
@@ -256,9 +269,11 @@ Decided on 2026-10-14 and implemented:
 
 Still open:
 
-8. **Turtle** is the weakest style again with the swamp (33-50%). A
-   defensive swamp — across the approach to its own towns — is the obvious
-   lever and fits the style; not built yet.
+8. **Turtle** is the weakest style again with the swamp (33-50%). The
+   defensive swamp is built — moats across an army's road, its own swamp
+   cleared — and moved nothing (see the runs above): its losses are on the
+   two terrains without a land path, where nothing marches. The next lever
+   is what it builds for the waves there, not how it defends.
 9. **Hard over normal** sits on the 75% gate with the swamp.
 10. **A sinking walker** has no effect of its own on screen; it simply
     vanishes. The client would need the sim to export where walkers sank.
