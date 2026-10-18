@@ -707,7 +707,10 @@ pub struct AiState {
     pub modifier: u8,
     /// 1 while the current move is held, 0 while it pauses afterwards.
     pub holding: u8,
-    pub _pad: u16,
+    /// 1 while the held raise or dig is clearing a swamp off its own land:
+    /// it stops once none is left under the brush.
+    pub clearing: u8,
+    pub _pad: u8,
     /// Tick of the last strike, for the spacing between them.
     pub last_strike: u32,
 }
@@ -879,6 +882,7 @@ impl World {
                 verb: 0,
                 modifier: 0,
                 holding: 0,
+                clearing: 0,
                 _pad: 0,
                 last_strike: 0,
             }; PLAYERS],
@@ -1541,7 +1545,9 @@ impl World {
                     h.write_u8(a.verb);
                 }
                 h.write_u8(a.modifier);
-                h.write_u8(a.holding);
+                // `clearing` shares `holding`'s byte, so a world that never
+                // clears a swamp hashes as it did before there was one.
+                h.write_u8(a.holding | a.clearing << 1);
                 h.write_u32(a.last_strike);
             }
         }
