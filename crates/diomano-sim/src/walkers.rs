@@ -129,6 +129,15 @@ pub fn movement(w: &mut World) {
     }
 }
 
+/// Whose flow field a walker follows. A champion seeks enemy settlements
+/// (§4.7). It does that by following the *opponent's* flow field, which
+/// already points at exactly those targets — no second search, no
+/// special-cased pathfinder.
+pub fn movement_field(wk: &Walker) -> usize {
+    let owner = (wk.owner as usize) % PLAYERS;
+    if wk.flags & WALKER_CHAMPION != 0 { 1 - owner } else { owner }
+}
+
 fn step_walker(w: &mut World, id: usize) {
     let wk = w.walkers[id];
     let owner = (wk.owner as usize) % PLAYERS;
@@ -144,11 +153,7 @@ fn step_walker(w: &mut World, id: usize) {
         return;
     }
 
-    // A champion seeks enemy settlements (§4.7). It does that by following the
-    // *opponent's* flow field, which already points at exactly those targets —
-    // no second search, no special-cased pathfinder.
-    let field = if wk.flags & WALKER_CHAMPION != 0 { 1 - owner } else { owner };
-    let dir = w.flow[field][here];
+    let dir = w.flow[movement_field(&wk)][here];
     if dir == NO_FLOW || dir as usize >= 4 {
         // Standing still — possibly *on* the magnet, whose own cell carries no
         // flow direction. A walker already there when the magnet lands on it
